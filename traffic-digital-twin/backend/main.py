@@ -19,8 +19,9 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from analytics import TrafficAnalytics, VehicleState
@@ -85,6 +86,47 @@ async def ws_endpoint(ws: WebSocket):
     finally:
         _clients.discard(ws)
         logger.info("클라이언트 해제 (총 %d명)", len(_clients))
+
+
+@app.get("/cctvs")
+async def get_cctvs(
+    minX: float = Query(126.93),
+    maxX: float = Query(127.14),
+    minY: float = Query(37.36),
+    maxY: float = Query(37.56),
+):
+    """ITS API에서 현재 뷰 영역의 CCTV 위치 목록 반환"""
+    params = {
+        "apiKey":    ITS_API_KEY,
+        "type":      "its",
+        "cctvType":  "1",
+        "minX": str(minX), "maxX": str(maxX),
+        "minY": str(minY), "maxY": str(maxY),
+        "getType":   "json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(ITS_BASE_URL, params=params)
+            resp.raise_for_status()
+            items = resp.json().get("response", {}).get("data", [])
+            result = []
+            for item in items:
+                try:
+                    lat = float(item.get("coordy") or 0)
+                    lon = float(item.get("coordx") or 0)
+                    if lat and lon:
+                        result.append({
+                            "id":   item.get("cctvid", ""),
+                            "name": item.get("cctvname", item.get("cctvid", "")),
+                            "lat":  lat,
+                            "lon":  lon,
+                        })
+                except (ValueError, TypeError):
+                    continue
+            return result
+    except Exception as e:
+        logger.warning("CCTV 목록 조회 실패: %s", e)
+        return []
 
 
 @app.get("/health")

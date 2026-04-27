@@ -7,16 +7,13 @@ import SpeedGauge    from "./components/SpeedGauge";
 import LOSBadge      from "./components/LOSBadge";
 import ClassPieChart from "./components/ClassPieChart";
 import CounterPanel  from "./components/CounterPanel";
-
-// 실제 replay 데이터가 있는 GPS 중심
-const DATA_CENTER = { lat: 37.4626, lon: 127.0386 };
-const DATA_RADIUS = 0.05; // 약 5km, 이 범위 밖이면 "데이터 없음" 안내
+import CctvPlayer    from "./components/CctvPlayer";
 
 const INITIAL_VIEW = {
-  longitude: DATA_CENTER.lon,
-  latitude:  DATA_CENTER.lat,
-  zoom:      18,
-  pitch:     45,
+  longitude: 127.0386,
+  latitude:  37.4626,
+  zoom:      14,
+  pitch:     0,
   bearing:   0,
 };
 
@@ -42,6 +39,7 @@ export default function App() {
   const [selectedCctv, setSelectedCctv]   = useState(null);
   const [viewState, setViewState]         = useState(INITIAL_VIEW);
   const [cctvLoading, setCctvLoading]     = useState(false);
+  const [switching, setSwitching]         = useState(false);
 
   const vehicles    = frameData?.vehicles      ?? [];
   const avgSpeed    = frameData?.avg_speed_kph ?? 0;
@@ -81,21 +79,21 @@ export default function App() {
       transitionDuration: 1200,
       transitionInterpolator: new FlyToInterpolator(),
     });
+    // 라이브 카메라 전환
+    if (cctv.cctvurl) {
+      setSwitching(true);
+      fetch("http://localhost:8000/switch-camera", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ cctvurl: cctv.cctvurl, lat: cctv.lat, lon: cctv.lon, name: cctv.name ?? "" }),
+      })
+        .catch(() => {})
+        .finally(() => setTimeout(() => setSwitching(false), 3000));
+    }
   }, []);
 
-  const flyToData = useCallback(() => {
-    setSelectedCctv(null);
-    setViewState({
-      ...INITIAL_VIEW,
-      transitionDuration: 1000,
-      transitionInterpolator: new FlyToInterpolator(),
-    });
-  }, []);
-
-  // 현재 뷰 중심이 데이터 범위 밖인지 확인
-  const outOfDataRange =
-    Math.abs(viewState.latitude  - DATA_CENTER.lat) > DATA_RADIUS ||
-    Math.abs(viewState.longitude - DATA_CENTER.lon) > DATA_RADIUS;
+  // CCTV가 로드됐는데 아직 아무것도 선택 안 된 상태
+  const noCameraSelected = cctvList.length > 0 && !selectedCctv;
 
   const speedingVehicles   = vehicles.filter((v) => v.is_speeding);
   const tailgatingVehicles = vehicles.filter((v) => v.is_tailgating);
@@ -150,24 +148,31 @@ export default function App() {
           </div>
         )}
 
-        {/* 데이터 범위 밖 안내 */}
-        {outOfDataRange && (
+        {/* 카메라 미선택 안내 */}
+        {noCameraSelected && (
           <div style={{
-            position: "absolute", top: 12, right: 12,
-            background: "rgba(17,24,39,0.90)", padding: "8px 14px",
-            borderRadius: 8, fontSize: 12, backdropFilter: "blur(4px)",
-            border: "1px solid #374151", maxWidth: 220,
+            position: "absolute", top: "50%", left: "50%",
+            transform: "translate(-50%, -50%)",
+            background: "rgba(17,24,39,0.92)", padding: "18px 28px",
+            borderRadius: 12, fontSize: 14, backdropFilter: "blur(6px)",
+            border: "1px solid #374151", textAlign: "center", pointerEvents: "none",
           }}>
-            <div style={{ color: "#9ca3af", marginBottom: 6 }}>
-              이 위치는 재생 데이터 범위 밖입니다
-            </div>
-            <button onClick={flyToData} style={{
-              background: "#1d4ed8", color: "#fff", border: "none",
-              borderRadius: 6, padding: "4px 10px", fontSize: 12,
-              cursor: "pointer", width: "100%",
-            }}>
-              데이터 위치로 이동
-            </button>
+            <div style={{ fontSize: 28, marginBottom: 8 }}>📷</div>
+            <div style={{ color: "#f9fafb", fontWeight: 600, marginBottom: 4 }}>지도에서 CCTV를 클릭하세요</div>
+            <div style={{ color: "#9ca3af", fontSize: 12 }}>클릭하면 해당 카메라의 실시간 차량 탐지가 시작됩니다</div>
+          </div>
+        )}
+
+        {/* 카메라 전환 중 */}
+        {switching && (
+          <div style={{
+            position: "absolute", top: 52, left: "50%",
+            transform: "translateX(-50%)",
+            background: "rgba(17,24,39,0.90)", padding: "6px 16px",
+            borderRadius: 999, fontSize: 12, backdropFilter: "blur(4px)",
+            border: "1px solid #374151", whiteSpace: "nowrap", color: "#a5b4fc",
+          }}>
+            ⏳ 스트림 연결 중…
           </div>
         )}
 
@@ -210,6 +215,12 @@ export default function App() {
 
         {/* 범례 */}
         <Legend cctvCount={cctvList.length} />
+
+        {/* CCTV 실시간 영상 — 지도 좌하단 플로팅 패널 */}
+        <CctvPlayer
+          cctv={selectedCctv}
+          onClose={() => setSelectedCctv(null)}
+        />
       </div>
 
       {/* 오른쪽: 사이드바 */}

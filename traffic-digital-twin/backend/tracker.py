@@ -25,9 +25,9 @@ class VehicleTracker:
     """
 
     def __init__(self):
-        self._tracker = sv.ByteTracker(
+        self._tracker = sv.ByteTrack(
             frame_rate=BYTE_TRACK_FPS,
-            track_buffer=BYTE_TRACK_BUFFER,
+            lost_track_buffer=BYTE_TRACK_BUFFER,
         )
 
         count_line = sv.LineZone(

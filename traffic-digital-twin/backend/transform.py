@@ -5,9 +5,13 @@ transform.py — Perspective Transform (픽셀 → 실세계 좌표)
   · pixel_to_meter(): 픽셀 (u, v) → (x_m, y_m)  속도 계산용
 """
 
+import logging
+
 import numpy as np
 import cv2
 from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIGHT_M
+
+logger = logging.getLogger(__name__)
 
 
 class PerspectiveTransformer:
@@ -62,6 +66,21 @@ class PerspectiveTransformer:
         arr = np.float32([[p] for p in points])          # (N, 1, 2)
         res = cv2.perspectiveTransform(arr, self._H_gps) # (N, 1, 2)
         return [(float(r[0, 0]), float(r[0, 1])) for r in res]
+
+    def update_gps_center(self, center_lat: float, center_lon: float) -> None:
+        """카메라 GPS 중심점으로 GPS 단응행렬 재계산 (근사 캘리브레이션).
+        카메라 뷰가 약 ±0.0006° lat × ±0.0004° lon(약 130m × 70m) 범위 커버 가정.
+        """
+        dlat, dlon = 0.0006, 0.0004
+        new_gps = np.float32([
+            [center_lat + dlat, center_lon - dlon],
+            [center_lat + dlat, center_lon + dlon],
+            [center_lat - dlat, center_lon + dlon],
+            [center_lat - dlat, center_lon - dlon],
+        ])
+        src = np.float32(PIXEL_POINTS)
+        self._H_gps, _ = cv2.findHomography(src, new_gps)
+        logger.info("GPS 캘리브레이션 갱신: 중심 (%.4f, %.4f)", center_lat, center_lon)
 
     def batch_pixel_to_meter(
         self, points: list[tuple[float, float]]

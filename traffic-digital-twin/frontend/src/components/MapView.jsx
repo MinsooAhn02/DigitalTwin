@@ -115,7 +115,7 @@ export default function MapView({
 
         if (d.id) {
           return {
-            html: `<b>📷 ${d.name || d.id}</b><br/><span style="color:#9ca3af;font-size:11px">클릭하여 이동</span>`,
+            html: `<b>📷 ${d.name || ""}</b><br/><span style="color:#9ca3af;font-size:11px">클릭하여 실시간 전환</span>`,
             style: {
               background: "#111827", color: "#fbbf24",
               fontSize: "12px", borderRadius: "6px", padding: "8px",

@@ -34,7 +34,7 @@ FALLBACK_VIDEO_PATH: str = "assets/test_traffic.mp4"
 
 # ── YOLO 모델 설정 ────────────────────────────────────────────────────
 YOLO_MODEL: str = "yolov8x.pt"
-YOLO_CONF: float = 0.35
+YOLO_CONF: float = 0.25
 YOLO_IOU: float = 0.45
 
 # 탐지 대상 COCO 클래스 ID → 표시명

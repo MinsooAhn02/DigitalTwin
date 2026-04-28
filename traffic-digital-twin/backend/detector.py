@@ -14,6 +14,8 @@ import numpy as np
 from ultralytics import YOLO
 import supervision as sv
 
+import torch
+
 from config import (
     YOLO_MODEL,
     YOLO_IMGSZ,
@@ -40,8 +42,12 @@ class VehicleDetector:
     CLASS_IDS = list(VEHICLE_CLASSES.keys())
 
     def __init__(self):
-        self.model = YOLO(YOLO_MODEL)
-        logger.info("YOLOv8x 모델 로드 완료")
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        is_engine = str(YOLO_MODEL).endswith(".engine")
+        self.model = YOLO(YOLO_MODEL, task="detect")
+        if not is_engine:
+            self.model.to(self._device)
+        logger.info("YOLO 모델 로드 완료: %s  device=%s", YOLO_MODEL, self._device)
 
     def detect(self, frame: np.ndarray) -> sv.Detections:
         results = self.model(
@@ -50,6 +56,7 @@ class VehicleDetector:
             conf=YOLO_CONF,
             iou=YOLO_IOU,
             classes=self.CLASS_IDS,
+            device=self._device,
             verbose=False,
         )[0]
         return sv.Detections.from_ultralytics(results)

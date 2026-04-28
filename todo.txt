@@ -51,10 +51,16 @@
 ==========================================================
 
 [GPU 가속 — 완료]
-- torch 2.6.0+cu124 설치 완료, CUDA available: True
-- 효과 : 추론 속도 5~10배 향상 예상
-- 다음 단계 : yolov8n → yolov8s 또는 yolov8m 으로 업그레이드 가능
-             imgsz 320 → 640 복원으로 탐지 정확도도 함께 개선
+- torch 2.6.0+cu124 설치, RTX 4070 Laptop CUDA 확인
+- yolov8x + imgsz=640 + GPU → ~33ms/frame (~30fps)
+- 캡처 인터벌 100ms → 33ms, JPEG 품질 0.8 → 0.95
+
+[TensorRT FP16 변환 — 완료]
+- yolov8x.pt → yolov8x.engine (FP16) 변환 완료
+- YOLOv8 프레임워크 그대로, 로드 방식만 변경
+- 실측 결과 : 33ms → 9.6ms, ~30fps → ~104fps
+- 정확도 변화 없음 (FP16 오차 < 1%)
+- 캡처 인터벌 33ms → 16ms 적용
 
 [속도 계산 정확도]
 - 현재는 고정 FPS=30 기준으로 속도 계산 → 실제 탐지 주기와 불일치

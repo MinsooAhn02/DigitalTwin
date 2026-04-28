@@ -12,8 +12,10 @@ __pycache__/
 # 환경변수
 .env
 
-# 모델 가중치
+# 모델 가중치 / 변환 파일 (용량 큼, make setup으로 생성)
 *.pt
+*.engine
+*.onnx
 
 # OS
 .DS_Store

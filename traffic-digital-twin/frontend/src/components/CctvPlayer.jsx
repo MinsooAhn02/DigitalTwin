@@ -111,7 +111,7 @@ export default function CctvPlayer({ cctv, onClose }) {
           waitRef.current = true;
         }
       });
-    }, "image/jpeg", 0.8);
+    }, "image/jpeg", 0.95);
   }, []);
 
   // YOLO 탭 활성화 시 캡처 인터벌 시작
@@ -120,7 +120,7 @@ export default function CctvPlayer({ cctv, onClose }) {
       if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
       return;
     }
-    intervalRef.current = setInterval(captureAndSend, 100);  // YOLO 응답 대기 중엔 waitRef가 막아 자동 조절
+    intervalRef.current = setInterval(captureAndSend, 16);  // ~60fps, waitRef가 응답 대기 중 자동 조절
     return () => { clearInterval(intervalRef.current); intervalRef.current = null; };
   }, [tab, captureAndSend]);
 

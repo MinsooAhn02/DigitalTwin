@@ -33,13 +33,13 @@ ITS_CCTV_IDS: list[str] = [
 FALLBACK_VIDEO_PATH: str = "assets/test_traffic.mp4"
 
 # ── YOLO 모델 설정 ────────────────────────────────────────────────────
-# 모델별 CPU 속도 참고 (imgsz=320 기준):
-#   yolov8n  ~50ms  (~20fps)   정확도 낮음
-#   yolov8s  ~100ms (~10fps)   균형
-#   yolov8m  ~200ms (~5fps)    정확도 좋음
-#   yolov8x  ~500ms (~2fps)    최고 정확도
-YOLO_MODEL: str = "yolov8n.pt"
-YOLO_IMGSZ: int = 320    # 추론 해상도 (640→320으로 줄이면 ~4배 빠름, 정확도 소폭 하락)
+# GPU(RTX 4070 Laptop) 기준 속도 참고 (imgsz=640):
+#   yolov8n  ~5ms  (~200fps)   정확도 낮음
+#   yolov8s  ~8ms  (~120fps)   균형
+#   yolov8m  ~15ms (~65fps)    정확도 좋음
+#   yolov8x  ~33ms (~30fps)    최고 정확도  ← 현재 선택
+YOLO_MODEL: str = os.path.join(os.path.dirname(__file__), "yolov8x.engine")
+YOLO_IMGSZ: int = 640
 YOLO_CONF: float = 0.25
 YOLO_IOU: float = 0.45
 

@@ -33,7 +33,17 @@ export default function CctvPlayer({ cctv, onClose }) {
       hlsRef.current = hls;
       hls.on(Hls.Events.MANIFEST_PARSED, () => setHlsLoading(false));
       hls.on(Hls.Events.ERROR, (_, d) => {
-        if (d.fatal) { setHlsError("스트림 연결 실패"); setHlsLoading(false); }
+        if (!d.fatal) return;
+        if (d.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          // 세그먼트 만료(토큰 오류) → 재시도
+          hls.startLoad();
+        } else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          hls.recoverMediaError();
+        } else {
+          // 진짜 복구 불가 에러만 오버레이 표시
+          setHlsError("스트림 연결 실패");
+          setHlsLoading(false);
+        }
       });
       hls.loadSource(cctv.cctvurl);
       hls.attachMedia(video);
@@ -110,7 +120,7 @@ export default function CctvPlayer({ cctv, onClose }) {
       if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
       return;
     }
-    intervalRef.current = setInterval(captureAndSend, 300);  // 최대 ~3fps (YOLO 응답 속도에 따라 자동 조절)
+    intervalRef.current = setInterval(captureAndSend, 100);  // YOLO 응답 대기 중엔 waitRef가 막아 자동 조절
     return () => { clearInterval(intervalRef.current); intervalRef.current = null; };
   }, [tab, captureAndSend]);
 

@@ -230,6 +230,11 @@ async def ws_detect(ws: WebSocket):
 
             # ─ tracker 업데이트 (async 컨텍스트, 단일 스레드 보장) ─
             tracked, in_cnt, out_cnt = tracker.update(detections, (fw, fh))
+            if fid % 10 == 1:   # 10프레임마다 ByteTrack 상태 로그
+                logger.info(
+                    "[ByteTrack] frame=%d  det=%d  tracked=%d  in=%d  out=%d",
+                    fid, len(detections), len(tracked), in_cnt, out_cnt,
+                )
 
             # ─ GPS 변환 + VehicleState 생성 ─
             vehicles: list[VehicleState] = []

@@ -16,6 +16,7 @@ import supervision as sv
 
 from config import (
     YOLO_MODEL,
+    YOLO_IMGSZ,
     YOLO_CONF,
     YOLO_IOU,
     VEHICLE_CLASSES,
@@ -45,6 +46,7 @@ class VehicleDetector:
     def detect(self, frame: np.ndarray) -> sv.Detections:
         results = self.model(
             frame,
+            imgsz=YOLO_IMGSZ,
             conf=YOLO_CONF,
             iou=YOLO_IOU,
             classes=self.CLASS_IDS,

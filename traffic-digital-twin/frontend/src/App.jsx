@@ -40,6 +40,7 @@ export default function App() {
   const [viewState, setViewState]         = useState(INITIAL_VIEW);
   const [cctvLoading, setCctvLoading]     = useState(false);
   const [switching, setSwitching]         = useState(false);
+  const [guideVisible, setGuideVisible]   = useState(true);
 
   const vehicles    = frameData?.vehicles      ?? [];
   const avgSpeed    = frameData?.avg_speed_kph ?? 0;
@@ -65,6 +66,13 @@ export default function App() {
 
   // 초기 로드
   useEffect(() => { fetchCctvs(INITIAL_VIEW); }, []);
+
+  // CCTV 로드 후 5초 뒤 안내 팝업 자동 소멸
+  useEffect(() => {
+    if (cctvList.length === 0) return;
+    const t = setTimeout(() => setGuideVisible(false), 5000);
+    return () => clearTimeout(t);
+  }, [cctvList.length]);
 
   const trailLayer = useTrailLayer(trailMap, vehicles);
 
@@ -92,8 +100,8 @@ export default function App() {
     }
   }, []);
 
-  // CCTV가 로드됐는데 아직 아무것도 선택 안 된 상태
-  const noCameraSelected = cctvList.length > 0 && !selectedCctv;
+  // CCTV 로드 후 5초 안에 선택 안 했을 때만 안내 표시
+  const noCameraSelected = guideVisible && cctvList.length > 0 && !selectedCctv;
 
   const speedingVehicles   = vehicles.filter((v) => v.is_speeding);
   const tailgatingVehicles = vehicles.filter((v) => v.is_tailgating);

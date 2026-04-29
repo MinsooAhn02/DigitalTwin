@@ -1,15 +1,10 @@
 """
 main.py — FastAPI WebSocket 브로드캐스트 서버
 
-  모드 선택 (config.REPLAY_MODE):
-    True  → real_world_track_data.json을 프레임별 재생 (YOLO 불필요)
-    False → ITS HLS 라이브 스트림 + YOLOv8x + ByteTrack
-
   엔드포인트:
     WS   /ws              실시간 JSON 스트림
     GET  /cctvs           뷰포트 범위 CCTV 목록
     POST /switch-camera   라이브 카메라 전환
-    GET  /video_feed      YOLO 어노테이션 MJPEG 스트림
     GET  /health          헬스체크
 """
 
@@ -18,9 +13,7 @@ import asyncio
 import json
 import logging
 import time
-from collections import defaultdict
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import cv2
 import httpx
@@ -34,9 +27,6 @@ from pydantic import BaseModel
 from analytics import TrafficAnalytics, VehicleState
 from config import (
     FPS,
-    REPLAY_MODE,
-    REPLAY_JSON_PATH,
-    REPLAY_FPS,
     ITS_API_KEY,
     ITS_BASE_URL,
     VEHICLE_CLASSES,
@@ -79,21 +69,17 @@ _placeholder_jpeg: bytes = _make_placeholder()
 # ── 앱 생명주기 ───────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if REPLAY_MODE:
-        logger.info("Replay 모드로 시작: %s", REPLAY_JSON_PATH)
-        task = asyncio.create_task(replay_loop())
-    else:
-        from detector import VehicleDetector, VideoStream
-        logger.info("Live 모드: YOLOv8 모델 로드 중…")
-        detector = await asyncio.to_thread(VehicleDetector)
-        stream   = VideoStream()
-        app.state.stream   = stream
-        app.state.detector = detector
-        task = asyncio.create_task(live_loop(detector, stream))
+    from detector import VehicleDetector, VideoStream
+    logger.info("YOLOv8 모델 로드 중…")
+    detector = await asyncio.to_thread(VehicleDetector)
+    stream   = VideoStream()
+    app.state.stream   = stream
+    app.state.detector = detector
+    task = asyncio.create_task(live_loop(detector, stream))
 
     yield
     task.cancel()
-    if not REPLAY_MODE and hasattr(app.state, "stream"):
+    if hasattr(app.state, "stream"):
         app.state.stream.release()
 
 
@@ -338,72 +324,7 @@ async def _safe_send(ws: WebSocket, msg: str) -> None:
 
 
 # ════════════════════════════════════════════════════════════════════════
-# REPLAY 모드 파이프라인
-# ════════════════════════════════════════════════════════════════════════
-def _load_replay_data() -> dict[int, list[dict]]:
-    path = Path(REPLAY_JSON_PATH)
-    if not path.exists():
-        raise FileNotFoundError(f"Replay JSON 없음: {path}")
-    records = json.loads(path.read_text(encoding="utf-8"))
-    by_frame: dict[int, list[dict]] = defaultdict(list)
-    for r in records:
-        by_frame[int(r["frame_id"])].append(r)
-    return by_frame
-
-
-async def replay_loop() -> None:
-    by_frame   = _load_replay_data()
-    frame_ids  = sorted(by_frame.keys())
-    frame_delay = 1.0 / REPLAY_FPS
-
-    in_count = out_count = 0
-    seen_in:  set[int] = set()
-    seen_out: set[int] = set()
-
-    logger.info("Replay 시작: %d 프레임, %d fps", len(frame_ids), REPLAY_FPS)
-
-    while True:
-        for fid in frame_ids:
-            t0 = time.perf_counter()
-            records = by_frame[fid]
-            timestamp_ms = time.time() * 1000
-
-            vehicles: list[VehicleState] = []
-            for r in records:
-                tid      = int(r["tracker_id"])
-                class_id = int(r["class_id"])
-                direction = str(r.get("direction", "Unknown"))
-
-                if direction == "In"  and tid not in seen_in:
-                    seen_in.add(tid); in_count += 1
-                if direction == "Out" and tid not in seen_out:
-                    seen_out.add(tid); out_count += 1
-
-                vs = VehicleState(
-                    track_id=tid,
-                    class_name=VEHICLE_CLASSES.get(class_id, "unknown"),
-                    bbox_xyxy=[0.0, 0.0, 0.0, 0.0],
-                    center_px=(float(r.get("pixel_x", 0)), float(r.get("pixel_y", 0))),
-                    lat=float(r["latitude"]),
-                    lon=float(r["longitude"]),
-                    direction=direction,
-                )
-                vehicles.append(vs)
-
-            result = analytics.update(fid, timestamp_ms, vehicles, in_count, out_count)
-            await _broadcast(result.to_dict())
-
-            elapsed = time.perf_counter() - t0
-            await asyncio.sleep(max(0.0, frame_delay - elapsed))
-
-        logger.info("Replay 루프 완료, 재시작")
-        in_count = out_count = 0
-        seen_in.clear(); seen_out.clear()
-        analytics.__init__()
-
-
-# ════════════════════════════════════════════════════════════════════════
-# LIVE 모드 파이프라인
+# LIVE 파이프라인
 # ════════════════════════════════════════════════════════════════════════
 async def live_loop(detector, stream) -> None:
     from tracker import VehicleTracker

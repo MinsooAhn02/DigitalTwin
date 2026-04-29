@@ -1,0 +1,126 @@
+# Traffic Digital Twin — 현황 정리 (2026-04-29)
+
+==========================================================
+## 처음 구조 vs 지금
+==========================================================
+
+[초기]
+- JSON 파일(real_world_track_data.json)에서 차량 데이터를 재생 (REPLAY 모드)
+- 실제 CCTV 영상 없음, 지도에만 차량 점이 움직이는 수준
+- YOLO 탐지 없음
+
+[지금]
+- ITS 국가교통정보센터 API에서 실제 CCTV HLS 스트림 수신
+- 지도에서 CCTV 아이콘 클릭 → 실시간 영상 팝업 (HLS.js 플레이어)
+- YOLO 탐지 탭에서 바운딩박스 포함 실시간 영상 확인 가능
+- CCTV 선택 후부터만 차량 데이터 지도/사이드바에 표시
+- 탐지된 차량 데이터 : 지도 마커 + 사이드바 통계(속도, LOS, 차종, 카운터) 업데이트
+
+==========================================================
+## 구현 완료 목록
+==========================================================
+
+- ITS OpenAPI 연동 : 현재 뷰포트 기준 CCTV 목록 조회 (/cctvs)
+- HLS 영상 플레이어 : hls.js 기반, 스트림 오류 자동 복구
+- CCTV 패널 : 560px 플로팅 패널, 드래그로 위치 이동 가능
+- 탭 전환 : "실시간" / "YOLO 탐지" 탭
+- YOLO 탐지 파이프라인
+    브라우저 캔버스에서 프레임 캡처 (최대 640px 리사이즈)
+    → WebSocket (ws://localhost:8000/ws/detect)으로 전송
+    → 백엔드 YOLOv8s TensorRT FP16 추론 (~3ms)
+    → 어노테이션 이미지 반환 + 지도/사이드바 브로드캐스트
+- ByteTrack 다중 차량 추적 (supervision 0.27 호환)
+- 속도 / LOS / 과속·꼬리물기·병목 경보
+- 카메라 전환 : CCTV 클릭 시 /switch-camera 호출, 트래커 리셋
+- CCTV 선택 전 데이터 표시 차단 (App.jsx selectedCctv 게이트)
+
+==========================================================
+## 주요 변경 이유
+==========================================================
+
+[브라우저 캔버스 캡처 방식 채택]
+- ITS HLS URL에는 만료 토큰이 붙어있어 OpenCV 백엔드가 직접 열지 못함
+- 대신 브라우저가 이미 재생 중인 영상에서 캔버스로 프레임을 캡처해 WebSocket 전송
+
+[GPU 가속 + TensorRT 도입]
+- CPU 추론(yolov8x) : ~500ms/프레임 → GPU(yolov8x+CUDA) : ~33ms → TensorRT FP16 : ~9.6ms
+- 최종 yolov8s + TensorRT FP16 + imgsz=640 : ~3ms, 스트림 FPS(15~30fps)와 동기화
+
+[supervision ByteTracker → ByteTrack]
+- supervision 0.27에서 API 이름 변경 (track_buffer → lost_track_buffer)
+- 수정 전에는 서버 시작 시 조용히 크래시 → 차량 추적 전혀 안 됨
+
+[waitRef 경쟁 조건 수정]
+- 기존 : waitRef=true를 blob.arrayBuffer() 완료 후 설정 → 비동기 사이에 중복 프레임 전송
+- 수정 : waitRef=true를 비동기 시작 직전 즉시 설정 → 과거/현재 프레임 혼재 현상 해결
+
+[REPLAY 모드 제거]
+- 초기 개발용 JSON 재생 기능 (real_world_track_data.json) 완전 삭제
+- config.py, main.py에서 REPLAY_MODE / REPLAY_JSON_PATH / REPLAY_FPS 제거
+
+==========================================================
+## 남은 개선 과제
+==========================================================
+
+[GPU 가속 — 완료]
+- torch 2.6.0+cu124 설치, RTX 4070 Laptop CUDA 확인
+- yolov8x + imgsz=640 + GPU → ~33ms/frame (~30fps)
+- 캡처 인터벌 100ms → 33ms, JPEG 품질 0.8 → 0.95
+
+[TensorRT FP16 변환 — 완료]
+- yolov8x.pt → yolov8x.engine (FP16) 변환 완료
+- YOLOv8 프레임워크 그대로, 로드 방식만 변경
+- 실측 결과 : 33ms → 9.6ms, ~30fps → ~104fps
+- 정확도 변화 없음 (FP16 오차 < 1%)
+- 캡처 인터벌 33ms → 16ms 적용
+
+[모델 최적화 — 완료]
+
+목표: ITS HLS 스트림 FPS(15~30fps)에 맞춰 전체 파이프라인을 33ms 이내로 맞추기
+
+─ 파이프라인 구간별 오버헤드 측정 ─
+  캔버스 캡처 + JPEG 인코딩     ~8ms
+  WebSocket 왕복 (로컬)         ~3ms
+  백엔드 JPEG 디코딩             ~3ms
+  백엔드 결과 JPEG 인코딩        ~3ms
+  ────────────────────────────────
+  고정 오버헤드 합계             ~17ms
+  → YOLO 추론에 허용되는 예산    ~16ms (33ms 기준)
+
+─ 모델 × imgsz 조합 벤치마크 (TensorRT FP16, RTX 4070 Laptop) ─
+  조합                    추론속도   총 파이프라인   결과
+  yolov8x + imgsz=640     ~9.6ms    ~27ms (~37fps)  ✓ 기존
+  yolov8x + imgsz=320     ~3ms      ~20ms (~50fps)  ✓ 중간 시도
+  yolov8s + imgsz=640     ~3ms      ~20ms (~50fps)  ✓ 최종 선택
+  yolov8s + imgsz=320     ~1.5ms    ~18ms (~55fps)  정확도 손실
+  yolov8n + imgsz=640     ~2ms      ~19ms (~52fps)  정확도 낮음
+  yolov8n + imgsz=320     ~0.8ms    ~18ms (~55fps)  정확도 낮음
+
+─ 최종 선택: yolov8s + imgsz=640 ─
+  이유 1) imgsz를 320으로 줄이면 속도 이득은 1.5ms에 불과하나
+         입력 해상도 절반 → 작은 차량 미검출 위험 증가
+  이유 2) 교통 탐지 대상(차, 트럭, 버스)은 크고 뚜렷한 객체이므로
+         yolov8s 정확도가 yolov8x와 실질적으로 동등
+  이유 3) 추론 9.6ms → 3ms, 총 파이프라인 27ms → 20ms (~50fps)
+         스트림 FPS 대비 충분한 여유 확보
+
+─ 코드 변경 내역 ─
+  파일: backend/config.py
+  변경 전: YOLO_MODEL = ".../yolov8x.engine"
+  변경 후: YOLO_MODEL = ".../yolov8s.engine"
+  (YOLO_IMGSZ는 640 유지, 변경 없음)
+
+  파일: frontend/src/components/CctvPlayer.jsx
+  변경 전: setInterval(captureAndSend, 33)   // ~30fps
+  변경 후: setInterval(captureAndSend, 16)   // ~60fps, waitRef가 실제 속도 조절
+
+─ 현재 설정 ─
+  backend/config.py : YOLO_MODEL=yolov8s.engine, YOLO_IMGSZ=640
+  yolov8s.engine 24.7MB (TensorRT FP16, RTX 4070 Laptop, 2026-04-29 변환)
+  Makefile : bash 호환 조건문으로 수정, ENGINE=backend/yolov8s.engine
+
+[속도 계산 정확도 — 미해결]
+- 현재는 고정 FPS=30 기준으로 속도 계산 → 실제 탐지 주기와 불일치
+- 개선안 : 프레임별 실제 timestamp_ms 델타 사용
+
+==========================================================

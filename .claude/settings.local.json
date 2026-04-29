@@ -1,8 +1,9 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(python -c ' *)",
-      "Bash(python -c \"import main; print\\('OK'\\)\")"
-    ]
-  }
+	"permissions": {
+		"allow": [
+			"Bash(python -c ' *)",
+			"Bash(python -c \"import main; print\\('OK'\\)\")",
+			"Edit"
+		]
+	}
 }

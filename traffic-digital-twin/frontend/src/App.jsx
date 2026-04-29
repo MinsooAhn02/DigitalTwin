@@ -42,17 +42,18 @@ export default function App() {
   const [switching, setSwitching]         = useState(false);
   const [guideVisible, setGuideVisible]   = useState(true);
 
-  const vehicles    = frameData?.vehicles      ?? [];
-  const avgSpeed    = frameData?.avg_speed_kph ?? 0;
-  const losGrade    = frameData?.los_grade     ?? "A";
-  const inCount     = frameData?.in_count      ?? 0;
-  const outCount    = frameData?.out_count     ?? 0;
-  const vehicleCnt  = frameData?.vehicle_count ?? 0;
-  const classCounts = frameData?.class_counts  ?? {};
+  const activeData  = selectedCctv ? frameData : null;
+  const vehicles    = activeData?.vehicles      ?? [];
+  const avgSpeed    = activeData?.avg_speed_kph ?? 0;
+  const losGrade    = activeData?.los_grade     ?? "A";
+  const inCount     = activeData?.in_count      ?? 0;
+  const outCount    = activeData?.out_count     ?? 0;
+  const vehicleCnt  = activeData?.vehicle_count ?? 0;
+  const classCounts = activeData?.class_counts  ?? {};
 
   useEffect(() => {
-    if (frameData) dispatchTrail(vehicles);
-  }, [frameData]);
+    if (activeData) dispatchTrail(vehicles);
+  }, [activeData]);
 
   const fetchCctvs = useCallback((vs) => {
     const { minX, maxX, minY, maxY } = viewBbox(vs ?? viewState);

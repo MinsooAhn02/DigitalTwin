@@ -1,0 +1,37 @@
+Hello everyone.
+For this mid-check, we will show what our system can do now, what problems remain, and what
+we plan to improve next.
+
+We load CCTV locations for the current map area via the ITS OpenAPI and place markers on
+the map. Clicking a marker opens a floating panel that plays the live HLS stream using HLS.js.
+
+The panel has two tabs — live video and YOLO detection. On the YOLO tab, the browser
+captures frames from the video, sends them to the backend via WebSocket, and displays the
+annotated result. We took this approach because the ITS HLS URL contains an expiring token,
+making direct OpenCV access on the backend unreliable.
+
+In the detection pipeline, YOLOv8 identifies cars, buses, trucks, and motorcycles, and
+ByteTrack maintains consistent IDs across frames. Results are reflected on the map and sidebar.
+
+We also fixed a frame-ordering issue where delayed frames could appear after newer ones.
+The backend now drops stale frames so the visualization stays current.
+
+For performance, the target was to match the 15–30 fps of the ITS stream, which means the
+full pipeline — canvas capture, WebSocket round trip, inference, and re-encode — must finish
+within 33ms. Fixed overhead accounts for roughly 17ms, leaving 16ms for inference. After
+benchmarking multiple model and input size combinations with a TensorRT FP16 engine, we
+chose yolov8s + imgsz=640: 3ms inference, ~20ms total, ~50fps throughput. Full resolution
+is preserved to minimize accuracy loss, and for large objects like vehicles yolov8s is
+sufficient.
+
+---
+
+Now, what still needs improvement.
+
+The first issue is measurement accuracy. Speed is currently calculated using a fixed frame rate assumption, but the actual detection interval varies at runtime, so the values are not precise.
+
+The second issue is camera angle. Public CCTV cameras are mounted at various fixed angles, and when the angle is poor, our pixel-to-GPS mapping becomes unreliable — which also makes speed and position estimates less accurate.
+
+The third issue is detection scope. Since we are using street-facing CCTV, the field of view often includes parking lots, sidewalks, or side streets, so parked or off-road vehicles can be picked up as moving traffic and add noise to the data.
+
+These are the main limitations we are aware of at this stage.

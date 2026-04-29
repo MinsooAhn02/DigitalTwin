@@ -11,16 +11,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Replay 모드 ───────────────────────────────────────────────────────
-# REPLAY_MODE=true  → JSON 데이터를 프레임별로 재생 (YOLO/CCTV 불필요)
-# REPLAY_MODE=false → ITS RTSP 라이브 스트림 사용
-REPLAY_MODE: bool = os.getenv("REPLAY_MODE", "true").lower() == "true"
-REPLAY_JSON_PATH: str = os.getenv(
-    "REPLAY_JSON_PATH",
-    r"C:\Users\dksal\OneDrive\바탕 화면\26 Spring\cse 327\tt\real_world_track_data.json",
-)
-REPLAY_FPS: int = int(os.getenv("REPLAY_FPS", "20"))   # 재생 속도 (fps)
-
 # ── ITS 국가교통정보센터 API ──────────────────────────────────────────
 ITS_API_KEY: str = os.getenv("ITS_API_KEY", "YOUR_API_KEY_HERE")
 ITS_BASE_URL: str = "https://openapi.its.go.kr:9443/cctvInfo"
@@ -38,7 +28,7 @@ FALLBACK_VIDEO_PATH: str = "assets/test_traffic.mp4"
 #   yolov8s  ~8ms  (~120fps)   균형
 #   yolov8m  ~15ms (~65fps)    정확도 좋음
 #   yolov8x  ~33ms (~30fps)    최고 정확도  ← 현재 선택
-YOLO_MODEL: str = os.path.join(os.path.dirname(__file__), "yolov8x.engine")
+YOLO_MODEL: str = os.path.join(os.path.dirname(__file__), os.getenv("YOLO_MODEL", "yolov8s.engine"))
 YOLO_IMGSZ: int = 640
 YOLO_CONF: float = 0.25
 YOLO_IOU: float = 0.45

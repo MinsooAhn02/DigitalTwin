@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import Hls from "hls.js";
 
-const PANEL_W = 560;
+const PANEL_W = 720;
 
 export default function CctvPlayer({ cctv, onClose }) {
   const videoRef  = useRef(null);
@@ -73,11 +73,10 @@ export default function CctvPlayer({ cctv, onClose }) {
     ws.onclose = () => { waitRef.current = false; };
 
     ws.onmessage = (e) => {
-      // 응답 받으면 Object URL로 변환해 표시
       const blob = new Blob([e.data], { type: "image/jpeg" });
       const url  = URL.createObjectURL(blob);
       setAnnotatedUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
-      waitRef.current = false;   // 다음 프레임 보낼 수 있음
+      waitRef.current = false;
     };
 
     return () => { ws.close(); wsRef.current = null; waitRef.current = false; };
@@ -201,7 +200,7 @@ export default function CctvPlayer({ cctv, onClose }) {
 
         {/* 실시간 HLS */}
         <video ref={videoRef} muted playsInline style={{
-          width: "100%", height: "100%", objectFit: "cover",
+          width: "100%", height: "100%", objectFit: "contain",
           display: tab === "live" ? "block" : "none",
         }} />
 

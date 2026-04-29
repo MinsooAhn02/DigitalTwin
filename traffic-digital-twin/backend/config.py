@@ -3,7 +3,6 @@ config.py — 전역 설정값 중앙 관리
   · ITS OpenAPI 인증키 / CCTV 채널 목록
   · Perspective Transform 용 픽셀-GPS 대응점
   · 탐지 임계값, 속도 제한, LOS 경계값
-  · Replay 모드 (real_world_track_data.json 기반 시뮬레이션)
 """
 
 import os
@@ -23,12 +22,11 @@ ITS_CCTV_IDS: list[str] = [
 FALLBACK_VIDEO_PATH: str = "assets/test_traffic.mp4"
 
 # ── YOLO 모델 설정 ────────────────────────────────────────────────────
-# GPU(RTX 4070 Laptop) 기준 속도 참고 (imgsz=640):
-#   yolov8n  ~5ms  (~200fps)   정확도 낮음
-#   yolov8s  ~8ms  (~120fps)   균형
-#   yolov8m  ~15ms (~65fps)    정확도 좋음
-#   yolov8x  ~33ms (~30fps)    최고 정확도  ← 현재 선택
-YOLO_MODEL: str = os.path.join(os.path.dirname(__file__), os.getenv("YOLO_MODEL", "yolov8s.engine"))
+# 사용 가능한 engine (TensorRT FP16, RTX 4070 Laptop, imgsz=640 기준):
+#   yolov8x.engine  ~9.6ms (~37fps)  최고 정확도  ← 현재 선택
+#   yolov8s.engine  ~3ms   (~50fps)  균형
+# 전환: YOLO_MODEL=yolov8s.engine 환경변수로 서버 실행 시 변경 가능
+YOLO_MODEL: str = os.path.join(os.path.dirname(__file__), os.getenv("YOLO_MODEL", "yolov8x.engine"))
 YOLO_IMGSZ: int = 640
 YOLO_CONF: float = 0.25
 YOLO_IOU: float = 0.45

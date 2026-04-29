@@ -97,18 +97,24 @@ export default function CctvPlayer({ cctv, onClose }) {
       video.paused
     ) return;
 
-    const w = video.videoWidth  || 640;
-    const h = video.videoHeight || 360;
+    waitRef.current = true;  // 비동기 시작 전에 즉시 잠금
+
+    const srcW = video.videoWidth  || 640;
+    const srcH = video.videoHeight || 360;
+    const scale = Math.min(1, 640 / srcW);
+    const w = Math.round(srcW * scale);
+    const h = Math.round(srcH * scale);
     canvas.width = w;
     canvas.height = h;
     canvas.getContext("2d").drawImage(video, 0, 0, w, h);
 
     canvas.toBlob((blob) => {
-      if (!blob) return;
+      if (!blob) { waitRef.current = false; return; }
       blob.arrayBuffer().then((buf) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           wsRef.current.send(buf);
-          waitRef.current = true;
+        } else {
+          waitRef.current = false;
         }
       });
     }, "image/jpeg", 0.95);

@@ -17,7 +17,7 @@ VENV    = ../.venv
 PIP     = $(VENV)/Scripts/pip
 PY      = $(VENV)/Scripts/python
 UVICORN = $(VENV)/Scripts/uvicorn
-ENGINE  = backend/yolov8x.engine
+ENGINE  = backend/yolov8s.engine
 
 .PHONY: dev _check-python _setup-venv _setup-torch _setup-pip _setup-engine _setup-npm
 
@@ -37,12 +37,12 @@ _check-python:
 
 # ── 가상환경 (없을 때만 생성) ────────────────────────────────────────
 _setup-venv:
-	@if not exist "$(VENV)/Scripts/pip.exe" ( \
-		echo [1/5] 가상환경 생성 중... && \
-		$(PYTHON) -m venv $(VENV) \
-	) else ( \
-		echo [1/5] 가상환경 확인 완료 \
-	)
+	@if [ ! -f "$(VENV)/Scripts/pip.exe" ]; then \
+		echo "[1/5] 가상환경 생성 중..." && \
+		$(PYTHON) -m venv $(VENV); \
+	else \
+		echo "[1/5] 가상환경 확인 완료"; \
+	fi
 
 # ── CUDA PyTorch (CPU 빌드이면 재설치) ──────────────────────────────
 _setup-torch:
@@ -61,19 +61,19 @@ _setup-pip:
 
 # ── TensorRT 엔진 (없을 때만 변환, 3~5분) ───────────────────────────
 _setup-engine:
-	@if not exist "$(ENGINE)" ( \
-		echo [4/5] TensorRT 엔진 생성 중 최초 1회 3~5분 소요... && \
-		$(PY) -c "from ultralytics import YOLO; import shutil,os; m=YOLO('yolov8x.pt'); m.export(format='engine',half=True,device=0,imgsz=640); shutil.move('yolov8x.engine','backend/yolov8x.engine') if os.path.exists('yolov8x.engine') else None; print('엔진 생성 완료')" \
-		|| echo "  TensorRT 엔진 생성 실패 CPU 모드로 동작합니다" \
-	) else ( \
-		echo [4/5] TensorRT 엔진 확인 완료 \
-	)
+	@if [ ! -f "$(ENGINE)" ]; then \
+		echo "[4/5] TensorRT 엔진 생성 중 (최초 1회 ~7분 소요)..." && \
+		$(PY) -c "from ultralytics import YOLO; import shutil,os; m=YOLO('yolov8s.pt'); m.export(format='engine',half=True,device=0,imgsz=640); shutil.move('yolov8s.engine','backend/yolov8s.engine') if os.path.exists('yolov8s.engine') else None; print('엔진 생성 완료')" \
+		|| echo "  TensorRT 엔진 생성 실패"; \
+	else \
+		echo "[4/5] TensorRT 엔진 확인 완료"; \
+	fi
 
 # ── 프론트엔드 패키지 ────────────────────────────────────────────────
 _setup-npm:
-	@if not exist "frontend/node_modules" ( \
-		echo [5/5] 프론트엔드 패키지 설치 중... && \
-		cd frontend && npm install -q \
-	) else ( \
-		echo [5/5] 프론트엔드 패키지 확인 완료 \
-	)
+	@if [ ! -d "frontend/node_modules" ]; then \
+		echo "[5/5] 프론트엔드 패키지 설치 중..." && \
+		cd frontend && npm install -q; \
+	else \
+		echo "[5/5] 프론트엔드 패키지 확인 완료"; \
+	fi

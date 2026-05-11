@@ -1,9 +1,13 @@
 {
+	"model": "claude-sonnet-4-6",
+	"autoMemoryEnabled": false,
+	"autoDreamEnabled": false,
+	"spinnerTipsEnabled": false,
 	"permissions": {
-		"allow": [
-			"Bash(python -c ' *)",
-			"Bash(python -c \"import main; print\\('OK'\\)\")",
-			"Edit"
-		]
+		"allow": [],
+		"deny": []
+	},
+	"env": {
+		"CLAUDE_NO_COST_WARNINGS": "1"
 	}
 }

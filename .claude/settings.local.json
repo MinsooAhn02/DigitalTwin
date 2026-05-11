@@ -1,13 +1,21 @@
 {
-	"model": "claude-sonnet-4-6",
-	"autoMemoryEnabled": false,
-	"autoDreamEnabled": false,
-	"spinnerTipsEnabled": false,
-	"permissions": {
-		"allow": [],
-		"deny": []
-	},
-	"env": {
-		"CLAUDE_NO_COST_WARNINGS": "1"
-	}
+  "model": "claude-sonnet-4-6",
+  "autoMemoryEnabled": false,
+  "autoDreamEnabled": false,
+  "spinnerTipsEnabled": false,
+  "permissions": {
+    "allow": [],
+    "deny": []
+  },
+  "env": {
+    "CLAUDE_NO_COST_WARNINGS": "1"
+  },
+  "mcpServers": {
+    "qmd": {
+      "command": "qmd",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
 }

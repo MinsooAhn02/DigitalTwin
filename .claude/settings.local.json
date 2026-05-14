@@ -1,15 +1,17 @@
 {
-  "model": "claude-sonnet-4-6",
-  "autoMemoryEnabled": false,
-  "autoDreamEnabled": false,
-  "spinnerTipsEnabled": false,
-  "permissions": {
-    "allow": [],
-    "deny": []
-  },
   "env": {
     "CLAUDE_NO_COST_WARNINGS": "1"
   },
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dksal\\\\OneDrive\\\\바탕 화면\\\\26 Spring\\\\cse 327\\\\DigitalTwin\\\\traffic-digital-twin\" -File -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.Extension -in @\\('.txt', '.json', '.yaml', '.yml', '.env', '.py', '.html', '.css', '.js'\\)} | Select-Object -ExpandProperty FullName | Sort-Object)"
+    ],
+    "deny": []
+  },
+  "model": "claude-sonnet-4-6",
+  "spinnerTipsEnabled": false,
+  "autoMemoryEnabled": false,
+  "autoDreamEnabled": false,
   "mcpServers": {
     "qmd": {
       "command": "qmd",

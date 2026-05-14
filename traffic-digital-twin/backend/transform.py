@@ -6,10 +6,11 @@ transform.py — Perspective Transform (픽셀 → 실세계 좌표)
 """
 
 import logging
+import math
 
 import numpy as np
 import cv2
-from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIGHT_M
+from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIGHT_M, CAMERA_BEARING_DEG
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +43,30 @@ class PerspectiveTransformer:
         ])
         self._H_meter, _ = cv2.findHomography(src, dst_meter)
 
+        # 카메라 베어링 보정을 위한 캐시
+        self._bearing_rad: float = math.radians(CAMERA_BEARING_DEG)
+        gps_arr = np.float32(gps_pts)
+        self._gps_center_lat: float = float(np.mean(gps_arr[:, 0]))
+        self._gps_center_lon: float = float(np.mean(gps_arr[:, 1]))
+
     # ──────────────────────────────────────────────────────────────────
     def pixel_to_gps(self, u: float, v: float) -> tuple[float, float]:
-        """픽셀 (u, v) → (latitude, longitude)"""
+        """픽셀 (u, v) → (latitude, longitude), 카메라 베어링 보정 포함."""
         pt = np.float32([[[u, v]]])
         result = cv2.perspectiveTransform(pt, self._H_gps)  # (1,1,2)
         lat, lon = float(result[0, 0, 0]), float(result[0, 0, 1])
-        return lat, lon
+
+        if self._bearing_rad == 0.0:
+            return lat, lon
+
+        # GPS 중심 기준 델타를 bearing 각도로 회전
+        dlat = lat - self._gps_center_lat
+        dlon = lon - self._gps_center_lon
+        cos_b = math.cos(self._bearing_rad)
+        sin_b = math.sin(self._bearing_rad)
+        new_dlat = cos_b * dlat - sin_b * dlon
+        new_dlon = sin_b * dlat + cos_b * dlon
+        return self._gps_center_lat + new_dlat, self._gps_center_lon + new_dlon
 
     def pixel_to_meter(self, u: float, v: float) -> tuple[float, float]:
         """픽셀 (u, v) → (x_m, y_m) — 속도 계산용 실세계 미터 좌표"""
@@ -80,6 +98,9 @@ class PerspectiveTransformer:
         ])
         src = np.float32(PIXEL_POINTS)
         self._H_gps, _ = cv2.findHomography(src, new_gps)
+        self._bearing_rad = math.radians(CAMERA_BEARING_DEG)
+        self._gps_center_lat = float(np.mean(new_gps[:, 0]))
+        self._gps_center_lon = float(np.mean(new_gps[:, 1]))
         logger.info("GPS 캘리브레이션 갱신: 중심 (%.4f, %.4f)", center_lat, center_lon)
 
     def batch_pixel_to_meter(

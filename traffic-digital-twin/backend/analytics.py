@@ -3,9 +3,7 @@ analytics.py — 교통 지표 계산 엔진
   입력: VehicleState 리스트 (GPS 좌표 포함)
   출력: FrameAnalytics (JSON 직렬화 가능)
 
-  속도 계산:
-    · Live 모드  → Bird-eye 미터 좌표 유클리드 거리
-    · Replay 모드 → GPS Haversine 거리 (더 정확)
+  경보: 과속(speed > limit) + 병목(연속 정지 >= threshold)
 """
 
 from __future__ import annotations
@@ -14,15 +12,17 @@ from collections import defaultdict
 import math
 
 from config import (
-    FPS,
     SPEED_LIMIT_KPH,
-    TAILGATING_THRESHOLD_M,
     BOTTLENECK_DWELL_FRAMES,
     LOS_THRESHOLDS,
+    SPEED_JITTER_THRESHOLD_M,
+    SPEED_SMOOTHING_ALPHA,
+    PARKED_FRAMES_THRESHOLD,
+    PARKED_POSITION_RADIUS_PX,
 )
 
 # ── Haversine 거리 계산 ───────────────────────────────────────────────
-_R_EARTH = 6_371_000.0  # 지구 반지름 (m)
+_R_EARTH = 6_371_000.0
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """두 GPS 좌표 간 거리 (미터)."""
@@ -47,10 +47,9 @@ class VehicleState:
     direction:     str   = "Unknown"   # "In" / "Out" / "Unknown"
     speed_kph:     float = 0.0
     is_speeding:   bool  = False
-    headway_m:     float = float("inf")
-    is_tailgating: bool  = False
     dwell_frames:  int   = 0
     is_bottleneck: bool  = False
+    is_parked:     bool  = False
     lane_id:       int   = -1
 
 
@@ -68,21 +67,19 @@ class FrameAnalytics:
     class_counts:  dict       = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        # float("inf") → JSON 직렬화 불가 → 치환
-        for v in d.get("vehicles", []):
-            if v.get("headway_m", 0) == float("inf"):
-                v["headway_m"] = -1
-        return d
+        return asdict(self)
 
 
 # ── 분석 엔진 ──────────────────────────────────────────────────────────
 class TrafficAnalytics:
 
     def __init__(self):
-        # track_id → (lat, lon, x_m, y_m)
-        self._prev: dict[int, tuple[float, float, float, float]] = {}
+        # track_id → (lat, lon, x_m, y_m, timestamp_s)
+        self._prev: dict[int, tuple[float, float, float, float, float]] = {}
         self._dwell: dict[int, int] = defaultdict(int)
+        self._speed_ema: dict[int, float] = {}
+        # 주차 확정된 픽셀 위치 목록 — track_id 변경에도 유지
+        self._parked_positions: list[tuple[float, float]] = []
 
     def update(
         self,
@@ -96,71 +93,99 @@ class TrafficAnalytics:
         active = {v.track_id for v in vehicles}
         self._gc(active)
 
+        current_ts = timestamp_ms / 1000.0
+
+        # 위치 기반 주차 즉시 분류 (track_id 바뀌어도 적용)
         for v in vehicles:
-            self._speed(v)
+            if self._is_near_parked(v.center_px):
+                v.is_parked = True
+                self._dwell[v.track_id] = PARKED_FRAMES_THRESHOLD
+
+        for v in vehicles:
+            self._speed(v, current_ts)
             self._dwell_update(v)
 
-        self._headway(vehicles)
+        # 통계·경보는 주차 차량 제외
+        active_vehicles = [v for v in vehicles if not v.is_parked]
 
         result = FrameAnalytics(
             frame_id=frame_id,
             timestamp_ms=timestamp_ms,
-            vehicles=[asdict(v) for v in vehicles],
-            vehicle_count=len(vehicles),
-            avg_speed_kph=self._avg_speed(vehicles),
-            los_grade=self._los(len(vehicles)),
+            vehicles=[asdict(v) for v in vehicles],        # 지도 표시는 전체
+            vehicle_count=len(active_vehicles),
+            avg_speed_kph=self._avg_speed(active_vehicles),
+            los_grade=self._los(len(active_vehicles)),
             in_count=in_count,
             out_count=out_count,
-            class_counts=self._class_counts(vehicles),
+            class_counts=self._class_counts(active_vehicles),
         )
 
         for v in vehicles:
-            self._prev[v.track_id] = (v.lat, v.lon, v.x_m, v.y_m)
-
-        # inf → -1 for JSON
-        for vd in result.vehicles:
-            if vd.get("headway_m") == float("inf"):
-                vd["headway_m"] = -1
+            self._prev[v.track_id] = (v.lat, v.lon, v.x_m, v.y_m, current_ts)
 
         return result
 
     # ──────────────────────────────────────────────────────────────────
-    def _speed(self, v: VehicleState) -> None:
+    def _is_near_parked(self, center_px: tuple[float, float]) -> bool:
+        cx, cy = center_px
+        return any(
+            math.hypot(cx - px, cy - py) < PARKED_POSITION_RADIUS_PX
+            for px, py in self._parked_positions
+        )
+
+    def _speed(self, v: VehicleState, current_ts: float) -> None:
+        if v.is_parked:
+            return
         prev = self._prev.get(v.track_id)
         if prev is None:
             return
-        plat, plon, px_m, py_m = prev
+        plat, plon, px_m, py_m, prev_ts = prev
 
-        # GPS가 유효하면 Haversine 우선, 아니면 미터 좌표
+        dt = current_ts - prev_ts
+        if dt <= 0:
+            return
+
         if plat != 0.0 and v.lat != 0.0:
             dist_m = haversine_m(plat, plon, v.lat, v.lon)
         else:
             dist_m = math.hypot(v.x_m - px_m, v.y_m - py_m)
 
-        v.speed_kph = round(dist_m * FPS * 3.6, 1)
+        # 지터 미만 이동은 즉시 정지 처리
+        if dist_m < SPEED_JITTER_THRESHOLD_M:
+            self._speed_ema[v.track_id] = 0.0
+            v.speed_kph = 0.0
+            v.is_speeding = False
+            return
+
+        raw_kph = dist_m / dt * 3.6
+        prev_ema = self._speed_ema.get(v.track_id, raw_kph)
+        smoothed = SPEED_SMOOTHING_ALPHA * raw_kph + (1.0 - SPEED_SMOOTHING_ALPHA) * prev_ema
+        self._speed_ema[v.track_id] = smoothed
+
+        v.speed_kph = round(smoothed, 1)
         v.is_speeding = v.speed_kph > SPEED_LIMIT_KPH
 
     def _dwell_update(self, v: VehicleState) -> None:
-        self._dwell[v.track_id] += 1
+        if v.is_parked:
+            v.dwell_frames = PARKED_FRAMES_THRESHOLD
+            v.is_bottleneck = False
+            return
+
+        if v.speed_kph == 0.0:
+            self._dwell[v.track_id] += 1
+        else:
+            self._dwell[v.track_id] = 0
+
         v.dwell_frames = self._dwell[v.track_id]
         v.is_bottleneck = v.dwell_frames >= BOTTLENECK_DWELL_FRAMES
+        v.is_parked = v.dwell_frames >= PARKED_FRAMES_THRESHOLD
 
-    def _headway(self, vehicles: list[VehicleState]) -> None:
-        if len(vehicles) < 2:
-            return
-        by_lane: dict[int, list[VehicleState]] = defaultdict(list)
-        for v in vehicles:
-            by_lane[v.lane_id].append(v)
-        for group in by_lane.values():
-            sorted_v = sorted(group, key=lambda v: v.y_m)
-            for i, v in enumerate(sorted_v):
-                if i == 0:
-                    continue
-                leader = sorted_v[i - 1]
-                v.headway_m = round(
-                    haversine_m(v.lat, v.lon, leader.lat, leader.lon), 2
-                ) if v.lat != 0 else math.hypot(v.x_m - leader.x_m, v.y_m - leader.y_m)
-                v.is_tailgating = 0 < v.headway_m < TAILGATING_THRESHOLD_M
+        # 새로 주차 확정 시 위치 등록
+        if v.is_parked:
+            v.is_bottleneck = False
+            cx, cy = v.center_px
+            if not self._is_near_parked((cx, cy)):
+                self._parked_positions.append((cx, cy))
 
     def _los(self, count: int) -> str:
         for grade, threshold in LOS_THRESHOLDS.items():
@@ -185,3 +210,4 @@ class TrafficAnalytics:
         for tid in lost:
             self._prev.pop(tid, None)
             self._dwell.pop(tid, None)
+            self._speed_ema.pop(tid, None)

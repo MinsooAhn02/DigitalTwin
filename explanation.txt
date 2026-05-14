@@ -1,126 +1,408 @@
-# Traffic Digital Twin — 현황 정리 (2026-04-29)
+# Traffic Digital Twin — 전체 시스템 설명서 (2026-05-14)
 
 ==========================================================
-## 처음 구조 vs 지금
+## 1. 프로젝트 개요
 ==========================================================
 
-[초기]
-- JSON 파일(real_world_track_data.json)에서 차량 데이터를 재생 (REPLAY 모드)
-- 실제 CCTV 영상 없음, 지도에만 차량 점이 움직이는 수준
-- YOLO 탐지 없음
+실제 도로의 CCTV 스트림을 수신하여 차량을 탐지·추적하고,
+지도 위에 실시간으로 시각화하는 교통 디지털 트윈 시스템.
 
-[지금]
-- ITS 국가교통정보센터 API에서 실제 CCTV HLS 스트림 수신
-- 지도에서 CCTV 아이콘 클릭 → 실시간 영상 팝업 (HLS.js 플레이어)
-- YOLO 탐지 탭에서 바운딩박스 포함 실시간 영상 확인 가능
-- CCTV 선택 후부터만 차량 데이터 지도/사이드바에 표시
-- 탐지된 차량 데이터 : 지도 마커 + 사이드바 통계(속도, LOS, 차종, 카운터) 업데이트
+목적:
+  - 실제 도로 상황(속도, LOS, 과속, 병목)을 실시간으로 디지털화
+  - CCTV 영상 → AI 탐지 → 지도 시각화 전 과정 파이프라인 구축
+  - 국가교통정보센터(ITS) OpenAPI와 연동한 실제 데이터 기반 시스템
 
 ==========================================================
-## 구현 완료 목록
+## 2. 기술 스택 (언어 / 프레임워크 / 라이브러리)
 ==========================================================
 
-- ITS OpenAPI 연동 : 현재 뷰포트 기준 CCTV 목록 조회 (/cctvs)
-- HLS 영상 플레이어 : hls.js 기반, 스트림 오류 자동 복구
-- CCTV 패널 : 560px 플로팅 패널, 드래그로 위치 이동 가능
-- 탭 전환 : "실시간" / "YOLO 탐지" 탭
-- YOLO 탐지 파이프라인
-    브라우저 캔버스에서 프레임 캡처 (최대 640px 리사이즈)
-    → WebSocket (ws://localhost:8000/ws/detect)으로 전송
-    → 백엔드 YOLOv8s TensorRT FP16 추론 (~3ms)
-    → 어노테이션 이미지 반환 + 지도/사이드바 브로드캐스트
-- ByteTrack 다중 차량 추적 (supervision 0.27 호환)
-- 속도 / LOS / 과속·꼬리물기·병목 경보
-- 카메라 전환 : CCTV 클릭 시 /switch-camera 호출, 트래커 리셋
-- CCTV 선택 전 데이터 표시 차단 (App.jsx selectedCctv 게이트)
+[ 백엔드 — Python 3.11 ]
+
+  언어        Python 3.11
+  웹 서버     FastAPI (비동기 REST + WebSocket)
+              Uvicorn (ASGI 런타임)
+  AI          ultralytics YOLOv8x / YOLOv8s (객체 탐지)
+              TensorRT FP16 (.engine) — GPU 가속 추론
+              torch 2.6.0+cu124 (PyTorch, CUDA 12.4)
+  추적        BoT-SORT (ultralytics 내장, appearance ReID)
+              supervision (탐지 결과 래핑, LineZone 카운팅)
+  영상 처리   OpenCV-Python (cv2) — 프레임 디코딩/인코딩
+              FFmpeg 백엔드 — HLS(m3u8) 스트림 디코딩
+  HTTP 클라이언트  httpx (비동기, ITS API 호출)
+  설정 관리   python-dotenv (.env → 환경변수)
+  기타        numpy, pydantic (데이터 모델)
+
+[ 프론트엔드 — JavaScript (ES2022 + JSX) ]
+
+  런타임/빌드  Node.js + Vite
+  UI 프레임워크  React 18 (함수형 컴포넌트, Hooks)
+  지도/시각화  deck.gl (ScatterplotLayer, TextLayer, TripsLayer)
+              react-map-gl + MapLibre GL (벡터 타일 지도)
+              카토(Carto) Dark Matter 스타일 (dark 테마)
+  HLS 플레이어  hls.js (브라우저에서 HLS m3u8 재생)
+  차트        Recharts (ClassPieChart)
+  WebSocket   브라우저 네이티브 WebSocket API
+  상태 관리   React useState / useReducer / useRef / useCallback
+  기타        fetch API (REST 통신)
+
+[ 외부 서비스 ]
+
+  ITS 국가교통정보센터 OpenAPI
+    - 엔드포인트: https://openapi.its.go.kr:9443/cctvInfo
+    - 현재 뷰포트 bbox 기준 CCTV 목록(위치 + HLS URL) 조회
+    - HLS URL은 만료 토큰 포함 → 자동 갱신 로직 적용
+
+[ 하드웨어 기준 (개발/측정 환경) ]
+
+  GPU   NVIDIA RTX 4070 Laptop (CUDA 12.4)
+  엔진  yolov8x.engine (TensorRT FP16, imgsz=640) → ~9.6ms/frame
+        yolov8s.engine (TensorRT FP16, imgsz=640) → ~3ms/frame
 
 ==========================================================
-## 주요 변경 이유
+## 3. 전체 아키텍처 및 데이터 흐름
 ==========================================================
 
-[브라우저 캔버스 캡처 방식 채택]
-- ITS HLS URL에는 만료 토큰이 붙어있어 OpenCV 백엔드가 직접 열지 못함
-- 대신 브라우저가 이미 재생 중인 영상에서 캔버스로 프레임을 캡처해 WebSocket 전송
-
-[GPU 가속 + TensorRT 도입]
-- CPU 추론(yolov8x) : ~500ms/프레임 → GPU(yolov8x+CUDA) : ~33ms → TensorRT FP16 : ~9.6ms
-- 최종 yolov8s + TensorRT FP16 + imgsz=640 : ~3ms, 스트림 FPS(15~30fps)와 동기화
-
-[supervision ByteTracker → ByteTrack]
-- supervision 0.27에서 API 이름 변경 (track_buffer → lost_track_buffer)
-- 수정 전에는 서버 시작 시 조용히 크래시 → 차량 추적 전혀 안 됨
-
-[waitRef 경쟁 조건 수정]
-- 기존 : waitRef=true를 blob.arrayBuffer() 완료 후 설정 → 비동기 사이에 중복 프레임 전송
-- 수정 : waitRef=true를 비동기 시작 직전 즉시 설정 → 과거/현재 프레임 혼재 현상 해결
-
-[REPLAY 모드 제거]
-- 초기 개발용 JSON 재생 기능 (real_world_track_data.json) 완전 삭제
-- config.py, main.py에서 REPLAY_MODE / REPLAY_JSON_PATH / REPLAY_FPS 제거
+  ┌─────────────────────────────────────────────────────┐
+  │                   브라우저 (React)                   │
+  │                                                     │
+  │  지도 클릭 CCTV    ──POST /switch-camera──►          │
+  │                                                     │
+  │  <video> HLS 재생  ←── hls.js ← ITS HLS URL         │
+  │      │ 캔버스 캡처 (640px JPEG)                       │
+  │      ▼                                              │
+  │  WebSocket /ws/detect ──JPEG bytes──►               │
+  │      ◄──── 어노테이션 JPEG (BoT-SORT 박스)           │
+  │                                                     │
+  │  WebSocket /ws     ◄──── JSON 브로드캐스트           │
+  │  (지도 마커 / 사이드바 통계 실시간 업데이트)            │
+  └─────────────────────────────────────────────────────┘
+           │                         ▲
+    REST / WS                   브로드캐스트
+           │                         │
+  ┌────────▼─────────────────────────┴──────────────────┐
+  │                FastAPI 백엔드                        │
+  │                                                     │
+  │  /ws/detect 핸들러                                  │
+  │    JPEG 수신 → detector.track() [BoT-SORT + YOLO]   │
+  │    → VehicleTracker.update() [LineZone 카운팅]       │
+  │    → PerspectiveTransformer [픽셀→GPS]              │
+  │    → TrafficAnalytics.update() [속도/LOS/경보]       │
+  │    → _broadcast() [JSON → /ws 클라이언트들]          │
+  │    → 어노테이션 JPEG 반환                            │
+  │                                                     │
+  │  live_loop (백그라운드)                             │
+  │    OpenCV HLS → detector.track() → 동일 파이프라인  │
+  │    (브라우저 없이도 서버사이드 처리 가능)              │
+  │                                                     │
+  │  hls_refresh_loop (백그라운드, 30분마다)             │
+  │    ITS API 재호출 → 신선한 URL → live_loop 전환      │
+  └─────────────────────────────────────────────────────┘
 
 ==========================================================
-## 남은 개선 과제
+## 4. 핵심 모듈 설명
 ==========================================================
 
-[GPU 가속 — 완료]
-- torch 2.6.0+cu124 설치, RTX 4070 Laptop CUDA 확인
-- yolov8x + imgsz=640 + GPU → ~33ms/frame (~30fps)
-- 캡처 인터벌 100ms → 33ms, JPEG 품질 0.8 → 0.95
+[ backend/detector.py ]
+  VehicleDetector
+    detect(frame)       : 단순 YOLO 추론 (tracker_id 없음)
+    track(frame)        : BoT-SORT appearance ReID 추적
+                          model.track(tracker="botsort.yaml", persist=True)
+                          persist=True → 프레임 간 외형 특징 누적, ID 재할당 억제
+    reset_tracker()     : 카메라 전환 시 BoT-SORT 내부 상태 초기화
+    threading.Lock      : live_loop + ws/detect 동시 호출 직렬화
 
-[TensorRT FP16 변환 — 완료]
-- yolov8x.pt → yolov8x.engine (FP16) 변환 완료
-- YOLOv8 프레임워크 그대로, 로드 방식만 변경
-- 실측 결과 : 33ms → 9.6ms, ~30fps → ~104fps
-- 정확도 변화 없음 (FP16 오차 < 1%)
-- 캡처 인터벌 33ms → 16ms 적용
+  VideoStream
+    switch_to(url)      : HLS URL로 OpenCV(FFmpeg) 스트림 전환
+    read_frame()        : 프레임 읽기 (frame_id, ndarray)
+    reconnect()         : 스트림 끊김 시 재연결 (비동기)
+    url 프로퍼티        : 현재 URL (hls_refresh_loop 중복 갱신 방지용)
 
-[모델 최적화 — 완료]
+[ backend/tracker.py ]
+  VehicleTracker (ByteTrack 제거, LineZone만 유지)
+    update(detections, frame_wh) : BoT-SORT 결과를 LineZone 교차 판정에 적용
+                                   In/Out 누적 카운팅 반환
+    tracker_id is None 가드       : 첫 프레임 등 ID 미할당 케이스 안전 처리
 
-목표: ITS HLS 스트림 FPS(15~30fps)에 맞춰 전체 파이프라인을 33ms 이내로 맞추기
+[ backend/analytics.py ]
+  VehicleState 필드
+    track_id, class_name, bbox_xyxy, center_px
+    lat, lon, x_m, y_m          (GPS + 미터 좌표)
+    direction, speed_kph, is_speeding
+    dwell_frames, is_bottleneck, is_parked, lane_id
 
-─ 파이프라인 구간별 오버헤드 측정 ─
-  캔버스 캡처 + JPEG 인코딩     ~8ms
-  WebSocket 왕복 (로컬)         ~3ms
-  백엔드 JPEG 디코딩             ~3ms
-  백엔드 결과 JPEG 인코딩        ~3ms
-  ────────────────────────────────
-  고정 오버헤드 합계             ~17ms
-  → YOLO 추론에 허용되는 예산    ~16ms (33ms 기준)
+  TrafficAnalytics
+    _speed()            : Haversine 거리 기반 실제 속도, EMA(α=0.4) 평활화
+                          이동 < 0.3m → 즉시 speed=0 / EMA 리셋 (지터 제거)
+    _dwell_update()     : 정지 프레임 카운팅 → 300프레임(10초) 초과 시 is_parked=True
+                          주차 확정 시 픽셀 위치 _parked_positions에 등록
+    _is_near_parked()   : 반경 30px 이내 신규 탐지 → track_id 무관하게 즉시 is_parked=True
+                          (ByteTrack ID 재할당 후에도 주차 상태 유지)
+    update()            : 위치 기반 주차 먼저 체크 → 속도/dwell → 통계 집계
+                          주차 차량은 active_vehicles 제외 (통계/경보 미반영)
 
-─ 모델 × imgsz 조합 벤치마크 (TensorRT FP16, RTX 4070 Laptop) ─
-  조합                    추론속도   총 파이프라인   결과
-  yolov8x + imgsz=640     ~9.6ms    ~27ms (~37fps)  ✓ 기존
-  yolov8x + imgsz=320     ~3ms      ~20ms (~50fps)  ✓ 중간 시도
-  yolov8s + imgsz=640     ~3ms      ~20ms (~50fps)  ✓ 최종 선택
-  yolov8s + imgsz=320     ~1.5ms    ~18ms (~55fps)  정확도 손실
-  yolov8n + imgsz=640     ~2ms      ~19ms (~52fps)  정확도 낮음
-  yolov8n + imgsz=320     ~0.8ms    ~18ms (~55fps)  정확도 낮음
+  FrameAnalytics 출력
+    vehicles[], vehicle_count, avg_speed_kph, los_grade
+    in_count, out_count, class_counts
 
-─ 최종 선택: yolov8s + imgsz=640 ─
-  이유 1) imgsz를 320으로 줄이면 속도 이득은 1.5ms에 불과하나
-         입력 해상도 절반 → 작은 차량 미검출 위험 증가
-  이유 2) 교통 탐지 대상(차, 트럭, 버스)은 크고 뚜렷한 객체이므로
-         yolov8s 정확도가 yolov8x와 실질적으로 동등
-  이유 3) 추론 9.6ms → 3ms, 총 파이프라인 27ms → 20ms (~50fps)
-         스트림 FPS 대비 충분한 여유 확보
+[ backend/transform.py ]
+  PerspectiveTransformer
+    OpenCV findHomography로 픽셀 좌표 → GPS/미터 변환
+    PIXEL_POINTS : 640×360 프레임 네 모서리 [[0,0],[640,0],[640,360],[0,360]]
+    GPS_POINTS   : 카메라 GPS 중심 기준 근사 격자
+    update_gps_center(lat, lon) : 카메라 전환 시 GPS 격자 재보정
+    pixel_to_gps(cx, cy) : 베어링(CAMERA_BEARING_DEG) 회전 포함
+    pixel_to_meter(cx, cy) : 미터 좌표 (속도 계산용 보조)
 
-─ 코드 변경 내역 ─
-  파일: backend/config.py
-  변경 전: YOLO_MODEL = ".../yolov8x.engine"
-  변경 후: YOLO_MODEL = ".../yolov8s.engine"
-  (YOLO_IMGSZ는 640 유지, 변경 없음)
+[ backend/main.py ]
+  엔드포인트
+    WS  /ws             : JSON 브로드캐스트 구독 (지도/사이드바)
+    GET /cctvs          : 현재 뷰포트 CCTV 목록 (ITS API 프록시)
+    POST /switch-camera : 카메라 전환
+                          → _camera_queue에 push (live_loop 스트림 전환)
+                          → detector.reset_tracker() (BoT-SORT 초기화)
+                          → _transformer.update_gps_center()
+                          → analytics.__init__() (통계 리셋)
+    GET /cctv-refresh   : 브라우저 HLS NETWORK_ERROR 시 신선한 URL 반환
+    GET /health         : 서버 상태 확인
 
-  파일: frontend/src/components/CctvPlayer.jsx
-  변경 전: setInterval(captureAndSend, 33)   // ~30fps
-  변경 후: setInterval(captureAndSend, 16)   // ~60fps, waitRef가 실제 속도 조절
+  _yolo_detect_annotate(jpeg_bytes, detector)
+    detector.track() 호출 → 박스/라벨/BoT-SORT ID 어노테이션 → JPEG 반환
 
-─ 현재 설정 ─
-  backend/config.py : YOLO_MODEL=yolov8s.engine, YOLO_IMGSZ=640
-  yolov8s.engine 24.7MB (TensorRT FP16, RTX 4070 Laptop, 2026-04-29 변환)
-  Makefile : bash 호환 조건문으로 수정, ENGINE=backend/yolov8s.engine
+  live_loop
+    카메라 전환 큐 → stream.switch_to() → detector.track() → 브로드캐스트
+    적응형 스킵 : 처리 시간 초과 시 최대 5프레임 스킵
 
-[속도 계산 정확도 — 미해결]
-- 현재는 고정 FPS=30 기준으로 속도 계산 → 실제 탐지 주기와 불일치
-- 개선안 : 프레임별 실제 timestamp_ms 델타 사용
+  hls_refresh_loop (30분마다)
+    ITS API 재호출 → URL 변경 확인 → _camera_queue push
+
+[ frontend/src/components/CctvPlayer.jsx ]
+  HLS 재생
+    hls.js Hls 인스턴스로 ITS HLS URL 재생
+    NETWORK_ERROR 발생 시 : /cctv-refresh 호출 → 신선한 URL로 hls.loadSource() 재로드
+    MEDIA_ERROR : hls.recoverMediaError() 자동 복구
+  YOLO 탭
+    캔버스에서 프레임 캡처 (max 640px 리사이즈, JPEG 품질 0.95)
+    inFlightRef (최대 2) : 동시 전송 프레임 수 제한 → 순서 보장 + 처리량 최대화
+    intervalRef : 16ms 간격 캡처 (~60fps, inFlight가 실제 전송 속도 조절)
+    WebSocket /ws/detect : JPEG 전송 → 어노테이션 JPEG 수신 → <img> 표시
+
+[ frontend/src/components/MapView.jsx ]
+  deck.gl 레이어 구성
+    cctvMarkerLayer (ScatterplotLayer) : CCTV 위치 표시, 선택된 카메라 강조
+    cctvLabelLayer  (TextLayer)        : CCTV 이름 표시
+    scatterLayer    (ScatterplotLayer) : 차량 위치 (zoom ≥ 15 시 표시)
+      주차 차량 : [80,80,80,140] 반투명 회색
+      과속 차량 : getVehicleColor() → 빨강 계열
+    textLayer       (TextLayer)        : 차량 track_id 표시
+    trailLayer      (TripsLayer)       : 차량 이동 궤적
+
+[ frontend/src/App.jsx ]
+  selectedCctv 게이트 : CCTV 선택 전까지 차량 데이터 표시 차단
+  handleCctvClick : CCTV 클릭 → FlyTo 애니메이션 + /switch-camera 호출
+  AlertPanel : 과속(is_speeding) + 병목(is_bottleneck) 경보만 표시
+
+==========================================================
+## 5. AI 탐지·추적 파이프라인 상세
+==========================================================
+
+[ YOLO 탐지 ]
+  모델     : YOLOv8x (최고 정확도) / YOLOv8s (속도 우선, 기본값)
+  엔진     : TensorRT FP16 (.engine) — RTX 4070 Laptop 기준
+             yolov8x.engine → ~9.6ms/frame
+             yolov8s.engine → ~3ms/frame
+  입력     : 640×360 JPEG → numpy ndarray → YOLO imgsz=640
+  대상 클래스 : car(2), motorcycle(3), bus(5), truck(7)
+  임계값   : conf=0.25, iou=0.45
+
+[ BoT-SORT 추적 (ByteTrack 대체) ]
+  방식     : appearance-based ReID (Re-Identification)
+             외형 특징 벡터를 누적하여 잠시 사라진 차량도 동일 ID로 재인식
+             → ByteTrack(IoU 기반) 대비 ID 재할당 대폭 감소
+  파라미터 : tracker="botsort.yaml", persist=True
+  리셋 시점 : 카메라 전환 시 model.predictor.trackers[0].reset()
+
+[ 이전 ByteTrack 설정 (참고용) ]
+  lost_track_buffer=90 (3초 유지), track_thresh=0.35, match_thresh=0.8
+  → BoT-SORT 도입으로 이 파라미터들 불필요
+
+[ LineZone 카운팅 ]
+  COUNT_LINE_START / COUNT_LINE_END 좌표로 가상 선 설정
+  tracker_id 기반 교차 감지 → In/Out 누적 (중복 카운팅 없음)
+
+[ 속도 계산 ]
+  Haversine 공식으로 프레임 간 GPS 이동 거리 계산
+  실제 timestamp_ms 기반 dt(초) → raw_kph = dist_m / dt × 3.6
+  EMA 평활화 (α=0.4) : 순간 스파이크 제거
+  지터 임계값 0.3m : 이동 거리 미만이면 speed=0 즉시 스냅 + EMA 리셋
+
+[ 주차 차량 감지 ]
+  방법 1 (dwell 기반) : 연속 정지 300프레임(~10초) → is_parked=True
+                        픽셀 위치를 _parked_positions에 등록
+  방법 2 (위치 기반) : 신규 탐지가 등록된 위치 30px 이내 → 즉시 is_parked=True
+                       track_id 재할당(ID cycling)에도 주차 상태 유지
+  효과 : 통계/경보에서 제외, 지도에 회색으로만 표시
+
+[ 좌표 변환 (PerspectiveTransformer) ]
+  OpenCV findHomography로 4쌍의 픽셀-GPS 대응점에서 Homography 행렬 산출
+  PIXEL_POINTS : 프레임 네 모서리 (0,0), (640,0), (640,360), (0,360)
+  GPS_POINTS   : /switch-camera 시 카메라 GPS 기준 동적 재계산
+  베어링 보정  : CAMERA_BEARING_DEG만큼 GPS 델타 벡터 회전 (기본값 0.0)
+
+==========================================================
+## 6. HLS 스트림 처리 방식
+==========================================================
+
+문제 : ITS CCTV HLS URL에는 만료 토큰이 포함되어 있어
+       ① OpenCV 백엔드가 직접 열기 어렵고
+       ② 토큰 만료 시 스트림이 끊어짐
+
+해결책 :
+  브라우저 경로 (주 파이프라인)
+    hls.js가 HLS 재생 → 브라우저 <canvas>에서 프레임 캡처
+    → WebSocket /ws/detect으로 JPEG 전송
+    HLS NETWORK_ERROR → GET /cctv-refresh → 새 URL로 hls.loadSource()
+    → 토큰 만료 자동 복구
+
+  서버사이드 경로 (live_loop)
+    /switch-camera 시 _camera_queue push
+    → live_loop에서 stream.switch_to() → OpenCV HLS 읽기
+    hls_refresh_loop (30분마다) : ITS API 재호출 → URL 갱신
+
+==========================================================
+## 7. 성능 수치 (RTX 4070 Laptop 기준)
+==========================================================
+
+  파이프라인 구간별 소요 시간
+    캔버스 캡처 + JPEG 인코딩    ~8ms
+    WebSocket 왕복 (로컬)        ~3ms
+    JPEG 디코딩 (서버)           ~3ms
+    BoT-SORT + YOLO 추론         ~9.6ms (yolov8x) / ~3ms (yolov8s)
+    어노테이션 + JPEG 인코딩     ~3ms
+    ──────────────────────────────────
+    총 파이프라인 (yolov8x)      ~27ms  (~37fps)
+    총 파이프라인 (yolov8s)      ~20ms  (~50fps)
+
+  inFlight 카운터 (최대 2)
+    동시 전송 중 프레임 수를 2개로 제한
+    → 단순 waitRef(최대 1) 대비 처리량 약 2배 향상
+    → 순서 보장 + 버퍼 오버플로우 방지
+
+  TensorRT FP16 전환 효과
+    CPU(yolov8x)    : ~500ms/frame
+    GPU+CUDA(yolov8x): ~33ms/frame
+    TensorRT FP16(yolov8x): ~9.6ms/frame (~104fps 이론값)
+    정확도 변화 없음 (FP16 오차 < 1%)
+
+==========================================================
+## 8. 경보 시스템
+==========================================================
+
+  과속 경보 (is_speeding)
+    기준 : speed_kph > SPEED_LIMIT_KPH (기본 60 km/h)
+    지도 표시 : 빨강/주황 계열 마커 크기 확대
+    사이드바 : AlertPanel에 track_id + 속도 표시
+
+  병목 경보 (is_bottleneck)
+    기준 : 연속 정지 dwell_frames >= BOTTLENECK_DWELL_FRAMES (기본 60프레임, 2초)
+    단, is_parked=True인 경우 병목 판정 제외
+    사이드바 : AlertPanel에 track_id + 정지 프레임 수 표시
+
+  제거된 경보
+    꼬리물기 (tailgating) : 신호 정지와 구분 불가능하여 제거
+    신호 정지 (signal stop) : 판정 기준 불명확하여 제거
+
+==========================================================
+## 9. 시스템 진화 이력
+==========================================================
+
+[ 초기 상태 ]
+  JSON 파일(real_world_track_data.json) 재생 (REPLAY 모드)
+  YOLO 탐지 없음, 지도에 미리 계산된 차량 데이터만 표시
+
+[ v1 개선 ]
+  - 실제 timestamp 기반 속도 계산 + EMA 평활화 + 정지 즉시 감지
+  - 주차 차량 자동 필터링 (연속 정지 10초 → is_parked)
+  - 신호 정지 감지 (당시 구현, 이후 v2에서 제거)
+  - 사이드바 너비 288px → 360px
+  - 카메라 베어링 보정 (CAMERA_BEARING_DEG)
+  - 적응형 프레임 스킵 (skip_budget, 최대 5프레임)
+
+[ v2 개선 ]
+  - PIXEL_POINTS 수정 : [50,80],[3800,80] → 실제 프레임 모서리 [0,0],[640,0] 등
+    (이전 값이 640×360 프레임과 전혀 맞지 않아 방향 계산 완전 오작동)
+  - PerspectiveTransformer 통일 : ws/detect도 단순 선형 근사 대신 Homography 사용
+  - 주차 위치 메모리 : track_id 재할당 후에도 30px 반경 내 주차 상태 유지
+  - ByteTrack buffer 30 → 90 (3초), track_thresh=0.35, match_thresh=0.8
+  - 경보 단순화 : 꼬리물기·신호정지 완전 제거, 과속·병목만 유지
+  - waitRef(bool) → inFlightRef(number, max=2) : 동시 전송 2개로 처리량 향상
+  - YOLO 프레임 스킵 (YOLO_DETECT_INTERVAL=3, ByteTrack Kalman 예측)
+  - /switch-camera 버그 수정 : _camera_queue push 추가로 live_loop 실제 전환
+
+[ v3 개선 — 현재 ]
+  - ByteTrack → BoT-SORT : appearance ReID 기반 추적으로 ID 끊김 대폭 감소
+  - tracker.py : ByteTrack 완전 제거, LineZone 카운팅만 유지
+  - detector.track() : model.track(botsort.yaml, persist=True)로 추적
+  - detector.reset_tracker() : 카메라 전환 시 BoT-SORT 상태 초기화
+  - threading.Lock : live_loop + ws/detect 동시 model 접근 직렬화
+  - GET /cctv-refresh : HLS 토큰 만료 시 브라우저가 신선한 URL 요청
+  - CctvPlayer HLS NETWORK_ERROR → /cctv-refresh → hls.loadSource() 자동 복구
+  - hls_refresh_loop : 백그라운드 30분마다 서버사이드 live_loop URL 갱신
+  - live_loop : YOLO 인터벌 스킵 제거, BoT-SORT 매 프레임 실행
+  - VideoStream.url 프로퍼티 추가 (URL 변경 여부 확인용)
+
+==========================================================
+## 10. 파일 구조
+==========================================================
+
+traffic-digital-twin/
+├── backend/
+│   ├── main.py          FastAPI 서버, WebSocket 핸들러, 엔드포인트
+│   ├── detector.py      VehicleDetector (YOLO + BoT-SORT), VideoStream
+│   ├── tracker.py       VehicleTracker (LineZone 카운팅)
+│   ├── analytics.py     TrafficAnalytics (속도/LOS/주차/경보)
+│   ├── transform.py     PerspectiveTransformer (픽셀→GPS/미터)
+│   ├── config.py        전역 설정값 (API키, YOLO 파라미터, 임계값 등)
+│   ├── yolov8x.engine   TensorRT FP16 엔진 (최고 정확도)
+│   ├── yolov8s.engine   TensorRT FP16 엔진 (기본값, 속도 우선)
+│   └── .env             ITS_API_KEY 등 환경변수
+└── frontend/
+    └── src/
+        ├── App.jsx                  최상위 컴포넌트, 레이아웃, 상태 관리
+        ├── components/
+        │   ├── MapView.jsx          deck.gl 지도 + CCTV 마커 + 차량 마커
+        │   ├── CctvPlayer.jsx       HLS 플레이어 + YOLO 탭 (WebSocket)
+        │   ├── TrailLayer.jsx       차량 궤적 레이어 (TripsLayer)
+        │   ├── SpeedGauge.jsx       평균 속도 게이지
+        │   ├── LOSBadge.jsx         서비스 수준 (LOS) 배지
+        │   ├── ClassPieChart.jsx    차종 분포 파이 차트
+        │   └── CounterPanel.jsx     진입/진출/총 차량 카운터
+        ├── hooks/
+        │   └── useWebSocket.js      /ws WebSocket 연결 훅
+        └── utils/
+            └── colorMap.js          차량 방향별 색상 매핑
+
+==========================================================
+## 11. 설정값 요약 (backend/config.py)
+==========================================================
+
+  ITS_API_KEY           ITS OpenAPI 인증키 (.env에서 로드)
+  YOLO_MODEL            사용할 .engine 파일 경로 (기본: yolov8x.engine)
+  YOLO_IMGSZ            640
+  YOLO_CONF             0.25
+  YOLO_IOU              0.45
+  VEHICLE_CLASSES       {2:car, 3:motorcycle, 5:bus, 7:truck}
+  PIXEL_POINTS          [[0,0],[640,0],[640,360],[0,360]]
+  GPS_POINTS            카메라 GPS 기준 근사 격자 (switch-camera 시 재보정)
+  REAL_WORLD_WIDTH_M    20.0m
+  REAL_WORLD_HEIGHT_M   60.0m
+  SPEED_LIMIT_KPH       60.0
+  FPS                   30
+  SPEED_JITTER_THRESHOLD_M   0.30m
+  SPEED_SMOOTHING_ALPHA      0.4
+  PARKED_FRAMES_THRESHOLD    300 (10초)
+  PARKED_POSITION_RADIUS_PX  30px
+  BOTTLENECK_DWELL_FRAMES    60 (2초)
+  CAMERA_BEARING_DEG         0.0 (카메라 북쪽 기준 시계방향 틀어짐 각도)
+  COUNT_LINE_START/END       LineZone 교차선 좌표
 
 ==========================================================

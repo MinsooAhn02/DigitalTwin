@@ -49,7 +49,7 @@ export default function App() {
   const inCount     = activeData?.in_count      ?? 0;
   const outCount    = activeData?.out_count     ?? 0;
   const vehicleCnt  = activeData?.vehicle_count ?? 0;
-  const classCounts = activeData?.class_counts  ?? {};
+  const classCounts = activeData?.class_counts ?? {};
 
   useEffect(() => {
     if (activeData) dispatchTrail(vehicles);
@@ -104,9 +104,8 @@ export default function App() {
   // CCTV 로드 후 5초 안에 선택 안 했을 때만 안내 표시
   const noCameraSelected = guideVisible && cctvList.length > 0 && !selectedCctv;
 
-  const speedingVehicles   = vehicles.filter((v) => v.is_speeding);
-  const tailgatingVehicles = vehicles.filter((v) => v.is_tailgating);
-  const bottlenecks        = vehicles.filter((v) => v.is_bottleneck);
+  const speedingVehicles = vehicles.filter((v) => v.is_speeding);
+  const bottlenecks      = vehicles.filter((v) => v.is_bottleneck);
 
   return (
     <div style={{ display: "flex", height: "100vh", background: "#111827", color: "#f9fafb", fontFamily: "system-ui, sans-serif", overflow: "hidden" }}>
@@ -234,7 +233,7 @@ export default function App() {
 
       {/* 오른쪽: 사이드바 */}
       <aside style={{
-        width: 288, display: "flex", flexDirection: "column", gap: 12,
+        width: 360, display: "flex", flexDirection: "column", gap: 12,
         padding: 16, background: "#111827",
         borderLeft: "1px solid #1f2937", overflowY: "auto",
       }}>
@@ -257,7 +256,6 @@ export default function App() {
 
         <AlertPanel
           speeding={speedingVehicles}
-          tailgating={tailgatingVehicles}
           bottlenecks={bottlenecks}
         />
       </aside>
@@ -304,8 +302,8 @@ function Legend({ cctvCount }) {
   );
 }
 
-function AlertPanel({ speeding, tailgating, bottlenecks }) {
-  const total = speeding.length + tailgating.length + bottlenecks.length;
+function AlertPanel({ speeding, bottlenecks }) {
+  const total = speeding.length + bottlenecks.length;
   if (total === 0) return null;
 
   return (
@@ -314,10 +312,6 @@ function AlertPanel({ speeding, tailgating, bottlenecks }) {
         {speeding.map((v) => (
           <AlertItem key={`sp-${v.track_id}`} id={v.track_id} cls={v.class_name}
             tag="과속" tagColor="#f87171" extra={`${v.speed_kph?.toFixed(0)} km/h`} />
-        ))}
-        {tailgating.map((v) => (
-          <AlertItem key={`tg-${v.track_id}`} id={v.track_id} cls={v.class_name}
-            tag="꼬리물기" tagColor="#fbbf24" extra={`${v.headway_m?.toFixed(1)} m`} />
         ))}
         {bottlenecks.map((v) => (
           <AlertItem key={`bn-${v.track_id}`} id={v.track_id} cls={v.class_name}

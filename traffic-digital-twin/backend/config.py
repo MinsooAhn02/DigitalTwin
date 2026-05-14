@@ -31,8 +31,10 @@ YOLO_IMGSZ: int = 640
 YOLO_CONF: float = 0.25
 YOLO_IOU: float = 0.45
 
+# detect-and-track: 이 프레임마다 1회 YOLO 추론, 나머지는 ByteTrack Kalman 예측
+YOLO_DETECT_INTERVAL: int = 3
+
 # 탐지 대상 COCO 클래스 ID → 표시명
-# 실제 데이터: class_id 2=car, 7=truck 확인됨
 VEHICLE_CLASSES: dict[int, str] = {
     2: "car",
     3: "motorcycle",
@@ -42,19 +44,20 @@ VEHICLE_CLASSES: dict[int, str] = {
 
 # ── ByteTrack 설정 ────────────────────────────────────────────────────
 BYTE_TRACK_FPS: int = 30
-BYTE_TRACK_BUFFER: int = 30
+BYTE_TRACK_BUFFER: int = 90    # 3초 유지 (YOLO 일시 실패 시 ID 보존)
 
 # ── LineZone 통행량 카운팅 라인 (픽셀 좌표) ───────────────────────────
 COUNT_LINE_START = (0, 360)
 COUNT_LINE_END   = (1280, 360)
 
 # ── Perspective Transform 랜드마크 ────────────────────────────────────
-# 실제 데이터 GPS 범위: lat ~37.462, lon ~127.038 (서울 강남/분당 인근 도로)
+# 실제 프레임 해상도(640×360) 네 모서리를 GPS 격자에 매핑
+# GPS는 update_gps_center()가 카메라 선택 시 동적으로 재보정
 PIXEL_POINTS = [
-    [  50,   80],
-    [3800,   80],
-    [3800, 1800],
-    [  50, 1800],
+    [  0,   0],   # 좌상
+    [640,   0],   # 우상
+    [640, 360],   # 우하
+    [  0, 360],   # 좌하
 ]
 GPS_POINTS = [
     [37.4632, 127.0382],  # 좌상
@@ -78,5 +81,15 @@ LOS_THRESHOLDS: dict[str, int] = {
     "E": 15,
 }
 
-TAILGATING_THRESHOLD_M: float = 10.0
 BOTTLENECK_DWELL_FRAMES: int = 60   # 2초 @ 30fps
+
+# ── 속도 정확도 ──────────────────────────────────────────────────────────
+SPEED_JITTER_THRESHOLD_M: float = 0.30   # 프레임 간 이동 < 이 값이면 정지로 간주
+SPEED_SMOOTHING_ALPHA: float = 0.4       # EMA 계수 (0~1, 낮을수록 더 평활화)
+
+# ── 주차 차량 자동 감지 ──────────────────────────────────────────────────
+PARKED_FRAMES_THRESHOLD: int = 300         # 연속 정지 이 프레임 이상 = 주차 (30fps × 10초)
+PARKED_POSITION_RADIUS_PX: float = 30.0   # 이 픽셀 반경 내 신규 탐지 → 즉시 주차 분류
+
+# ── 카메라 베어링 보정 ────────────────────────────────────────────────────
+CAMERA_BEARING_DEG: float = 0.0          # CCTV가 정북 기준 시계 방향으로 틀어진 각도(도)

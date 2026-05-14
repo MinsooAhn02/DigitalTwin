@@ -59,7 +59,7 @@ export default function MapView({
     data:         sorted,
     getPosition:  (d) => [d.lon, d.lat],
     getRadius:    (d) => (d.is_speeding ? 5 : 3),
-    getFillColor: (d) => getVehicleColor(d.direction, d.is_speeding),
+    getFillColor: (d) => d.is_parked ? [80, 80, 80, 140] : getVehicleColor(d.direction, d.is_speeding),
     pickable:     true,
     radiusUnits:  "meters",
     radiusMinPixels: 5,
@@ -98,13 +98,13 @@ export default function MapView({
         if (d.track_id !== undefined) {
           return {
             html: `
-              <b>#${d.track_id}</b> &nbsp; <span style="color:#aaa">${d.class_name}</span><br/>
+              <b>#${d.track_id}</b> &nbsp; <span style="color:#aaa">${d.class_name}</span>
+              ${d.is_parked ? ' &nbsp;<span style="color:#9ca3af">🅿 주차</span>' : ""}<br/>
               방향: <b>${d.direction}</b><br/>
               속도: <b>${d.speed_kph?.toFixed(1) ?? "—"} km/h</b>
               ${d.is_speeding ? ' &nbsp;<span style="color:#f87171">🚨 과속</span>' : ""}<br/>
               체류: ${d.dwell_frames}f
               ${d.is_bottleneck ? ' &nbsp;<span style="color:#fbbf24">⚠ 병목</span>' : ""}
-              ${d.is_tailgating ? '<br/><span style="color:#fbbf24">⚠ 꼬리물기</span>' : ""}
             `,
             style: {
               background: "#111827", color: "#f9fafb",

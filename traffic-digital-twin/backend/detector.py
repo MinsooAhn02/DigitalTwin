@@ -1,19 +1,19 @@
 """
-detector.py — 영상 소스 관리 + YOLOv8x 탐지
-  1. HLS URL로 OpenCV(FFmpeg 백엔드) 스트림 열기
-  2. switch_to()로 카메라 전환
-  3. YOLOv8x로 프레임 추론 → Supervision Detections 반환
+detector.py — 영상 소스 관리 + YOLOv8x 탐지 / BoT-SORT 추적
+  · detect() : 단순 YOLO 추론 (tracker_id 없음)
+  · track()  : BoT-SORT appearance ReID 추적 (tracker_id 포함, persist=True)
+  · reset_tracker() : 카메라 전환 시 BoT-SORT 내부 상태 초기화
 """
 
 from __future__ import annotations
 import asyncio
 import logging
+import threading
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 import supervision as sv
-
 import torch
 
 from config import (
@@ -27,7 +27,6 @@ from config import (
 logger = logging.getLogger(__name__)
 
 
-# ── 비디오 소스 열기 ──────────────────────────────────────────────────
 def open_video_source(url: str) -> cv2.VideoCapture:
     """HLS / RTSP URL을 FFmpeg 백엔드로 연다."""
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
@@ -37,7 +36,6 @@ def open_video_source(url: str) -> cv2.VideoCapture:
     raise RuntimeError(f"스트림 열기 실패: {url}")
 
 
-# ── 탐지기 클래스 ─────────────────────────────────────────────────────
 class VehicleDetector:
     CLASS_IDS = list(VEHICLE_CLASSES.keys())
 
@@ -47,22 +45,58 @@ class VehicleDetector:
         self.model = YOLO(YOLO_MODEL, task="detect")
         if not is_engine:
             self.model.to(self._device)
+        # live_loop + ws/detect 가 동시에 model 을 쓰지 않도록 직렬화
+        self._lock = threading.Lock()
         logger.info("YOLO 모델 로드 완료: %s  device=%s", YOLO_MODEL, self._device)
 
     def detect(self, frame: np.ndarray) -> sv.Detections:
-        results = self.model(
-            frame,
-            imgsz=YOLO_IMGSZ,
-            conf=YOLO_CONF,
-            iou=YOLO_IOU,
-            classes=self.CLASS_IDS,
-            device=self._device,
-            verbose=False,
-        )[0]
+        """단순 추론 — tracker_id 없음."""
+        with self._lock:
+            results = self.model(
+                frame,
+                imgsz=YOLO_IMGSZ,
+                conf=YOLO_CONF,
+                iou=YOLO_IOU,
+                classes=self.CLASS_IDS,
+                device=self._device,
+                verbose=False,
+            )[0]
         return sv.Detections.from_ultralytics(results)
 
+    def track(self, frame: np.ndarray) -> sv.Detections:
+        """
+        BoT-SORT appearance ReID 추적.
+        persist=True → 프레임 간 tracker 상태 유지, ID 끊김 대폭 감소.
+        """
+        with self._lock:
+            results = self.model.track(
+                frame,
+                imgsz=YOLO_IMGSZ,
+                conf=YOLO_CONF,
+                iou=YOLO_IOU,
+                classes=self.CLASS_IDS,
+                device=self._device,
+                tracker="botsort.yaml",
+                persist=True,
+                verbose=False,
+            )[0]
+        return sv.Detections.from_ultralytics(results)
 
-# ── 스트림 클래스 ─────────────────────────────────────────────────────
+    def reset_tracker(self) -> None:
+        """카메라 전환 시 BoT-SORT 내부 상태 초기화."""
+        try:
+            if (
+                hasattr(self.model, "predictor")
+                and self.model.predictor is not None
+                and hasattr(self.model.predictor, "trackers")
+                and self.model.predictor.trackers
+            ):
+                self.model.predictor.trackers[0].reset()
+                logger.info("BoT-SORT tracker 리셋 완료")
+        except Exception as e:
+            logger.warning("tracker reset 실패: %s", e)
+
+
 class VideoStream:
     RECONNECT_DELAY = 3.0
 
@@ -80,6 +114,10 @@ class VideoStream:
         if self._cap:
             return self._cap.get(cv2.CAP_PROP_FPS) or 30.0
         return 30.0
+
+    @property
+    def url(self) -> str | None:
+        return self._url
 
     def switch_to(self, url: str) -> None:
         """새 HLS/RTSP URL로 카메라 전환."""

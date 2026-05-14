@@ -8,9 +8,11 @@ export default function CctvPlayer({ cctv, onClose }) {
   const canvasRef = useRef(null);      // 숨김 캔버스 (프레임 캡처용)
   const hlsRef    = useRef(null);
   const panelRef  = useRef(null);
-  const wsRef     = useRef(null);      // YOLO 탐지 WebSocket
-  const waitRef   = useRef(false);     // 응답 대기 중 플래그 (프레임 큐 방지)
+  const wsRef       = useRef(null);    // YOLO 탐지 WebSocket
+  const inFlightRef = useRef(0);       // 전송 중 프레임 수 (최대 MAX_IN_FLIGHT)
   const intervalRef = useRef(null);
+
+  const MAX_IN_FLIGHT = 2;
 
   const [hlsError, setHlsError]       = useState(null);
   const [hlsLoading, setHlsLoading]   = useState(true);
@@ -35,12 +37,19 @@ export default function CctvPlayer({ cctv, onClose }) {
       hls.on(Hls.Events.ERROR, (_, d) => {
         if (!d.fatal) return;
         if (d.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          // 세그먼트 만료(토큰 오류) → 재시도
-          hls.startLoad();
+          // HLS 토큰 만료 가능성 → 백엔드에서 신선한 URL 받아 재로드
+          fetch(
+            `http://localhost:8000/cctv-refresh?name=${encodeURIComponent(cctv.name || "")}&lat=${cctv.lat}&lon=${cctv.lon}`
+          )
+            .then((r) => r.json())
+            .then(({ cctvurl }) => {
+              if (cctvurl) hls.loadSource(cctvurl);
+              hls.startLoad();
+            })
+            .catch(() => hls.startLoad());
         } else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) {
           hls.recoverMediaError();
         } else {
-          // 진짜 복구 불가 에러만 오버레이 표시
           setHlsError("스트림 연결 실패");
           setHlsLoading(false);
         }
@@ -70,16 +79,16 @@ export default function CctvPlayer({ cctv, onClose }) {
 
     ws.onopen  = () => setYoloStatus("running");
     ws.onerror = () => { setYoloStatus("error"); };
-    ws.onclose = () => { waitRef.current = false; };
+    ws.onclose = () => { inFlightRef.current = 0; };
 
     ws.onmessage = (e) => {
+      inFlightRef.current = Math.max(0, inFlightRef.current - 1);
       const blob = new Blob([e.data], { type: "image/jpeg" });
       const url  = URL.createObjectURL(blob);
       setAnnotatedUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
-      waitRef.current = false;
     };
 
-    return () => { ws.close(); wsRef.current = null; waitRef.current = false; };
+    return () => { ws.close(); wsRef.current = null; inFlightRef.current = 0; };
   }, [tab, cctv]);
 
   // ── 프레임 캡처 & 전송 ───────────────────────────────────────────
@@ -89,14 +98,14 @@ export default function CctvPlayer({ cctv, onClose }) {
     const ws = wsRef.current;
 
     if (
-      waitRef.current ||
+      inFlightRef.current >= MAX_IN_FLIGHT ||
       !video || !canvas || !ws ||
       ws.readyState !== WebSocket.OPEN ||
-      video.readyState < 2 ||   // HAVE_CURRENT_DATA
+      video.readyState < 2 ||
       video.paused
     ) return;
 
-    waitRef.current = true;  // 비동기 시작 전에 즉시 잠금
+    inFlightRef.current++;
 
     const srcW = video.videoWidth  || 640;
     const srcH = video.videoHeight || 360;
@@ -108,12 +117,12 @@ export default function CctvPlayer({ cctv, onClose }) {
     canvas.getContext("2d").drawImage(video, 0, 0, w, h);
 
     canvas.toBlob((blob) => {
-      if (!blob) { waitRef.current = false; return; }
+      if (!blob) { inFlightRef.current = Math.max(0, inFlightRef.current - 1); return; }
       blob.arrayBuffer().then((buf) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           wsRef.current.send(buf);
         } else {
-          waitRef.current = false;
+          inFlightRef.current = Math.max(0, inFlightRef.current - 1);
         }
       });
     }, "image/jpeg", 0.95);

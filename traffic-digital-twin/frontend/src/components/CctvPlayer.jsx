@@ -2,6 +2,12 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import Hls from "hls.js";
 
 const PANEL_W = 720;
+const DEFAULT_RUNTIME_CONFIG = {
+  captureIntervalMs: 33,
+  captureWidth: 640,
+  captureQuality: 0.92,
+  maxInFlight: 2,
+};
 
 export default function CctvPlayer({ cctv, onClose }) {
   const videoRef  = useRef(null);
@@ -12,14 +18,20 @@ export default function CctvPlayer({ cctv, onClose }) {
   const inFlightRef = useRef(0);       // 전송 중 프레임 수 (최대 MAX_IN_FLIGHT)
   const intervalRef = useRef(null);
 
-  const MAX_IN_FLIGHT = 2;
-
   const [hlsError, setHlsError]       = useState(null);
   const [hlsLoading, setHlsLoading]   = useState(true);
   const [tab, setTab]                 = useState("live");
   const [pos, setPos]                 = useState(null);
   const [annotatedUrl, setAnnotatedUrl] = useState(null);   // Object URL
   const [yoloStatus, setYoloStatus]   = useState("idle");  // idle | loading | running | error
+  const [runtimeConfig, setRuntimeConfig] = useState(DEFAULT_RUNTIME_CONFIG);
+
+  useEffect(() => {
+    fetch("http://localhost:8000/runtime-config")
+      .then((r) => r.json())
+      .then((config) => setRuntimeConfig({ ...DEFAULT_RUNTIME_CONFIG, ...config }))
+      .catch(() => setRuntimeConfig(DEFAULT_RUNTIME_CONFIG));
+  }, []);
 
   // ── HLS 스트림 ────────────────────────────────────────────────────
   useEffect(() => {
@@ -98,7 +110,7 @@ export default function CctvPlayer({ cctv, onClose }) {
     const ws = wsRef.current;
 
     if (
-      inFlightRef.current >= MAX_IN_FLIGHT ||
+      inFlightRef.current >= runtimeConfig.maxInFlight ||
       !video || !canvas || !ws ||
       ws.readyState !== WebSocket.OPEN ||
       video.readyState < 2 ||
@@ -109,7 +121,7 @@ export default function CctvPlayer({ cctv, onClose }) {
 
     const srcW = video.videoWidth  || 640;
     const srcH = video.videoHeight || 360;
-    const scale = Math.min(1, 640 / srcW);
+    const scale = Math.min(1, runtimeConfig.captureWidth / srcW);
     const w = Math.round(srcW * scale);
     const h = Math.round(srcH * scale);
     canvas.width = w;
@@ -125,8 +137,8 @@ export default function CctvPlayer({ cctv, onClose }) {
           inFlightRef.current = Math.max(0, inFlightRef.current - 1);
         }
       });
-    }, "image/jpeg", 0.95);
-  }, []);
+    }, "image/jpeg", runtimeConfig.captureQuality);
+  }, [runtimeConfig]);
 
   // YOLO 탭 활성화 시 캡처 인터벌 시작
   useEffect(() => {
@@ -134,9 +146,9 @@ export default function CctvPlayer({ cctv, onClose }) {
       if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
       return;
     }
-    intervalRef.current = setInterval(captureAndSend, 16);  // ~60fps, waitRef가 응답 대기 중 자동 조절
+    intervalRef.current = setInterval(captureAndSend, runtimeConfig.captureIntervalMs);
     return () => { clearInterval(intervalRef.current); intervalRef.current = null; };
-  }, [tab, captureAndSend]);
+  }, [tab, captureAndSend, runtimeConfig.captureIntervalMs]);
 
   // ── 드래그 ────────────────────────────────────────────────────────
   const handleMouseDown = (e) => {

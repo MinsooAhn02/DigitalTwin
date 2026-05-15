@@ -1,16 +1,37 @@
 """
-config.py — 전역 설정값 중앙 관리
-  · ITS OpenAPI 인증키 / CCTV 채널 목록
-  · Perspective Transform 용 픽셀-GPS 대응점
-  · 탐지 임계값, 속도 제한, LOS 경계값
+Central backend configuration.
 """
 
 import os
+import json
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── ITS 국가교통정보센터 API ──────────────────────────────────────────
+BACKEND_DIR = Path(__file__).resolve().parent
+YOLO_CHOICE_FILE = BACKEND_DIR / ".yolo_model"
+RUNTIME_PROFILE_FILE = BACKEND_DIR / ".runtime_profile.json"
+
+
+def _read_yolo_choice() -> str:
+    if not YOLO_CHOICE_FILE.exists():
+        return ""
+    return YOLO_CHOICE_FILE.read_text(encoding="utf-8").strip()
+
+
+def _read_runtime_profile() -> dict:
+    if not RUNTIME_PROFILE_FILE.exists():
+        return {}
+    try:
+        return json.loads(RUNTIME_PROFILE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+RUNTIME_PROFILE = _read_runtime_profile()
+
+# ITS OpenAPI
 ITS_API_KEY: str = os.getenv("ITS_API_KEY", "YOUR_API_KEY_HERE")
 ITS_BASE_URL: str = "https://openapi.its.go.kr:9443/cctvInfo"
 
@@ -21,20 +42,25 @@ ITS_CCTV_IDS: list[str] = [
 
 FALLBACK_VIDEO_PATH: str = "assets/test_traffic.mp4"
 
-# ── YOLO 모델 설정 ────────────────────────────────────────────────────
-# 사용 가능한 engine (TensorRT FP16, RTX 4070 Laptop, imgsz=640 기준):
-#   yolov8x.engine  ~9.6ms (~37fps)  최고 정확도  ← 현재 선택
-#   yolov8s.engine  ~3ms   (~50fps)  균형
-# 전환: YOLO_MODEL=yolov8s.engine 환경변수로 서버 실행 시 변경 가능
-YOLO_MODEL: str = os.path.join(os.path.dirname(__file__), os.getenv("YOLO_MODEL", "yolov8x.engine"))
-YOLO_IMGSZ: int = 640
+# YOLO runtime selection
+# - YOLO_MODEL: explicit filename/path override
+# - YOLO_MODEL_VARIANT: x/s/n style hint
+# - YOLO_AUTO_EXPORT_ENGINE: export .pt -> .engine on first run when TensorRT is usable
+YOLO_MODEL: str = os.getenv("YOLO_MODEL", "").strip() or _read_yolo_choice()
+YOLO_MODEL_VARIANT: str = os.getenv(
+    "YOLO_MODEL_VARIANT",
+    os.getenv("MODEL", ""),
+).strip().lower()
+YOLO_AUTO_EXPORT_ENGINE: bool = os.getenv(
+    "YOLO_AUTO_EXPORT_ENGINE",
+    "true",
+).lower() == "true"
+YOLO_IMGSZ: int = int(os.getenv("YOLO_IMGSZ", "640"))
 YOLO_CONF: float = 0.25
 YOLO_IOU: float = 0.45
 
-# detect-and-track: 이 프레임마다 1회 YOLO 추론, 나머지는 ByteTrack Kalman 예측
 YOLO_DETECT_INTERVAL: int = 3
 
-# 탐지 대상 COCO 클래스 ID → 표시명
 VEHICLE_CLASSES: dict[int, str] = {
     2: "car",
     3: "motorcycle",
@@ -42,36 +68,41 @@ VEHICLE_CLASSES: dict[int, str] = {
     7: "truck",
 }
 
-# ── ByteTrack 설정 ────────────────────────────────────────────────────
+# Tracking
 BYTE_TRACK_FPS: int = 30
-BYTE_TRACK_BUFFER: int = 90    # 3초 유지 (YOLO 일시 실패 시 ID 보존)
+BYTE_TRACK_BUFFER: int = 90
 
-# ── LineZone 통행량 카운팅 라인 (픽셀 좌표) ───────────────────────────
+# LineZone
 COUNT_LINE_START = (0, 360)
-COUNT_LINE_END   = (1280, 360)
+COUNT_LINE_END = (1280, 360)
 
-# ── Perspective Transform 랜드마크 ────────────────────────────────────
-# 실제 프레임 해상도(640×360) 네 모서리를 GPS 격자에 매핑
-# GPS는 update_gps_center()가 카메라 선택 시 동적으로 재보정
+# Perspective transform
 PIXEL_POINTS = [
-    [  0,   0],   # 좌상
-    [640,   0],   # 우상
-    [640, 360],   # 우하
-    [  0, 360],   # 좌하
+    [0, 0],
+    [640, 0],
+    [640, 360],
+    [0, 360],
 ]
 GPS_POINTS = [
-    [37.4632, 127.0382],  # 좌상
-    [37.4632, 127.0390],  # 우상
-    [37.4620, 127.0390],  # 우하
-    [37.4620, 127.0382],  # 좌하
+    [37.4632, 127.0382],
+    [37.4632, 127.0390],
+    [37.4620, 127.0390],
+    [37.4620, 127.0382],
 ]
 
-REAL_WORLD_WIDTH_M: float  = 20.0
+REAL_WORLD_WIDTH_M: float = 20.0
 REAL_WORLD_HEIGHT_M: float = 60.0
 
-# ── 속도 / LOS 임계값 ─────────────────────────────────────────────────
-SPEED_LIMIT_KPH: float = 60.0    # 도심 도로 기준
-FPS: int = 30
+RUNTIME_PROFILE_NAME: str = str(RUNTIME_PROFILE.get("profile", "quality"))
+CAPTURE_INTERVAL_MS: int = int(RUNTIME_PROFILE.get("capture_interval_ms", 33))
+CAPTURE_WIDTH: int = int(RUNTIME_PROFILE.get("capture_width", 640))
+CAPTURE_QUALITY: float = float(RUNTIME_PROFILE.get("capture_quality", 0.92))
+MAX_IN_FLIGHT: int = int(RUNTIME_PROFILE.get("max_in_flight", 2))
+JPEG_QUALITY: int = int(RUNTIME_PROFILE.get("jpeg_quality", 85))
+
+# Traffic analytics
+SPEED_LIMIT_KPH: float = 60.0
+FPS: int = int(RUNTIME_PROFILE.get("backend_fps", 30))
 
 LOS_THRESHOLDS: dict[str, int] = {
     "A": 3,
@@ -81,15 +112,12 @@ LOS_THRESHOLDS: dict[str, int] = {
     "E": 15,
 }
 
-BOTTLENECK_DWELL_FRAMES: int = 60   # 2초 @ 30fps
+BOTTLENECK_DWELL_FRAMES: int = 60
 
-# ── 속도 정확도 ──────────────────────────────────────────────────────────
-SPEED_JITTER_THRESHOLD_M: float = 0.30   # 프레임 간 이동 < 이 값이면 정지로 간주
-SPEED_SMOOTHING_ALPHA: float = 0.4       # EMA 계수 (0~1, 낮을수록 더 평활화)
+SPEED_JITTER_THRESHOLD_M: float = 0.30
+SPEED_SMOOTHING_ALPHA: float = 0.4
 
-# ── 주차 차량 자동 감지 ──────────────────────────────────────────────────
-PARKED_FRAMES_THRESHOLD: int = 300         # 연속 정지 이 프레임 이상 = 주차 (30fps × 10초)
-PARKED_POSITION_RADIUS_PX: float = 30.0   # 이 픽셀 반경 내 신규 탐지 → 즉시 주차 분류
+PARKED_FRAMES_THRESHOLD: int = 300
+PARKED_POSITION_RADIUS_PX: float = 30.0
 
-# ── 카메라 베어링 보정 ────────────────────────────────────────────────────
-CAMERA_BEARING_DEG: float = 0.0          # CCTV가 정북 기준 시계 방향으로 틀어진 각도(도)
+CAMERA_BEARING_DEG: float = 0.0

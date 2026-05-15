@@ -7,10 +7,15 @@ dist/
 __pycache__/
 *.pyc
 .venv/
+.venv-cuda/
 *.egg-info/
+*.out.log
+*.err.log
 
 # 환경변수
 .env
+.yolo_model
+.runtime_profile.json
 
 # 모델 가중치 / 변환 파일 (용량 큼, make setup으로 생성)
 *.pt

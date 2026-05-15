@@ -4,15 +4,22 @@ main.py — FastAPI WebSocket 브로드캐스트 서버
   엔드포인트:
     WS   /ws              실시간 JSON 스트림
     GET  /cctvs           뷰포트 범위 CCTV 목록
-    POST /switch-camera   라이브 카메라 전환 + BoT-SORT 리셋
+    POST /switch-camera   라이브 카메라 전환 + boxmot 트래커 리셋
     GET  /cctv-refresh    HLS 토큰 만료 시 신선한 URL 반환 (브라우저용)
     GET  /health          헬스체크
+
+  파이프라인 구조:
+    live_loop  — 서버사이드 HLS 직접 처리, ws/detect 미활성 시 브로드캐스트
+    ws/detect  — 브라우저 캔버스 프레임 처리 (YOLO 탭 활성 시)
+    두 파이프라인은 동일 VehicleDetector를 공유하므로 동시에 track() 호출 금지.
+    ws/detect 활성 시 live_loop는 프레임만 드레인하고 track()을 건너뜀.
 """
 
 from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from contextlib import asynccontextmanager
 
@@ -20,12 +27,14 @@ import cv2
 import httpx
 import numpy as np
 import supervision as sv
+from cachetools import TTLCache
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from analytics import TrafficAnalytics, VehicleState
-from transform import PerspectiveTransformer
+from transform import PerspectiveTransformer, CALIBRATION_PATH
+import roi_manager
 from config import (
     CAPTURE_INTERVAL_MS,
     CAPTURE_QUALITY,
@@ -48,8 +57,8 @@ _clients: set[WebSocket] = set()
 
 _camera_queue: asyncio.Queue = asyncio.Queue()
 
-_latest_annotated: bytes | None = None
 _frame_count: int = 0
+_detect_clients: int = 0   # ws/detect 활성 연결 수 — live_loop 브로드캐스트 억제용
 
 # 현재 선택된 카메라 정보 (lat, lon, name, cctvurl)
 _current_cam: dict | None = None
@@ -57,6 +66,20 @@ _cam_version: int = 0
 
 _box_ann   = sv.BoxAnnotator(thickness=2)
 _label_ann = sv.LabelAnnotator(text_scale=0.4, text_thickness=1, text_padding=3)
+
+# ITS API 응답 캐시 (TTL 5분, 최대 50개 bbox 조합)
+_cctv_cache: TTLCache = TTLCache(maxsize=50, ttl=300)
+
+
+def _safe_tid(tracker_id_arr, idx: int, fallback: int) -> int:
+    """BoT-SORT가 미확정 트랙에 np.nan을 반환할 때 ValueError 방지."""
+    if tracker_id_arr is None:
+        return fallback
+    try:
+        v = int(tracker_id_arr[idx])
+        return fallback if math.isnan(float(v)) else v
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _make_placeholder() -> bytes:
@@ -123,7 +146,11 @@ async def get_cctvs(
     minY: float = Query(37.36),
     maxY: float = Query(37.56),
 ):
-    """ITS API에서 현재 뷰 영역의 CCTV 위치·URL 목록 반환"""
+    """ITS API에서 현재 뷰 영역의 CCTV 위치·URL 목록 반환 (5분 캐시)"""
+    cache_key = (round(minX, 3), round(maxX, 3), round(minY, 3), round(maxY, 3))
+    if cache_key in _cctv_cache:
+        return _cctv_cache[cache_key]
+
     params = {
         "apiKey":   ITS_API_KEY,
         "type":     "its",
@@ -136,7 +163,9 @@ async def get_cctvs(
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(ITS_BASE_URL, params=params)
             resp.raise_for_status()
-            items = resp.json().get("response", {}).get("data", [])
+            raw = resp.json().get("response", {}).get("data", [])
+            # ITS API returns a dict (not list) when exactly 1 result
+            items = [raw] if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
             result = []
             for item in items:
                 try:
@@ -152,10 +181,13 @@ async def get_cctvs(
                         "lat":     lat,
                         "lon":     lon,
                         "cctvurl": url,
+                        "heading": 0,    # ITS API 미제공 — calibration으로 업데이트
+                        "fov_deg": 70,
                     })
                 except (ValueError, TypeError):
                     continue
-            logger.info("CCTV 조회 완료: %d개", len(result))
+            logger.info("CCTV 조회 완료: %d개 (캐시 저장)", len(result))
+            _cctv_cache[cache_key] = result
             return result
     except Exception as e:
         logger.warning("CCTV 목록 조회 실패: %s", e)
@@ -180,7 +212,7 @@ async def switch_camera(body: CameraSwitch):
     }
     _cam_version += 1
     _transformer.update_gps_center(body.lat, body.lon)
-    analytics.__init__()
+    analytics.reset()
 
     # live_loop 스트림 전환 큐잉
     if body.cctvurl:
@@ -218,7 +250,8 @@ async def cctv_refresh(
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(ITS_BASE_URL, params=params)
             resp.raise_for_status()
-            items = resp.json().get("response", {}).get("data", [])
+            raw = resp.json().get("response", {}).get("data", [])
+            items = [raw] if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
         for item in items:
             if not name or item.get("cctvname") == name:
                 return {"cctvurl": item.get("cctvurl", "")}
@@ -235,7 +268,9 @@ async def ws_detect(ws: WebSocket):
     → BoT-SORT 탐지+추적 + 어노테이션 → 결과 반환
     → analytics 업데이트 → 전체 클라이언트에 브로드캐스트
     """
+    global _detect_clients
     await ws.accept()
+    _detect_clients += 1
 
     detector = getattr(app.state, "detector", None)
     if detector is None:
@@ -249,7 +284,7 @@ async def ws_detect(ws: WebSocket):
     last_cam_ver = _cam_version
     fid = 0
 
-    logger.info("BoT-SORT 탐지 클라이언트 연결")
+    logger.info("YOLO+boxmot 탐지 클라이언트 연결 (총 %d명)", _detect_clients)
     try:
         while True:
             raw = await ws.receive_bytes()
@@ -279,10 +314,7 @@ async def ws_detect(ws: WebSocket):
             for i in range(len(tracked)):
                 xyxy     = tracked.xyxy[i].tolist()
                 class_id = int(tracked.class_id[i])
-                track_id = (
-                    int(tracked.tracker_id[i])
-                    if tracked.tracker_id is not None else i
-                )
+                track_id = _safe_tid(tracked.tracker_id, i, i)
                 cx = (xyxy[0] + xyxy[2]) / 2
                 cy = (xyxy[1] + xyxy[3]) / 2
                 lat, lon = _transformer.pixel_to_gps(cx, cy)
@@ -306,7 +338,14 @@ async def ws_detect(ws: WebSocket):
     except Exception as e:
         logger.warning("ws/detect 오류: %s", e)
     finally:
-        logger.info("BoT-SORT 탐지 클라이언트 해제")
+        _detect_clients = max(0, _detect_clients - 1)
+        # ws/detect 종료 후 live_loop가 깨끗한 상태로 boxmot를 재개할 수 있도록 리셋
+        if _detect_clients == 0:
+            det = getattr(app.state, "detector", None)
+            if det is not None:
+                det.reset_tracker()
+                logger.info("ws/detect 종료 → boxmot 트래커 리셋 (live_loop 재개 준비)")
+        logger.info("YOLO 탐지 클라이언트 해제 (총 %d명)", _detect_clients)
 
 
 def _yolo_detect_annotate(
@@ -324,18 +363,146 @@ def _yolo_detect_annotate(
 
     labels = [
         f"{VEHICLE_CLASSES.get(int(detections.class_id[i]), '?')} "
-        f"#{int(detections.tracker_id[i]) if detections.tracker_id is not None else i} "
+        f"#{_safe_tid(detections.tracker_id, i, i)} "
         f"{float(detections.confidence[i]):.0%}"
         for i in range(len(detections))
     ]
     annotated = _box_ann.annotate(frame.copy(), detections)
     annotated = _label_ann.annotate(annotated, detections, labels)
-    cv2.putText(annotated, f"BoT-SORT  {len(detections)} vehicles",
+    cv2.putText(annotated, f"boxmot  {len(detections)} vehicles",
                 (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 80), 2)
 
     _frame_count += 1
     _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     return buf.tobytes(), detections, fw, fh
+
+
+# ── ROI 관리 ──────────────────────────────────────────────────────────
+@app.get("/roi/{camera_key}")
+async def get_roi(camera_key: str):
+    """카메라의 저장된 ROI 반환 (정규화 좌표 0~1)."""
+    # camera_key 대신 cctvurl hash를 직접 받음
+    # 프론트엔드에서 cctvurl을 통해 키를 계산하여 전달
+    if not roi_manager._CONFIG_PATH.exists():
+        return {"polygon": None}
+    try:
+        import json as _json
+        data = _json.loads(roi_manager._CONFIG_PATH.read_text(encoding="utf-8"))
+        entry = data.get(camera_key)
+        return {"polygon": entry.get("polygon") if entry else None}
+    except Exception:
+        return {"polygon": None}
+
+
+class RoiBody(BaseModel):
+    cctvurl: str
+    polygon: list[list[float]]
+
+
+@app.post("/roi")
+async def save_roi(body: RoiBody):
+    """카메라의 ROI 저장 (정규화 좌표 0~1)."""
+    if len(body.polygon) < 3:
+        return {"ok": False, "error": "polygon must have at least 3 points"}
+    roi_manager.save_roi(body.cctvurl, body.polygon, auto=False)
+    # 현재 활성 카메라와 같으면 detector에 즉시 적용
+    det = getattr(app.state, "detector", None)
+    if det is not None and _current_cam and _current_cam.get("cctvurl") == body.cctvurl:
+        det.set_roi(body.polygon)
+    return {"ok": True}
+
+
+# ── Calibration 관리 ──────────────────────────────────────────────────────
+class CalibBody(BaseModel):
+    cctvurl: str                          # camera URL (camera_key는 서버에서 계산)
+    pixel_pts: list[list[float]]          # [[u,v] × 4]  실제 픽셀
+    gps_pts:   list[list[float]]          # [[lat,lon] × 4]
+
+
+@app.get("/calibration/{camera_key}")
+async def get_calibration(camera_key: str):
+    """저장된 캘리브레이션 데이터 반환."""
+    if not CALIBRATION_PATH.exists():
+        return {"calibration": None}
+    try:
+        data = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
+        return {"calibration": data.get(camera_key)}
+    except Exception:
+        return {"calibration": None}
+
+
+@app.post("/calibration")
+async def save_calibration(body: CalibBody):
+    """4-point calibration 저장 + 현재 카메라면 transformer 즉시 업데이트."""
+    if len(body.pixel_pts) != 4 or len(body.gps_pts) != 4:
+        return {"ok": False, "error": "4쌍의 대응점이 필요합니다"}
+
+    cam_key = roi_manager.camera_key(body.cctvurl)
+
+    # JSON 파일 저장
+    data: dict = {}
+    if CALIBRATION_PATH.exists():
+        try:
+            data = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    from datetime import datetime, timezone
+    data[cam_key] = {
+        "pixel_pts": body.pixel_pts,
+        "gps_pts":   body.gps_pts,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    CALIBRATION_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    # 현재 활성 카메라와 같으면 transformer 즉시 업데이트
+    if _current_cam and roi_manager.camera_key(_current_cam.get("cctvurl", "")) == cam_key:
+        try:
+            _transformer.update_from_calibration(body.pixel_pts, body.gps_pts)
+            logger.info("Transformer 캘리브레이션 적용: %s", cam_key)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    return {"ok": True, "camera_key": cam_key}
+
+
+@app.delete("/calibration/{camera_key}")
+async def delete_calibration(camera_key: str):
+    """캘리브레이션 삭제 (기본 근사값으로 롤백)."""
+    if CALIBRATION_PATH.exists():
+        try:
+            data = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
+            data.pop(camera_key, None)
+            CALIBRATION_PATH.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+    # 현재 카메라면 GPS center 근사값으로 롤백
+    if _current_cam and roi_manager.camera_key(_current_cam.get("cctvurl", "")) == camera_key:
+        _transformer.update_gps_center(_current_cam["lat"], _current_cam["lon"])
+    return {"ok": True}
+
+
+@app.delete("/roi/{camera_key}")
+async def delete_roi(camera_key: str):
+    """카메라의 ROI 삭제."""
+    if not roi_manager._CONFIG_PATH.exists():
+        return {"ok": True}
+    try:
+        import json as _json
+        data = _json.loads(roi_manager._CONFIG_PATH.read_text(encoding="utf-8"))
+        data.pop(camera_key, None)
+        roi_manager._CONFIG_PATH.write_text(
+            _json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+    det = getattr(app.state, "detector", None)
+    if det is not None:
+        det.set_roi(None)
+    return {"ok": True}
 
 
 # ── 헬스체크 ──────────────────────────────────────────────────────────
@@ -352,6 +519,8 @@ async def health():
 
 @app.get("/runtime-config")
 async def runtime_config():
+    det = getattr(app.state, "detector", None)
+    tracker_info = det.tracker_info if det else {}
     return {
         "profile": RUNTIME_PROFILE_NAME,
         "backendFps": FPS,
@@ -360,6 +529,9 @@ async def runtime_config():
         "captureWidth": CAPTURE_WIDTH,
         "captureQuality": CAPTURE_QUALITY,
         "maxInFlight": MAX_IN_FLIGHT,
+        "tracker": tracker_info.get("tracker", "unknown"),
+        "trackerTier": tracker_info.get("tier", "unknown"),
+        "inferenceBackend": tracker_info.get("backend", "unknown"),
     }
 
 
@@ -394,17 +566,51 @@ async def live_loop(detector, stream) -> None:
     logger.info("Live 루프 대기 중 — 지도에서 CCTV를 클릭하여 스트림을 시작하세요")
 
     while True:
-        # 카메라 전환 요청 처리
+        # 카메라 전환 요청 처리 — 큐에 쌓인 항목 중 최신 것만 사용
         if not _camera_queue.empty():
             cam = _camera_queue.get_nowait()
+            # 큐에 추가 항목이 있으면 가장 마지막 것만 사용 (중간 전환 스킵)
+            while not _camera_queue.empty():
+                cam = _camera_queue.get_nowait()
             try:
-                stream.switch_to(cam["url"])
+                await asyncio.to_thread(stream.switch_to, cam["url"])
                 _transformer.update_gps_center(cam["lat"], cam["lon"])
                 tracker = VehicleTracker()
-                analytics.__init__()
+                analytics.reset()
                 skip_budget = 0
+
+                # 수동으로 저장된 ROI만 적용 (auto-estimate는 탐지 정확도를 해칠 수 있어 자동 적용 안 함)
+                cam_url = cam["url"]
+                saved_roi = roi_manager.load_roi(cam_url)
+                det = getattr(app.state, "detector", None)
+                if det is not None:
+                    det.set_roi(saved_roi)  # None이면 전체 프레임 탐지
+
+                # 저장된 calibration 자동 적용
+                cam_key = roi_manager.camera_key(cam_url)
+                if CALIBRATION_PATH.exists():
+                    try:
+                        cal_data = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
+                        cal = cal_data.get(cam_key)
+                        if cal:
+                            _transformer.update_from_calibration(
+                                cal["pixel_pts"], cal["gps_pts"]
+                            )
+                            logger.info("저장된 캘리브레이션 적용: %s", cam_key)
+                    except Exception as exc:
+                        logger.warning("캘리브레이션 로드 실패: %s", exc)
+
+                # 스트림 준비 완료 신호를 모든 WS 클라이언트에 전송
+                await _broadcast({
+                    "type": "camera_ready",
+                    "name": cam.get("name", ""),
+                    "roi": saved_roi,
+                    "camera_key": cam_key,
+                })
+                logger.info("카메라 전환 완료, camera_ready 신호 전송")
             except RuntimeError as e:
                 logger.warning("카메라 전환 실패: %s", e)
+                await _broadcast({"type": "camera_error", "message": str(e)})
 
         if not stream.is_open:
             await asyncio.sleep(0.5)
@@ -417,6 +623,11 @@ async def live_loop(detector, stream) -> None:
 
         if skip_budget > 0:
             skip_budget -= 1
+            continue
+
+        # ws/detect 활성 시 boxmot 트래커 공유 충돌 방지 — 프레임만 드레인
+        if _detect_clients > 0:
+            await asyncio.sleep(target_interval)
             continue
 
         t0 = time.perf_counter()
@@ -434,7 +645,7 @@ async def live_loop(detector, stream) -> None:
 
 
 def _live_process(frame_id, frame, detector, tracker) -> dict | None:
-    global _latest_annotated, _frame_count
+    global _frame_count
 
     h, w = frame.shape[:2]
     timestamp_ms = time.time() * 1000
@@ -447,10 +658,7 @@ def _live_process(frame_id, frame, detector, tracker) -> dict | None:
     for i in range(len(tracked)):
         xyxy     = tracked.xyxy[i].tolist()
         class_id = int(tracked.class_id[i])
-        track_id = (
-            int(tracked.tracker_id[i])
-            if tracked.tracker_id is not None else i
-        )
+        track_id = _safe_tid(tracked.tracker_id, i, i)
         cx = (xyxy[0] + xyxy[2]) / 2
         cy = (xyxy[1] + xyxy[3]) / 2
 
@@ -465,23 +673,6 @@ def _live_process(frame_id, frame, detector, tracker) -> dict | None:
             lat=lat, lon=lon,
             x_m=x_m, y_m=y_m,
         ))
-
-    try:
-        labels = [
-            f"{VEHICLE_CLASSES.get(int(tracked.class_id[i]), '?')} "
-            f"#{int(tracked.tracker_id[i]) if tracked.tracker_id is not None else i}"
-            for i in range(len(tracked))
-        ]
-        annotated = _box_ann.annotate(frame.copy(), tracked)
-        annotated = _label_ann.annotate(annotated, tracked, labels)
-        cv2.putText(
-            annotated, f"Frame {frame_id} | {len(vehicles)} vehicles",
-            (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
-        )
-        _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-        _latest_annotated = buf.tobytes()
-    except Exception:
-        pass
 
     _frame_count += 1
     result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt)
@@ -509,6 +700,8 @@ async def hls_refresh_loop(stream) -> None:
                 resp = await client.get(ITS_BASE_URL, params=params)
                 resp.raise_for_status()
                 items = resp.json().get("response", {}).get("data", [])
+            raw = resp.json().get("response", {}).get("data", [])
+            items = [raw] if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
             for item in items:
                 if item.get("cctvname") == name:
                     new_url = item.get("cctvurl", "")

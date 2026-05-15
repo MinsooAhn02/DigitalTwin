@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from collections import defaultdict
 import math
+import threading
 
 from config import (
     SPEED_LIMIT_KPH,
@@ -74,12 +75,21 @@ class FrameAnalytics:
 class TrafficAnalytics:
 
     def __init__(self):
+        self._lock = threading.Lock()
         # track_id → (lat, lon, x_m, y_m, timestamp_s)
         self._prev: dict[int, tuple[float, float, float, float, float]] = {}
         self._dwell: dict[int, int] = defaultdict(int)
         self._speed_ema: dict[int, float] = {}
         # 주차 확정된 픽셀 위치 목록 — track_id 변경에도 유지
         self._parked_positions: list[tuple[float, float]] = []
+
+    def reset(self) -> None:
+        """카메라 전환 시 상태 초기화."""
+        with self._lock:
+            self._prev.clear()
+            self._dwell.clear()
+            self._speed_ema.clear()
+            self._parked_positions.clear()
 
     def update(
         self,
@@ -89,7 +99,17 @@ class TrafficAnalytics:
         in_count: int,
         out_count: int,
     ) -> FrameAnalytics:
+        with self._lock:
+            return self._update_locked(frame_id, timestamp_ms, vehicles, in_count, out_count)
 
+    def _update_locked(
+        self,
+        frame_id: int,
+        timestamp_ms: float,
+        vehicles: list[VehicleState],
+        in_count: int,
+        out_count: int,
+    ) -> FrameAnalytics:
         active = {v.track_id for v in vehicles}
         self._gc(active)
 

@@ -27,9 +27,15 @@ from pydantic import BaseModel
 from analytics import TrafficAnalytics, VehicleState
 from transform import PerspectiveTransformer
 from config import (
+    CAPTURE_INTERVAL_MS,
+    CAPTURE_QUALITY,
+    CAPTURE_WIDTH,
     FPS,
     ITS_API_KEY,
     ITS_BASE_URL,
+    JPEG_QUALITY,
+    MAX_IN_FLIGHT,
+    RUNTIME_PROFILE_NAME,
     VEHICLE_CLASSES,
 )
 
@@ -328,7 +334,7 @@ def _yolo_detect_annotate(
                 (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 80), 2)
 
     _frame_count += 1
-    _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     return buf.tobytes(), detections, fw, fh
 
 
@@ -341,6 +347,19 @@ async def health():
         "clients":          len(_clients),
         "stream_open":      stream.is_open if stream else None,
         "frames_processed": _frame_count,
+    }
+
+
+@app.get("/runtime-config")
+async def runtime_config():
+    return {
+        "profile": RUNTIME_PROFILE_NAME,
+        "backendFps": FPS,
+        "jpegQuality": JPEG_QUALITY,
+        "captureIntervalMs": CAPTURE_INTERVAL_MS,
+        "captureWidth": CAPTURE_WIDTH,
+        "captureQuality": CAPTURE_QUALITY,
+        "maxInFlight": MAX_IN_FLIGHT,
     }
 
 
@@ -459,7 +478,7 @@ def _live_process(frame_id, frame, detector, tracker) -> dict | None:
             annotated, f"Frame {frame_id} | {len(vehicles)} vehicles",
             (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
         )
-        _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         _latest_annotated = buf.tobytes()
     except Exception:
         pass

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import Hls from "hls.js";
+import RoiEditor from "./RoiEditor";
+import CalibrationMode from "./CalibrationMode";
 
 const PANEL_W = 720;
 const DEFAULT_RUNTIME_CONFIG = {
@@ -9,7 +11,7 @@ const DEFAULT_RUNTIME_CONFIG = {
   maxInFlight: 2,
 };
 
-export default function CctvPlayer({ cctv, onClose }) {
+export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCancelGps }) {
   const videoRef  = useRef(null);
   const canvasRef = useRef(null);      // 숨김 캔버스 (프레임 캡처용)
   const hlsRef    = useRef(null);
@@ -25,6 +27,10 @@ export default function CctvPlayer({ cctv, onClose }) {
   const [annotatedUrl, setAnnotatedUrl] = useState(null);   // Object URL
   const [yoloStatus, setYoloStatus]   = useState("idle");  // idle | loading | running | error
   const [runtimeConfig, setRuntimeConfig] = useState(DEFAULT_RUNTIME_CONFIG);
+  const [roiEditing, setRoiEditing]       = useState(false);
+  const [currentRoi, setCurrentRoi]       = useState(null);  // 현재 저장된 ROI
+  const [calibrating, setCalibrating]     = useState(false);
+  const [calibrated, setCalibrated]       = useState(false);
 
   useEffect(() => {
     fetch("http://localhost:8000/runtime-config")
@@ -32,6 +38,15 @@ export default function CctvPlayer({ cctv, onClose }) {
       .then((config) => setRuntimeConfig({ ...DEFAULT_RUNTIME_CONFIG, ...config }))
       .catch(() => setRuntimeConfig(DEFAULT_RUNTIME_CONFIG));
   }, []);
+
+  // 카메라 변경 시 ROI/보정 초기화
+  useEffect(() => {
+    setCurrentRoi(null);
+    setRoiEditing(false);
+    setCalibrating(false);
+    setCalibrated(false);
+    onCancelGps?.();
+  }, [cctv?.cctvurl]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── HLS 스트림 ────────────────────────────────────────────────────
   useEffect(() => {
@@ -200,17 +215,33 @@ export default function CctvPlayer({ cctv, onClose }) {
 
       {/* 탭 */}
       <div style={{ display: "flex", background: "#0f172a", borderBottom: "1px solid #1e3a5f" }}>
-        {[{ key: "live", label: "📷 실시간" }, { key: "yolo", label: "🤖 YOLO 탐지" }].map(({ key, label }) => (
-          <button key={key} onClick={() => setTab(key)} style={{
+        {[
+          { key: "live", label: "📷 실시간" },
+          { key: "yolo", label: "🤖 YOLO 탐지" },
+          { key: "roi",  label: "🎯 ROI 편집" },
+          { key: "cal",  label: "🔧 보정" },
+        ].map(({ key, label }) => (
+          <button key={key} onClick={() => {
+            setTab(key);
+            setRoiEditing(key === "roi");
+            if (key !== "cal") { setCalibrating(false); onCancelGps?.(); }
+            if (key === "cal") setCalibrating(true);
+          }} style={{
             flex: 1, padding: "7px 0", background: tab === key ? "#1e293b" : "transparent",
             border: "none", borderBottom: tab === key ? "2px solid #38bdf8" : "2px solid transparent",
-            color: tab === key ? "#f1f5f9" : "#64748b", fontSize: 12, fontWeight: 600, cursor: "pointer",
+            color: tab === key ? "#f1f5f9" : "#64748b", fontSize: 11, fontWeight: 600, cursor: "pointer",
           }}>
             {label}
             {key === "yolo" && tab === "yolo" && (
               <span style={{ marginLeft: 6, fontSize: 10, color: yoloStatusLabel.color }}>
                 ● {yoloStatusLabel.text}
               </span>
+            )}
+            {key === "roi" && currentRoi && (
+              <span style={{ marginLeft: 6, fontSize: 10, color: "#22d3ee" }}>● 설정됨</span>
+            )}
+            {key === "cal" && calibrated && (
+              <span style={{ marginLeft: 6, fontSize: 10, color: "#34d399" }}>● 완료</span>
             )}
           </button>
         ))}
@@ -219,10 +250,10 @@ export default function CctvPlayer({ cctv, onClose }) {
       {/* 영상 영역 (16:9) */}
       <div style={{ position: "relative", aspectRatio: "16/9", background: "#000" }}>
 
-        {/* 실시간 HLS */}
+        {/* 실시간 HLS — 보정 탭에서도 영상 표시 필요 */}
         <video ref={videoRef} muted playsInline style={{
           width: "100%", height: "100%", objectFit: "contain",
-          display: tab === "live" ? "block" : "none",
+          display: (tab === "live" || tab === "cal") ? "block" : "none",
         }} />
 
         {/* YOLO 어노테이션 결과 */}
@@ -258,6 +289,30 @@ export default function CctvPlayer({ cctv, onClose }) {
           }}>
             <div style={{ fontSize: 24, marginBottom: 8 }}>⚠️</div>{hlsError}
           </div>
+        )}
+
+        {/* ROI 편집 오버레이 */}
+        {roiEditing && cctv?.cctvurl && (
+          <RoiEditor
+            videoRef={videoRef}
+            cctvurl={cctv.cctvurl}
+            initialRoi={currentRoi}
+            onClose={() => { setRoiEditing(false); setTab("live"); }}
+            onSaved={(roi) => { setCurrentRoi(roi); setRoiEditing(false); setTab("live"); }}
+          />
+        )}
+
+        {/* 보정 오버레이 */}
+        {calibrating && cctv?.cctvurl && (
+          <CalibrationMode
+            videoRef={videoRef}
+            cctvurl={cctv.cctvurl}
+            pendingGps={pendingGps}
+            onNeedGps={onNeedGps}
+            onCancelGps={onCancelGps}
+            onClose={() => { setCalibrating(false); setTab("live"); onCancelGps?.(); }}
+            onSaved={() => { setCalibrated(true); setCalibrating(false); setTab("live"); onCancelGps?.(); }}
+          />
         )}
       </div>
 

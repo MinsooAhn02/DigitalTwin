@@ -1,4 +1,4 @@
-import { useReducer, useEffect, useState, useCallback } from "react";
+import { useReducer, useEffect, useState, useCallback, useMemo, memo } from "react";
 import { FlyToInterpolator } from "deck.gl";
 import { useWebSocket } from "./hooks/useWebSocket";
 import MapView from "./components/MapView";
@@ -33,7 +33,7 @@ function trailReducer(state, vehicles) {
 }
 
 export default function App() {
-  const { frameData, isConnected, error } = useWebSocket();
+  const { frameData, isConnected, error, cameraReady } = useWebSocket();
   const [trailMap, dispatchTrail]         = useReducer(trailReducer, new Map());
   const [cctvList, setCctvList]           = useState([]);
   const [selectedCctv, setSelectedCctv]   = useState(null);
@@ -41,6 +41,14 @@ export default function App() {
   const [cctvLoading, setCctvLoading]     = useState(false);
   const [switching, setSwitching]         = useState(false);
   const [guideVisible, setGuideVisible]   = useState(true);
+  // 보정 상태: null = 비활성, "awaiting" = 지도 클릭 대기
+  const [calMode, setCalMode]             = useState(null);
+  const [pendingGps, setPendingGps]       = useState(null);
+
+  // camera_ready 신호 수신 시 switching 상태 해제
+  useEffect(() => {
+    if (cameraReady > 0) setSwitching(false);
+  }, [cameraReady]);
 
   const activeData  = selectedCctv ? frameData : null;
   const vehicles    = activeData?.vehicles      ?? [];
@@ -77,7 +85,16 @@ export default function App() {
 
   const trailLayer = useTrailLayer(trailMap, vehicles);
 
+  // 보정 모드: 지도 클릭으로 GPS 좌표 수집
+  const handleMapClick = useCallback((info) => {
+    if (calMode !== "awaiting" || !info.coordinate) return;
+    const [lon, lat] = info.coordinate;
+    setPendingGps({ lat, lon });
+    setCalMode(null);
+  }, [calMode]);
+
   const handleCctvClick = useCallback((cctv) => {
+    if (calMode === "awaiting") return; // 보정 중 카메라 전환 방지
     setSelectedCctv(cctv);
     setViewState({
       longitude: cctv.lon,
@@ -88,24 +105,22 @@ export default function App() {
       transitionDuration: 1200,
       transitionInterpolator: new FlyToInterpolator(),
     });
-    // 라이브 카메라 전환
+    // 라이브 카메라 전환 — switching 해제는 WS camera_ready 신호로 처리
     if (cctv.cctvurl) {
       setSwitching(true);
       fetch("http://localhost:8000/switch-camera", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ cctvurl: cctv.cctvurl, lat: cctv.lat, lon: cctv.lon, name: cctv.name ?? "" }),
-      })
-        .catch(() => {})
-        .finally(() => setTimeout(() => setSwitching(false), 3000));
+      }).catch(() => setSwitching(false));
     }
-  }, []);
+  }, [calMode]);
 
   // CCTV 로드 후 5초 안에 선택 안 했을 때만 안내 표시
   const noCameraSelected = guideVisible && cctvList.length > 0 && !selectedCctv;
 
-  const speedingVehicles = vehicles.filter((v) => v.is_speeding);
-  const bottlenecks      = vehicles.filter((v) => v.is_bottleneck);
+  const speedingVehicles = useMemo(() => vehicles.filter((v) => v.is_speeding), [vehicles]);
+  const bottlenecks      = useMemo(() => vehicles.filter((v) => v.is_bottleneck), [vehicles]);
 
   return (
     <div style={{ display: "flex", height: "100vh", background: "#111827", color: "#f9fafb", fontFamily: "system-ui, sans-serif", overflow: "hidden" }}>
@@ -120,6 +135,8 @@ export default function App() {
           viewState={viewState}
           onViewStateChange={setViewState}
           onCctvClick={handleCctvClick}
+          calibrationMode={calMode === "awaiting"}
+          onMapClick={handleMapClick}
         />
 
         {/* 연결 상태 칩 */}
@@ -224,10 +241,30 @@ export default function App() {
         {/* 범례 */}
         <Legend cctvCount={cctvList.length} />
 
+        {/* 보정 모드 안내 배너 */}
+        {calMode === "awaiting" && (
+          <div style={{
+            position: "absolute", top: 52, left: "50%",
+            transform: "translateX(-50%)",
+            background: "rgba(30,58,138,0.95)", padding: "8px 20px",
+            borderRadius: 999, fontSize: 13, backdropFilter: "blur(4px)",
+            border: "1px solid #3b82f6", whiteSpace: "nowrap", color: "#bfdbfe", zIndex: 30,
+          }}>
+            🗺 지도에서 동일 지점을 클릭하세요
+            <button
+              onClick={() => { setCalMode(null); setPendingGps(null); }}
+              style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", marginLeft: 10, fontSize: 14 }}
+            >✕</button>
+          </div>
+        )}
+
         {/* CCTV 실시간 영상 — 지도 좌하단 플로팅 패널 */}
         <CctvPlayer
           cctv={selectedCctv}
-          onClose={() => setSelectedCctv(null)}
+          onClose={() => { setSelectedCctv(null); setCalMode(null); setPendingGps(null); }}
+          pendingGps={pendingGps}
+          onNeedGps={() => { setPendingGps(null); setCalMode("awaiting"); }}
+          onCancelGps={() => { setCalMode(null); setPendingGps(null); }}
         />
       </div>
 
@@ -279,6 +316,7 @@ function Legend({ cctvCount }) {
     { color: "#ff1e1e", label: "과속", bold: true },
     { color: "#c8c8c8", label: "Unknown" },
     { color: "#fbbf24", label: `CCTV (${cctvCount})`, square: true },
+    { color: "#22d3ee", label: "시야 범위 (선택 시)", square: true, opacity: 0.4 },
   ];
   return (
     <div style={{
@@ -292,6 +330,7 @@ function Legend({ cctvCount }) {
             width: 10, height: 10,
             borderRadius: it.square ? 2 : "50%",
             background: it.color,
+            opacity: it.opacity ?? 1,
             display: "inline-block",
             border: it.square ? "1.5px solid #fff" : "none",
           }} />
@@ -302,13 +341,13 @@ function Legend({ cctvCount }) {
   );
 }
 
-function AlertPanel({ speeding, bottlenecks }) {
+const AlertPanel = memo(function AlertPanel({ speeding, bottlenecks }) {
   const total = speeding.length + bottlenecks.length;
   if (total === 0) return null;
 
   return (
     <Card label={`경보 (${total})`}>
-      <ul style={{ margin: 0, padding: 0, listStyle: "none", maxHeight: 160, overflowY: "auto" }}>
+      <ul style={{ margin: 0, padding: 0, listStyle: "none", maxHeight: 160, overflowY: "auto", contain: "layout" }}>
         {speeding.map((v) => (
           <AlertItem key={`sp-${v.track_id}`} id={v.track_id} cls={v.class_name}
             tag="과속" tagColor="#f87171" extra={`${v.speed_kph?.toFixed(0)} km/h`} />
@@ -320,7 +359,16 @@ function AlertPanel({ speeding, bottlenecks }) {
       </ul>
     </Card>
   );
-}
+}, (prev, next) => {
+  // track_id 집합이 동일하고 값도 같으면 리렌더 스킵
+  if (prev.speeding.length !== next.speeding.length) return false;
+  if (prev.bottlenecks.length !== next.bottlenecks.length) return false;
+  const prevIds = new Set(prev.speeding.map((v) => v.track_id));
+  if (!next.speeding.every((v) => prevIds.has(v.track_id))) return false;
+  const prevBnIds = new Set(prev.bottlenecks.map((v) => v.track_id));
+  if (!next.bottlenecks.every((v) => prevBnIds.has(v.track_id))) return false;
+  return true;
+});
 
 function AlertItem({ id, cls, tag, tagColor, extra }) {
   return (

@@ -42,12 +42,16 @@ class HardwareInfo:
 
 @dataclass(frozen=True)
 class ModelOption:
-    variant: str
-    name: str
-    label: str
-    note: str
+    variant:    str
+    name:       str
+    label:      str
+    note:       str
     min_gpu_gb: float
-    profile: str
+    profile:    str
+    size_mb:    int    # .pt 다운로드 크기 (MB)
+    fps_gpu:    int    # TensorRT 기준 예상 FPS
+    fps_cpu:    int    # CPU only 예상 FPS
+    export_min: int    # TensorRT 변환 소요 시간 (분)
 
     @property
     def stem(self) -> str:
@@ -63,10 +67,10 @@ class ModelOption:
 
 
 MODEL_OPTIONS = [
-    ModelOption("n", "YOLOv8n", "Fastest", "Low spec / quick demo", 0.0, "fast"),
-    ModelOption("s", "YOLOv8s", "Balanced", "Recommended for mid GPUs", 4.0, "balanced"),
-    ModelOption("m", "YOLOv8m", "Accurate", "Good accuracy with enough VRAM", 6.0, "quality"),
-    ModelOption("x", "YOLOv8x", "Best accuracy", "High-end GPU / best detection", 8.0, "quality"),
+    ModelOption("n", "YOLOv8n", "Fastest",       "CPU 친화적 · 가벼운 데모용",          0.0, "fast",      6,  50,  6, 1),
+    ModelOption("s", "YOLOv8s", "Balanced",       "중급 GPU 추천 · 속도·정확도 균형",    4.0, "balanced", 22,  45,  4, 2),
+    ModelOption("m", "YOLOv8m", "Accurate",       "높은 정확도 · 6 GB+ VRAM 필요",      6.0, "quality",  52,  30,  2, 5),
+    ModelOption("x", "YOLOv8x", "Best accuracy",  "최고 정확도 · 고사양 GPU 전용",       8.0, "quality", 131,  25,  1, 8),
 ]
 
 PROFILE_SETTINGS = {
@@ -170,115 +174,282 @@ def option_status(option: ModelOption) -> str:
     return "Will download weights"
 
 
-def _button_text(option: ModelOption, recommended: str) -> str:
-    prefix = "[Recommended] " if option.variant == recommended else ""
-    return (
-        f"{prefix}{option.name} ({option.label})\n"
-        f"{option.note}\n"
-        f"{option_status(option)}"
-    )
+def _fps_line(option: ModelOption, hw: HardwareInfo) -> str:
+    if hw.cuda_available:
+        return f"GPU: ~{option.fps_gpu} fps   |   CPU: ~{option.fps_cpu} fps"
+    return f"CPU 전용: ~{option.fps_cpu} fps  (GPU 없음)"
+
+
+def _setup_line(option: ModelOption, hw: HardwareInfo) -> tuple[str, str]:
+    """(text, color_hint) — color_hint: 'green' | 'yellow' | 'orange'"""
+    has_engine = option.engine_path.exists()
+    has_pt     = option.pt_path.exists()
+    trt_usable = hw.cuda_available  # tensorrt itself may be installed later
+
+    if has_engine:
+        return "▶ 즉시 시작 가능", "green"
+    if has_pt and not trt_usable:
+        return "▶ 즉시 시작 가능 (TensorRT 없음 — CPU 모드)", "yellow"
+    if has_pt:
+        return f"⏱ TensorRT 변환: 약 {option.export_min}분 (최초 1회)", "yellow"
+    if trt_usable:
+        dl_min = max(1, option.size_mb // 20)
+        total  = option.export_min + dl_min
+        return f"⏱ 다운로드 ~{option.size_mb} MB + TensorRT 변환: 총 약 {total}분", "orange"
+    return f"⬇ ~{option.size_mb} MB 다운로드 후 즉시 시작", "orange"
 
 
 def choose_with_gui(hw: HardwareInfo, recommended: str) -> str | None:
     try:
         import tkinter as tk
-        from tkinter import ttk
     except Exception:
         return None
 
-    selected: dict[str, str | None] = {"variant": None, "use_cuda": None}
+    # ── 색상 팔레트 ────────────────────────────────────────────────────
+    BG           = "#0f0f1a"
+    CARD_DEFAULT = "#1c1c2e"
+    CARD_INST    = "#0d2318"   # 설치됨
+    CARD_REC     = "#0d1f35"   # 추천
+    CARD_BOTH    = "#0d2025"   # 설치됨 + 추천
+    C_PRIMARY    = "#e8e8f4"
+    C_SECONDARY  = "#8888aa"
+    C_GREEN      = "#4ade80"
+    C_BLUE       = "#60a5fa"
+    C_YELLOW     = "#fbbf24"
+    C_ORANGE     = "#fb923c"
+    BORDER_INST  = "#2a5c3a"
+    BORDER_REC   = "#2a4a8c"
+    BORDER_DEF   = "#2a2a3e"
+
+    selected = {"variant": None, "use_cuda": None}
+
     root = tk.Tk()
     root.title("YOLO Model Setup")
+    root.configure(bg=BG)
     root.resizable(False, False)
 
-    frame = ttk.Frame(root, padding=18)
-    frame.grid(row=0, column=0, sticky="nsew")
+    outer = tk.Frame(root, bg=BG, padx=22, pady=18)
+    outer.pack(fill="both", expand=True)
 
-    title = ttk.Label(frame, text="Choose YOLO model", font=("", 14, "bold"))
-    title.grid(row=0, column=0, sticky="w", pady=(0, 8))
+    # ── 제목 ───────────────────────────────────────────────────────────
+    tk.Label(outer, text="YOLO Model Setup",
+             bg=BG, fg=C_PRIMARY, font=("Segoe UI", 15, "bold")).pack(anchor="w")
+    tk.Frame(outer, bg="#2a2a40", height=1).pack(fill="x", pady=(6, 12))
+
+    # ── 하드웨어 요약 ──────────────────────────────────────────────────
+    hw_card = tk.Frame(outer, bg="#14142a", padx=14, pady=10)
+    hw_card.pack(fill="x", pady=(0, 12))
+
+    tk.Label(hw_card, text=f"CPU  {hw.cpu_cores}코어   RAM  {hw.ram_gb:.0f} GB",
+             bg="#14142a", fg=C_SECONDARY, font=("Segoe UI", 9)).pack(anchor="w")
+    tk.Label(hw_card,
+             text=f"GPU  {hw.gpu_name}  ({hw.gpu_memory_gb:.1f} GB VRAM)",
+             bg="#14142a", fg=C_PRIMARY, font=("Segoe UI", 9, "bold")).pack(anchor="w")
 
     if hw.tensorrt_available:
-        trt = "available"
+        trt_text, trt_fg = "TensorRT ✓  가속 가능", C_GREEN
     elif hw.cuda_available:
-        trt = "not installed; setup will try to install it"
+        trt_text, trt_fg = "TensorRT 미설치 — 선택 시 자동 설치 시도", C_YELLOW
     else:
-        trt = "not available"
-    summary = (
-        f"CPU: {hw.cpu_cores} cores, RAM: {hw.ram_gb:.1f} GB\n"
-        f"GPU: {hw.gpu_name} ({hw.gpu_memory_gb:.1f} GB), TensorRT: {trt}"
-    )
-    ttk.Label(frame, text=summary).grid(row=1, column=0, sticky="w", pady=(0, 14))
-    use_cuda = tk.BooleanVar(value=hw.cuda_available)
-    cuda_check = ttk.Checkbutton(
-        frame,
-        text="Use CUDA/TensorRT acceleration when available",
-        variable=use_cuda,
-        state="normal" if hw.cuda_available else "disabled",
-    )
-    cuda_check.grid(row=2, column=0, sticky="w", pady=(0, 10))
+        trt_text, trt_fg = "TensorRT 사용 불가 (GPU 없음) — CPU 모드", "#f87171"
+    tk.Label(hw_card, text=trt_text, bg="#14142a", fg=trt_fg,
+             font=("Segoe UI", 9)).pack(anchor="w")
 
+    # ── CUDA 체크박스 ──────────────────────────────────────────────────
+    use_cuda_var = tk.BooleanVar(value=hw.cuda_available)
+    cuda_row = tk.Frame(outer, bg=BG)
+    cuda_row.pack(anchor="w", pady=(0, 10))
+    tk.Checkbutton(
+        cuda_row, text="CUDA / TensorRT 가속 사용",
+        variable=use_cuda_var, bg=BG, fg=C_PRIMARY,
+        selectcolor="#2a2a3e", activebackground=BG, activeforeground=C_PRIMARY,
+        state="normal" if hw.cuda_available else "disabled",
+        font=("Segoe UI", 10),
+    ).pack(side="left")
+    if not hw.cuda_available:
+        tk.Label(cuda_row, text=" (호환 GPU 없음)", bg=BG, fg=C_SECONDARY,
+                 font=("Segoe UI", 9)).pack(side="left")
+
+    tk.Label(outer, text="모델 선택:", bg=BG, fg=C_SECONDARY,
+             font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 5))
+
+    # ── 모델 카드 ──────────────────────────────────────────────────────
     def pick(variant: str) -> None:
         selected["variant"] = variant
-        selected["use_cuda"] = "true" if use_cuda.get() else "false"
+        selected["use_cuda"] = "true" if use_cuda_var.get() else "false"
         root.destroy()
 
-    for index, option in enumerate(MODEL_OPTIONS, start=3):
-        button = ttk.Button(
-            frame,
-            text=_button_text(option, recommended),
-            command=lambda value=option.variant: pick(value),
-            width=54,
-        )
-        button.grid(row=index, column=0, sticky="ew", pady=4)
+    def _bind_click(widget: tk.Widget, variant: str) -> None:
+        widget.bind("<Button-1>", lambda _e, v=variant: pick(v))
+        for child in widget.winfo_children():
+            _bind_click(child, variant)
 
-    ttk.Button(
-        frame,
-        text=f"Use recommended ({recommended})",
+    color_map = {
+        "green":  C_GREEN,
+        "yellow": C_YELLOW,
+        "orange": C_ORANGE,
+    }
+
+    for option in MODEL_OPTIONS:
+        has_engine = option.engine_path.exists()
+        has_pt     = option.pt_path.exists()
+        is_inst    = has_engine or has_pt
+        is_rec     = option.variant == recommended
+
+        # card background & border
+        if is_inst and is_rec:
+            card_bg, border = CARD_BOTH,    BORDER_REC
+        elif is_inst:
+            card_bg, border = CARD_INST,    BORDER_INST
+        elif is_rec:
+            card_bg, border = CARD_REC,     BORDER_REC
+        else:
+            card_bg, border = CARD_DEFAULT, BORDER_DEF
+
+        border_f = tk.Frame(outer, bg=border, padx=1, pady=1)
+        border_f.pack(fill="x", pady=3)
+        card = tk.Frame(border_f, bg=card_bg, padx=13, pady=9, cursor="hand2")
+        card.pack(fill="both")
+
+        # 상단 행: 모델명 + 상태 배지
+        row_top = tk.Frame(card, bg=card_bg)
+        row_top.pack(fill="x")
+
+        star   = "⭐ " if is_rec else "    "
+        name_c = C_BLUE if is_rec else C_PRIMARY
+        tk.Label(row_top, text=f"{star}{option.name}  ·  {option.label}",
+                 bg=card_bg, fg=name_c,
+                 font=("Segoe UI", 11, "bold")).pack(side="left")
+
+        if has_engine:
+            badge_t, badge_c = "✓  ENGINE READY", C_GREEN
+        elif has_pt:
+            badge_t, badge_c = "✓  WEIGHTS READY", C_YELLOW
+        else:
+            badge_t, badge_c = f"⬇  ~{option.size_mb} MB", C_ORANGE
+        tk.Label(row_top, text=badge_t, bg=card_bg, fg=badge_c,
+                 font=("Segoe UI", 9, "bold")).pack(side="right")
+
+        # 설명
+        tk.Label(card, text=option.note, bg=card_bg, fg=C_SECONDARY,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(1, 0))
+
+        # 하단 행: FPS + 셋업 시간
+        row_bot = tk.Frame(card, bg=card_bg)
+        row_bot.pack(fill="x", pady=(5, 0))
+
+        tk.Label(row_bot, text=_fps_line(option, hw),
+                 bg=card_bg, fg=C_PRIMARY,
+                 font=("Segoe UI", 9)).pack(side="left")
+
+        setup_text, setup_hint = _setup_line(option, hw)
+        tk.Label(row_bot, text=setup_text,
+                 bg=card_bg, fg=color_map[setup_hint],
+                 font=("Segoe UI", 9)).pack(side="right")
+
+        _bind_click(card, option.variant)
+
+    # ── 추천 버튼 ─────────────────────────────────────────────────────
+    rec_option = select_option(recommended)
+    tk.Frame(outer, bg="#2a2a40", height=1).pack(fill="x", pady=(14, 0))
+
+    rec_btn_frame = tk.Frame(outer, bg="#122040", padx=1, pady=1)
+    rec_btn_frame.pack(fill="x", pady=(8, 0))
+    tk.Button(
+        rec_btn_frame,
+        text=f"⭐  추천 모델 사용: {rec_option.name} ({rec_option.label})"
+             f"  —  내 GPU ({hw.gpu_memory_gb:.1f} GB) 기준 최적",
+        bg="#1c3a5c", fg=C_BLUE,
+        activebackground="#2a4a70", activeforeground=C_PRIMARY,
+        font=("Segoe UI", 10, "bold"),
+        relief="flat", bd=0, pady=10, cursor="hand2",
         command=lambda: pick(recommended),
-    ).grid(row=7, column=0, sticky="ew", pady=(12, 0))
+    ).pack(fill="x")
+    tk.Label(
+        outer,
+        text="GPU 메모리 용량을 기준으로 자동 선택됩니다",
+        bg=BG, fg=C_SECONDARY, font=("Segoe UI", 8),
+    ).pack(anchor="e", pady=(3, 0))
 
+    # ── 창 중앙 배치 ──────────────────────────────────────────────────
     root.update_idletasks()
-    x = (root.winfo_screenwidth() - root.winfo_width()) // 2
-    y = (root.winfo_screenheight() - root.winfo_height()) // 2
-    root.geometry(f"+{x}+{y}")
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    ww, wh = root.winfo_width(), root.winfo_height()
+    root.geometry(f"+{(sw - ww) // 2}+{(sh - wh) // 2}")
     root.mainloop()
+
     if selected["use_cuda"] is not None:
         os.environ["YOLO_USE_CUDA"] = selected["use_cuda"]
     return selected["variant"]
 
 
 def choose_with_console(hw: HardwareInfo, recommended: str) -> str:
-    print("YOLO model setup")
-    print(f"CPU: {hw.cpu_cores} cores, RAM: {hw.ram_gb:.1f} GB")
-    print(f"GPU: {hw.gpu_name} ({hw.gpu_memory_gb:.1f} GB)")
+    # ANSI 색상
+    R  = "\033[0m"
+    B  = "\033[1m"
+    GR = "\033[92m"
+    YL = "\033[93m"
+    BL = "\033[94m"
+    CY = "\033[96m"
+    GY = "\033[90m"
+    OR = "\033[33m"
+    RD = "\033[91m"
+
+    W = 58
+    print(f"\n{B}{'─' * W}{R}")
+    print(f"{B}  YOLO Model Setup{R}")
+    print(f"{'─' * W}")
+    print(f"  CPU   {hw.cpu_cores}코어   RAM  {hw.ram_gb:.0f} GB")
+    print(f"  GPU   {B}{hw.gpu_name}{R} ({hw.gpu_memory_gb:.1f} GB VRAM)")
     if hw.tensorrt_available:
-        trt = "available"
+        trt_str = f"{GR}TensorRT ✓ 가속 가능{R}"
     elif hw.cuda_available:
-        trt = "not installed; setup will try to install it"
+        trt_str = f"{YL}TensorRT 미설치 — 선택 시 자동 설치{R}"
     else:
-        trt = "not available"
-    print(f"TensorRT: {trt}")
+        trt_str = f"{RD}TensorRT 불가 (GPU 없음) — CPU 모드{R}"
+    print(f"  {trt_str}")
+    print(f"{'─' * W}\n")
+
+    for idx, option in enumerate(MODEL_OPTIONS, 1):
+        has_engine = option.engine_path.exists()
+        has_pt     = option.pt_path.exists()
+        is_rec     = option.variant == recommended
+
+        if has_engine:
+            status = f"{GR}✓ ENGINE READY{R}"
+        elif has_pt:
+            status = f"{YL}✓ WEIGHTS READY{R}"
+        else:
+            status = f"{OR}⬇ ~{option.size_mb} MB{R}"
+
+        rec_tag = f"  {BL}★ 추천{R}" if is_rec else ""
+        print(f"  {B}[{idx}]  {option.name}{R}  —  {option.label}{rec_tag}    {status}")
+        print(f"        {GY}{option.note}{R}")
+        print(f"        {CY}{_fps_line(option, hw)}{R}")
+        setup_text, setup_hint = _setup_line(option, hw)
+        hint_c = GR if setup_hint == "green" else (YL if setup_hint == "yellow" else OR)
+        print(f"        {hint_c}{setup_text}{R}")
+        print()
+
+    print(f"{'─' * W}")
+    rec_option = select_option(recommended)
+    print(f"  {BL}{B}⭐ GPU({hw.gpu_memory_gb:.1f} GB) 기준 추천 모델: {rec_option.name}{R}")
+    print(f"{'─' * W}\n")
+
     if hw.cuda_available:
-        use_cuda = input("Use CUDA/TensorRT acceleration? [Y/n]: ").strip().lower()
-        os.environ["YOLO_USE_CUDA"] = "false" if use_cuda == "n" else "true"
+        ans = input("  CUDA/TensorRT 가속 사용? [Y/n]: ").strip().lower()
+        os.environ["YOLO_USE_CUDA"] = "false" if ans == "n" else "true"
     else:
         os.environ["YOLO_USE_CUDA"] = "false"
-    print()
-    for index, option in enumerate(MODEL_OPTIONS, start=1):
-        marker = " recommended" if option.variant == recommended else ""
-        print(
-            f"{index}. {option.name} - {option.label}{marker} "
-            f"[{option_status(option)}]"
-        )
 
-    choice = input(f"Select model [recommended {recommended}]: ").strip()
+    choice = input(f"\n  선택 [1-{len(MODEL_OPTIONS)}]  또는 Enter (추천: {recommended}): ").strip()
     if not choice:
         return recommended
     if choice.isdigit():
-        index = int(choice) - 1
-        if 0 <= index < len(MODEL_OPTIONS):
-            return MODEL_OPTIONS[index].variant
-    variants = {option.variant for option in MODEL_OPTIONS}
+        idx = int(choice) - 1
+        if 0 <= idx < len(MODEL_OPTIONS):
+            return MODEL_OPTIONS[idx].variant
+    variants = {o.variant for o in MODEL_OPTIONS}
     return choice.lower() if choice.lower() in variants else recommended
 
 
@@ -367,8 +538,40 @@ def write_choice(model_path: Path) -> None:
     CHOICE_FILE.write_text(model_path.name + "\n", encoding="utf-8")
 
 
+def _auto_tracker_tier(hw: HardwareInfo) -> str:
+    if not hw.cuda_available:
+        return "cpu"
+    if hw.gpu_memory_gb >= 10:
+        return "high"
+    if hw.gpu_memory_gb >= 6:
+        return "medium"
+    if hw.gpu_memory_gb >= 4:
+        return "low"
+    return "cpu"
+
+
+_TRACKER_NAMES = {
+    "cpu":    "ByteTrack  (빠름, ReID 없음)",
+    "low":    "OcSort     (가림 강함, ReID 없음)",
+    "medium": "BotSort    (ReID 포함, 6 GB+ VRAM)",
+    "high":   "DeepOcSort (ReID 포함, 8 GB+ VRAM)",
+}
+
+
 def write_profile(option: ModelOption, model_path: Path, hw: HardwareInfo) -> None:
     profile = dict(PROFILE_SETTINGS[option.profile])
+    tracker_tier = os.getenv("TRACKER_TIER", "auto").strip().lower()
+    if tracker_tier == "auto":
+        tracker_tier = _auto_tracker_tier(hw)
+
+    # inference backend
+    if model_path.suffix == ".engine":
+        inference_backend = "tensorrt"
+    elif model_path.suffix == ".onnx":
+        inference_backend = "onnx"
+    else:
+        inference_backend = "pytorch"
+
     profile.update(
         {
             "model": model_path.name,
@@ -376,6 +579,8 @@ def write_profile(option: ModelOption, model_path: Path, hw: HardwareInfo) -> No
             "cuda_enabled": os.getenv("YOLO_USE_CUDA", "true").lower() == "true"
             and hw.cuda_available,
             "tensorrt_enabled": model_path.suffix == ".engine",
+            "inference_backend": inference_backend,
+            "tracker_tier": tracker_tier,
         }
     )
     PROFILE_FILE.write_text(json.dumps(profile, indent=2), encoding="utf-8")

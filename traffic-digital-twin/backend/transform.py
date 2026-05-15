@@ -3,14 +3,19 @@ transform.py — Perspective Transform (픽셀 → 실세계 좌표)
   · OpenCV getPerspectiveTransform으로 단응행렬(Homography) 계산
   · pixel_to_gps()  : 픽셀 (u, v) → (lat, lon)
   · pixel_to_meter(): 픽셀 (u, v) → (x_m, y_m)  속도 계산용
+  · update_from_calibration(): 사용자 4-point 캘리브레이션으로 행렬 재계산
 """
 
+import json
 import logging
 import math
+from pathlib import Path
 
 import numpy as np
 import cv2
 from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIGHT_M, CAMERA_BEARING_DEG
+
+CALIBRATION_PATH = Path(__file__).parent / "calibration_data.json"
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +89,33 @@ class PerspectiveTransformer:
         arr = np.float32([[p] for p in points])          # (N, 1, 2)
         res = cv2.perspectiveTransform(arr, self._H_gps) # (N, 1, 2)
         return [(float(r[0, 0]), float(r[0, 1])) for r in res]
+
+    def update_from_calibration(
+        self,
+        pixel_pts: list[list[float]],
+        gps_pts: list[list[float]],
+    ) -> None:
+        """
+        사용자가 지정한 4쌍의 (pixel → GPS) 대응점으로 Homography 재계산.
+        pixel_pts: [[u,v], ...] (4개, 정규화 아님 — 실제 픽셀)
+        gps_pts:   [[lat,lon], ...] (4개)
+        """
+        if len(pixel_pts) != 4 or len(gps_pts) != 4:
+            raise ValueError("정확히 4쌍의 대응점이 필요합니다")
+        src = np.float32(pixel_pts)
+        dst_gps = np.float32(gps_pts)
+        H, mask = cv2.findHomography(src, dst_gps)
+        if H is None:
+            raise RuntimeError("Homography 계산 실패 — 점들이 동일선상에 있을 수 있습니다")
+        self._H_gps = H
+        gps_arr = dst_gps
+        self._gps_center_lat = float(np.mean(gps_arr[:, 0]))
+        self._gps_center_lon = float(np.mean(gps_arr[:, 1]))
+        self._bearing_rad = 0.0  # 캘리브레이션 후 bearing 보정 불필요
+        logger.info(
+            "캘리브레이션 적용 완료: pixel=%s gps=%s",
+            pixel_pts, gps_pts,
+        )
 
     def update_gps_center(self, center_lat: float, center_lon: float) -> None:
         """카메라 GPS 중심점으로 GPS 단응행렬 재계산 (근사 캘리브레이션).

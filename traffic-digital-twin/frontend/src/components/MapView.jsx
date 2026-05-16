@@ -1,20 +1,33 @@
 import { useMemo } from "react";
 import DeckGL from "@deck.gl/react";
-import { ScatterplotLayer, TextLayer, PolygonLayer } from "@deck.gl/layers";
+import { ScatterplotLayer, TextLayer, PolygonLayer, IconLayer } from "@deck.gl/layers";
 import Map from "react-map-gl/maplibre";
 import { getVehicleColor } from "../utils/colorMap";
+
+function makeCameraIconUrl(selected) {
+  const stroke  = selected ? "#22d3ee" : "#fbbf24";
+  const bg      = selected ? "#0e3a44" : "#1a1200";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+    <rect x="2" y="2" width="36" height="36" rx="8" fill="${bg}" stroke="${stroke}" stroke-width="2"/>
+    <rect x="4" y="13" width="21" height="12" rx="3" fill="${stroke}" opacity="0.9"/>
+    <circle cx="29" cy="19" r="6.5" fill="${bg}" stroke="${stroke}" stroke-width="2"/>
+    <circle cx="29" cy="19" r="3.5" fill="${stroke}" opacity="0.85"/>
+    <circle cx="29" cy="19" r="1.5" fill="${bg}"/>
+    <rect x="11" y="24" width="3.5" height="5" rx="1" fill="${stroke}" opacity="0.85"/>
+    <rect x="7" y="28" width="12" height="3" rx="1.5" fill="${stroke}" opacity="0.85"/>
+  </svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+const ICON_NORMAL   = makeCameraIconUrl(false);
+const ICON_SELECTED = makeCameraIconUrl(true);
 
 const MAP_STYLE =
   "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 
 const VEHICLE_MIN_ZOOM = 15;
 
-/**
- * 카메라 시야 범위 삼각형 계산.
- * ITS API가 heading을 제공하지 않으므로 기본값 0°(북쪽) 사용.
- * Calibration 완료 후 per-camera heading으로 교체 가능.
- */
-function computeFovPolygon(lat, lon, headingDeg = 0, fovDeg = 70, distM = 90) {
+// CCTV 지면 커버리지: 사다리꼴 (가까운 쪽 좁고 먼 쪽 넓음 — 실제 원근 투영)
+function computeFovPolygon(lat, lon, headingDeg = 0, fovDeg = 70, distM = 90, nearM = 15) {
   const R = 6371000;
   const dLatPerM = (1 / R) * (180 / Math.PI);
   const dLonPerM = (1 / (R * Math.cos((lat * Math.PI) / 180))) * (180 / Math.PI);
@@ -22,13 +35,23 @@ function computeFovPolygon(lat, lon, headingDeg = 0, fovDeg = 70, distM = 90) {
   const half = ((fovDeg / 2) * Math.PI) / 180;
   const hdg  = (headingDeg * Math.PI) / 180;
 
-  const leftLon  = lon + dLonPerM * distM * Math.sin(hdg - half);
-  const leftLat  = lat + dLatPerM * distM * Math.cos(hdg - half);
-  const rightLon = lon + dLonPerM * distM * Math.sin(hdg + half);
-  const rightLat = lat + dLatPerM * distM * Math.cos(hdg + half);
+  const nearLeftLon  = lon + dLonPerM * nearM * Math.sin(hdg - half);
+  const nearLeftLat  = lat + dLatPerM * nearM * Math.cos(hdg - half);
+  const nearRightLon = lon + dLonPerM * nearM * Math.sin(hdg + half);
+  const nearRightLat = lat + dLatPerM * nearM * Math.cos(hdg + half);
 
-  // 닫힌 ring: [카메라, 왼쪽 끝, 오른쪽 끝]
-  return [[lon, lat], [leftLon, leftLat], [rightLon, rightLat], [lon, lat]];
+  const farLeftLon  = lon + dLonPerM * distM * Math.sin(hdg - half);
+  const farLeftLat  = lat + dLatPerM * distM * Math.cos(hdg - half);
+  const farRightLon = lon + dLonPerM * distM * Math.sin(hdg + half);
+  const farRightLat = lat + dLatPerM * distM * Math.cos(hdg + half);
+
+  return [
+    [nearLeftLon, nearLeftLat],
+    [nearRightLon, nearRightLat],
+    [farRightLon, farRightLat],
+    [farLeftLon, farLeftLat],
+    [nearLeftLon, nearLeftLat],
+  ];
 }
 
 export default function MapView({
@@ -62,18 +85,21 @@ export default function MapView({
     onClick:         ({ object }) => !calibrationMode && object && onCctvClick?.(object),
   });
 
-  // ── 카메라 아이콘 (📷 이모지 TextLayer) ───────────────────────────────
-  const cctvIconLayer = new TextLayer({
-    id:             "cctv-icons",
-    data:           cctvList,
-    getPosition:    (d) => [d.lon, d.lat],
-    getText:        () => "📷",
-    getSize:        (d) => selectedCctv?.id === d.id ? 26 : 20,
-    getColor:       (d) => selectedCctv?.id === d.id ? [34, 211, 238, 255] : [251, 191, 36, 230],
+  // ── 카메라 아이콘 (SVG IconLayer — 이모지 WebGL 렌더링 문제 우회) ───
+  const cctvIconLayer = new IconLayer({
+    id:          "cctv-icons",
+    data:        cctvList,
+    getPosition: (d) => [d.lon, d.lat],
+    getIcon:     (d) => ({
+      url:    selectedCctv?.id === d.id ? ICON_SELECTED : ICON_NORMAL,
+      width:  40,
+      height: 40,
+    }),
+    getSize:        (d) => selectedCctv?.id === d.id ? 48 : 36,
+    sizeUnits:      "pixels",
     getPixelOffset: [0, 0],
-    fontFamily:     '"Segoe UI Emoji", "Apple Color Emoji", sans-serif',
-    fontSettings:   { sdf: false },
-    updateTriggers: { getSize: [selectedCctv], getColor: [selectedCctv] },
+    pickable:       false,
+    updateTriggers: { getIcon: [selectedCctv?.id], getSize: [selectedCctv?.id] },
   });
 
   // ── 카메라 이름 라벨 ──────────────────────────────────────────────────
@@ -81,12 +107,16 @@ export default function MapView({
     id:             "cctv-labels",
     data:           cctvList,
     getPosition:    (d) => [d.lon, d.lat],
-    getText:        (d) => d.name || d.id,
-    getSize:        11,
-    getColor:       [253, 230, 138, 220],
-    getPixelOffset: [0, -28],
+    getText:        (d) => d.name || String(d.id),
+    getSize:        (d) => selectedCctv?.id === d.id ? 13 : 11,
+    getColor:       (d) => selectedCctv?.id === d.id ? [34, 211, 238, 255] : [253, 230, 138, 230],
+    getPixelOffset: [0, -30],
     fontFamily:     '"Segoe UI", system-ui, sans-serif',
-    fontWeight:     600,
+    fontWeight:     700,
+    fontSettings:   { sdf: true, smoothing: 0.3 },
+    outlineWidth:   3,
+    outlineColor:   [0, 0, 0, 200],
+    updateTriggers: { getSize: [selectedCctv?.id], getColor: [selectedCctv?.id] },
   });
 
   // ── 선택된 카메라 시야 범위 (PolygonLayer) ────────────────────────────
@@ -114,13 +144,13 @@ export default function MapView({
     id:           "vehicles",
     data:         sorted,
     getPosition:  (d) => [d.lon, d.lat],
-    getRadius:    (d) => (d.is_speeding ? 5 : 3),
+    getRadius:    3,
     getFillColor: (d) =>
-      d.is_parked ? [80, 80, 80, 140] : getVehicleColor(d.direction, d.is_speeding),
+      d.is_parked ? [80, 80, 80, 140] : getVehicleColor(d.direction, false),
     pickable:     true,
     radiusUnits:  "meters",
     radiusMinPixels: 5,
-    updateTriggers: { getFillColor: vehicles, getRadius: vehicles },
+    updateTriggers: { getFillColor: vehicles },
   });
 
   const textLayer = new TextLayer({

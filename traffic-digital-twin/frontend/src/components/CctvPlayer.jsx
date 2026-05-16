@@ -11,7 +11,7 @@ const DEFAULT_RUNTIME_CONFIG = {
   maxInFlight: 2,
 };
 
-export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCancelGps }) {
+export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCancelGps, onCalibSaved }) {
   const videoRef  = useRef(null);
   const canvasRef = useRef(null);      // 숨김 캔버스 (프레임 캡처용)
   const hlsRef    = useRef(null);
@@ -56,11 +56,18 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
     const video = videoRef.current;
+    // 이전 카메라 마지막 프레임 제거 (src 초기화)
+    video.src = "";
+    video.load();
+
+    let loadTimeout = null;  // declared in outer scope so cleanup can access it
 
     if (Hls.isSupported()) {
       const hls = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 0 });
       hlsRef.current = hls;
-      hls.on(Hls.Events.MANIFEST_PARSED, () => setHlsLoading(false));
+      // 15초 안에 MANIFEST_PARSED 없으면 로딩 해제 (스트림 불안정 방어)
+      loadTimeout = setTimeout(() => setHlsLoading(false), 15000);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => { clearTimeout(loadTimeout); setHlsLoading(false); });
       hls.on(Hls.Events.ERROR, (_, d) => {
         if (!d.fatal) return;
         if (d.type === Hls.ErrorTypes.NETWORK_ERROR) {
@@ -92,7 +99,10 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
       setHlsError("HLS 미지원 브라우저");
       setHlsLoading(false);
     }
-    return () => { if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; } };
+    return () => {
+      clearTimeout(loadTimeout);
+      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+    };
   }, [cctv?.cctvurl]);
 
   // ── YOLO WebSocket 연결 ───────────────────────────────────────────
@@ -250,10 +260,10 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
       {/* 영상 영역 (16:9) */}
       <div style={{ position: "relative", aspectRatio: "16/9", background: "#000" }}>
 
-        {/* 실시간 HLS — 보정 탭에서도 영상 표시 필요 */}
+        {/* 실시간 HLS — live, roi, cal 탭에서 영상 표시 */}
         <video ref={videoRef} muted playsInline style={{
           width: "100%", height: "100%", objectFit: "contain",
-          display: (tab === "live" || tab === "cal") ? "block" : "none",
+          display: (tab === "live" || tab === "cal" || tab === "roi") ? "block" : "none",
         }} />
 
         {/* YOLO 어노테이션 결과 */}
@@ -274,7 +284,7 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
           <div style={{
             position: "absolute", inset: 0, display: "flex", flexDirection: "column",
             alignItems: "center", justifyContent: "center",
-            background: "rgba(0,0,0,0.75)", color: "#94a3b8", fontSize: 13,
+            background: "rgba(0,0,0,1)", color: "#94a3b8", fontSize: 13,
           }}>
             <div style={{ fontSize: 28, marginBottom: 8 }}>⏳</div>스트림 연결 중…
           </div>
@@ -311,7 +321,14 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
             onNeedGps={onNeedGps}
             onCancelGps={onCancelGps}
             onClose={() => { setCalibrating(false); setTab("live"); onCancelGps?.(); }}
-            onSaved={() => { setCalibrated(true); setCalibrating(false); setTab("live"); onCancelGps?.(); }}
+            onSaved={(heading) => {
+              setCalibrated(true);
+              setCalibrating(false);
+              setTab("roi");
+              setRoiEditing(true);
+              onCancelGps?.();
+              onCalibSaved?.(heading);
+            }}
           />
         )}
       </div>

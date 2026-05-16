@@ -174,10 +174,17 @@ def option_status(option: ModelOption) -> str:
     return "Will download weights"
 
 
-def _fps_line(option: ModelOption, hw: HardwareInfo) -> str:
-    if hw.cuda_available:
-        return f"GPU: ~{option.fps_gpu} fps   |   CPU: ~{option.fps_cpu} fps"
-    return f"CPU 전용: ~{option.fps_cpu} fps  (GPU 없음)"
+def _fps_line(option: ModelOption, hw: HardwareInfo, use_cuda: bool | None = None) -> str:
+    if not hw.cuda_available:
+        return f"CPU 전용: ~{option.fps_cpu} fps  (GPU 없음)"
+    # CUDA 체크박스 상태 반영: None이면 하드웨어 기준 추정
+    cuda_on = use_cuda if use_cuda is not None else True
+    fps_pt = max(1, round(option.fps_gpu * 0.45))  # PyTorch GPU ≈ TRT * 0.45
+    if cuda_on:
+        return (
+            f"TRT: ~{option.fps_gpu} fps  ·  PyTorch GPU: ~{fps_pt} fps  ·  CPU: ~{option.fps_cpu} fps"
+        )
+    return f"CPU: ~{option.fps_cpu} fps  (CUDA 비활성)"
 
 
 def _setup_line(option: ModelOption, hw: HardwareInfo) -> tuple[str, str]:
@@ -257,6 +264,13 @@ def choose_with_gui(hw: HardwareInfo, recommended: str) -> str | None:
 
     # ── CUDA 체크박스 ──────────────────────────────────────────────────
     use_cuda_var = tk.BooleanVar(value=hw.cuda_available)
+
+    def _on_cuda_toggle(*_):
+        for lbl, opt in fps_labels:
+            lbl.config(text=_fps_line(opt, hw, use_cuda_var.get()))
+
+    use_cuda_var.trace_add("write", _on_cuda_toggle)
+
     cuda_row = tk.Frame(outer, bg=BG)
     cuda_row.pack(anchor="w", pady=(0, 10))
     tk.Checkbutton(
@@ -289,6 +303,8 @@ def choose_with_gui(hw: HardwareInfo, recommended: str) -> str | None:
         "yellow": C_YELLOW,
         "orange": C_ORANGE,
     }
+
+    fps_labels: list[tuple[tk.Label, ModelOption]] = []  # (label, option) — 체크박스 토글 시 업데이트
 
     for option in MODEL_OPTIONS:
         has_engine = option.engine_path.exists()
@@ -334,13 +350,14 @@ def choose_with_gui(hw: HardwareInfo, recommended: str) -> str | None:
         tk.Label(card, text=option.note, bg=card_bg, fg=C_SECONDARY,
                  font=("Segoe UI", 9)).pack(anchor="w", pady=(1, 0))
 
-        # 하단 행: FPS + 셋업 시간
+        # 하단 행: FPS (체크박스 연동) + 셋업 시간
         row_bot = tk.Frame(card, bg=card_bg)
         row_bot.pack(fill="x", pady=(5, 0))
 
-        tk.Label(row_bot, text=_fps_line(option, hw),
-                 bg=card_bg, fg=C_PRIMARY,
-                 font=("Segoe UI", 9)).pack(side="left")
+        fps_lbl = tk.Label(row_bot, text=_fps_line(option, hw, use_cuda_var.get()),
+                           bg=card_bg, fg=C_PRIMARY, font=("Segoe UI", 9))
+        fps_lbl.pack(side="left")
+        fps_labels.append((fps_lbl, option))
 
         setup_text, setup_hint = _setup_line(option, hw)
         tk.Label(row_bot, text=setup_text,

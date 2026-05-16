@@ -170,7 +170,12 @@ export default function CalibrationMode({
         }),
       });
       if (!res.ok) throw new Error(await res.text());
-      onSaved();
+      // GPS 점 0→3 방향으로 카메라 heading 계산
+      const [lat1, lon1] = pairs[0].gps;
+      const [lat2, lon2] = pairs[3].gps;
+      const rawBearing = Math.atan2(lon2 - lon1, lat2 - lat1) * 180 / Math.PI;
+      const heading = (rawBearing + 360) % 360;
+      onSaved(heading);
     } catch (err) {
       setError(err.message ?? "저장 실패");
     } finally {

@@ -18,6 +18,8 @@ from config import (
     LOS_THRESHOLDS,
     SPEED_JITTER_THRESHOLD_M,
     SPEED_SMOOTHING_ALPHA,
+    MAX_REASONABLE_KPH,
+    GC_GRACE_FRAMES,
     PARKED_FRAMES_THRESHOLD,
     PARKED_POSITION_RADIUS_PX,
 )
@@ -80,6 +82,8 @@ class TrafficAnalytics:
         self._prev: dict[int, tuple[float, float, float, float, float]] = {}
         self._dwell: dict[int, int] = defaultdict(int)
         self._speed_ema: dict[int, float] = {}
+        # GC grace period: 미감지 프레임 수 (GC_GRACE_FRAMES 이후 실제 삭제)
+        self._lost_frames: dict[int, int] = {}
         # 주차 확정된 픽셀 위치 목록 — track_id 변경에도 유지
         self._parked_positions: list[tuple[float, float]] = []
 
@@ -89,6 +93,7 @@ class TrafficAnalytics:
             self._prev.clear()
             self._dwell.clear()
             self._speed_ema.clear()
+            self._lost_frames.clear()
             self._parked_positions.clear()
 
     def update(
@@ -178,6 +183,14 @@ class TrafficAnalytics:
             return
 
         raw_kph = dist_m / dt * 3.6
+
+        # 물리적으로 불가능한 속도는 노이즈 — 이번 프레임 스킵 (EMA 유지)
+        if raw_kph > MAX_REASONABLE_KPH:
+            prev_ema = self._speed_ema.get(v.track_id, 0.0)
+            v.speed_kph = round(prev_ema, 1)
+            v.is_speeding = v.speed_kph > SPEED_LIMIT_KPH
+            return
+
         prev_ema = self._speed_ema.get(v.track_id, raw_kph)
         smoothed = SPEED_SMOOTHING_ALPHA * raw_kph + (1.0 - SPEED_SMOOTHING_ALPHA) * prev_ema
         self._speed_ema[v.track_id] = smoothed
@@ -226,8 +239,15 @@ class TrafficAnalytics:
         return dict(c)
 
     def _gc(self, active: set[int]) -> None:
+        # 재등장 시 연속성 유지: grace period 동안 _prev/_speed_ema 보존
         lost = set(self._prev) - active
         for tid in lost:
-            self._prev.pop(tid, None)
-            self._dwell.pop(tid, None)
-            self._speed_ema.pop(tid, None)
+            self._lost_frames[tid] = self._lost_frames.get(tid, 0) + 1
+            if self._lost_frames[tid] > GC_GRACE_FRAMES:
+                self._prev.pop(tid, None)
+                self._dwell.pop(tid, None)
+                self._speed_ema.pop(tid, None)
+                self._lost_frames.pop(tid, None)
+        # 재등장한 track의 grace counter 초기화
+        for tid in active:
+            self._lost_frames.pop(tid, None)

@@ -25,26 +25,24 @@ def camera_key(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:12]
 
 
+def _load_config() -> dict:
+    if not _CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def load_roi(camera_url: str) -> list[list[float]] | None:
     """저장된 ROI 정규화 좌표 반환. 없으면 None."""
-    if not _CONFIG_PATH.exists():
-        return None
-    try:
-        data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
-        entry = data.get(camera_key(camera_url))
-        return entry.get("polygon") if entry else None
-    except Exception:
-        return None
+    entry = _load_config().get(camera_key(camera_url))
+    return entry.get("polygon") if entry else None
 
 
 def save_roi(camera_url: str, polygon: list[list[float]], auto: bool = False) -> None:
     """ROI 정규화 좌표를 JSON에 저장."""
-    data: dict = {}
-    if _CONFIG_PATH.exists():
-        try:
-            data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+    data = _load_config()
     key = camera_key(camera_url)
     data[key] = {
         "polygon": polygon,

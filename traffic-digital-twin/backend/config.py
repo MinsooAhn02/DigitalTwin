@@ -101,7 +101,7 @@ MAX_IN_FLIGHT: int = int(RUNTIME_PROFILE.get("max_in_flight", 2))
 JPEG_QUALITY: int = int(RUNTIME_PROFILE.get("jpeg_quality", 85))
 
 # Traffic analytics
-SPEED_LIMIT_KPH: float = 60.0
+SPEED_LIMIT_KPH: float = float(os.getenv("SPEED_LIMIT_KPH", "120"))
 FPS: int = int(RUNTIME_PROFILE.get("backend_fps", 30))
 
 LOS_THRESHOLDS: dict[str, int] = {
@@ -112,7 +112,7 @@ LOS_THRESHOLDS: dict[str, int] = {
     "E": 15,
 }
 
-BOTTLENECK_DWELL_FRAMES: int = 60
+BOTTLENECK_DWELL_FRAMES: int = int(os.getenv("BOTTLENECK_DWELL_FRAMES", "150"))
 
 SPEED_JITTER_THRESHOLD_M: float = 0.20
 SPEED_SMOOTHING_ALPHA: float = 0.15

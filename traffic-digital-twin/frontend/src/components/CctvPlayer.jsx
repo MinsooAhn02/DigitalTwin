@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import Hls from "hls.js";
 import RoiEditor from "./RoiEditor";
-import CalibrationMode from "./CalibrationMode";
+import CalibrationMode, { CALIB_COLORS } from "./CalibrationMode";
+import { useLang } from "../i18n/index.jsx";
 
 const PANEL_W = 720;
 const DEFAULT_RUNTIME_CONFIG = {
@@ -11,26 +12,118 @@ const DEFAULT_RUNTIME_CONFIG = {
   maxInFlight: 2,
 };
 
-export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCancelGps, onCalibSaved }) {
+// ── Calibration info bar (above video, outside 16:9 div) ─────────────────
+function CalibBar({ calibState, t }) {
+  if (!calibState) return null;
+  const { pairs, pairIdx, isPixelStep, isGpsStep, isDone, saving, error, actions } = calibState;
+
+  const stepMsg = isDone
+    ? t("calib.step.done")
+    : isPixelStep
+      ? t("calib.step.pixel", { n: pairIdx + 1 })
+      : isGpsStep
+        ? t("calib.step.gps", { n: pairIdx + 1 })
+        : "";
+
+  return (
+    <div style={{
+      background: "#0f172a", borderTop: "1px solid #1e3a5f",
+      padding: "8px 12px", display: "flex", flexDirection: "column", gap: 6,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#38bdf8" }}>{t("calib.title")}</span>
+        <span style={{ flex: 1, fontSize: 11, color: "#94a3b8" }}>{stepMsg}</span>
+        {error && <span style={{ fontSize: 11, color: "#f87171" }}>⚠ {error}</span>}
+        <button onClick={actions?.reset} style={btnStyle}>{t("calib.reset")}</button>
+        <button
+          onClick={actions?.save}
+          disabled={!isDone || saving}
+          style={{ ...btnStyle, background: isDone ? "#0369a1" : "#374151", color: isDone ? "#fff" : "#6b7280", cursor: isDone ? "pointer" : "default", border: "none" }}
+        >{saving ? t("calib.saving") : t("calib.save")}</button>
+        <button onClick={actions?.close} style={btnStyle}>{t("calib.cancel")}</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {[0, 1, 2, 3].map((i) => {
+          const p = pairs[i];
+          const color = CALIB_COLORS[i];
+          return (
+            <div key={i} style={{
+              display: "flex", alignItems: "center", gap: 4,
+              background: "#1e293b", borderRadius: 5, padding: "3px 8px",
+              border: `1px solid ${p?.gps ? color : "#374151"}`, fontSize: 11,
+            }}>
+              <span style={{ color, fontWeight: 700 }}>●</span>
+              <span style={{ color: "#e2e8f0" }}>{t("calib.point", { n: i + 1 })}</span>
+              {p?.pixel
+                ? <span style={{ color: "#64748b" }}>({p.pixel[0]}, {p.pixel[1]})</span>
+                : <span style={{ color: "#475569" }}>{t("calib.notClicked")}</span>}
+              {p?.gps
+                ? <span style={{ color: "#34d399", marginLeft: 2 }}>{t("calib.gpsSet")}</span>
+                : p?.pixel
+                  ? <span style={{ color: "#fbbf24", marginLeft: 2 }}>{t("calib.awaitingMap")}</span>
+                  : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── ROI control bar (below video, outside 16:9 div) ───────────────────────
+function RoiBar({ roiState, t }) {
+  if (!roiState) return null;
+  const { points, closed, hint, saving, actions } = roiState;
+  const vertLabel = t("roi.vertices", { n: points.length, done: closed ? t("roi.vertDone") : "" });
+  return (
+    <div style={{
+      background: "#0f172a", borderTop: "1px solid #1e3a5f",
+      padding: "8px 12px", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+    }}>
+      <span style={{ fontSize: 12, fontWeight: 700, color: "#22c55e" }}>{t("roi.title")}</span>
+      <span style={{ flex: 1, fontSize: 11, color: "#94a3b8" }}>{t(hint)}</span>
+      <span style={{ fontSize: 11, color: "#64748b" }}>{vertLabel}</span>
+      <button onClick={actions?.reset} style={btnStyle}>{t("roi.reset")}</button>
+      <button
+        onClick={actions?.save}
+        disabled={points.length < 3 || saving}
+        style={{ ...btnStyle, background: points.length >= 3 ? "#0369a1" : "#374151", color: points.length >= 3 ? "#fff" : "#6b7280", cursor: points.length >= 3 ? "pointer" : "default", border: "none" }}
+      >{saving ? t("roi.saving") : t("roi.save")}</button>
+      <button onClick={actions?.close} style={btnStyle}>{t("roi.cancel")}</button>
+    </div>
+  );
+}
+
+const btnStyle = {
+  fontSize: 11, padding: "3px 8px", borderRadius: 5,
+  border: "1px solid #374151", background: "#1e293b",
+  color: "#e2e8f0", cursor: "pointer",
+};
+
+export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCancelGps, onCalibSaved, onCalibTabChange }) {
+  const { t } = useLang();
   const videoRef  = useRef(null);
-  const canvasRef = useRef(null);      // 숨김 캔버스 (프레임 캡처용)
+  const canvasRef = useRef(null);
   const hlsRef    = useRef(null);
   const panelRef  = useRef(null);
-  const wsRef       = useRef(null);    // YOLO 탐지 WebSocket
-  const inFlightRef = useRef(0);       // 전송 중 프레임 수 (최대 MAX_IN_FLIGHT)
+  const wsRef       = useRef(null);
+  const inFlightRef = useRef(0);
   const intervalRef = useRef(null);
 
   const [hlsError, setHlsError]       = useState(null);
   const [hlsLoading, setHlsLoading]   = useState(true);
   const [tab, setTab]                 = useState("live");
   const [pos, setPos]                 = useState(null);
-  const [annotatedUrl, setAnnotatedUrl] = useState(null);   // Object URL
-  const [yoloStatus, setYoloStatus]   = useState("idle");  // idle | loading | running | error
+  const [annotatedUrl, setAnnotatedUrl] = useState(null);
+  const [yoloStatus, setYoloStatus]   = useState("idle");
   const [runtimeConfig, setRuntimeConfig] = useState(DEFAULT_RUNTIME_CONFIG);
   const [roiEditing, setRoiEditing]       = useState(false);
-  const [currentRoi, setCurrentRoi]       = useState(null);  // 현재 저장된 ROI
+  const [currentRoi, setCurrentRoi]       = useState(null);
   const [calibrating, setCalibrating]     = useState(false);
   const [calibrated, setCalibrated]       = useState(false);
+  const [calibState, setCalibState]       = useState(null);
+  const [roiState, setRoiState]           = useState(null);
 
   useEffect(() => {
     fetch("http://localhost:8000/runtime-config")
@@ -39,16 +132,14 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
       .catch(() => setRuntimeConfig(DEFAULT_RUNTIME_CONFIG));
   }, []);
 
-  // 카메라 변경 시 ROI/보정 초기화
   useEffect(() => {
-    setCurrentRoi(null);
-    setRoiEditing(false);
-    setCalibrating(false);
-    setCalibrated(false);
-    onCancelGps?.();
+    setCurrentRoi(null); setRoiEditing(false);
+    setCalibrating(false); setCalibrated(false);
+    setCalibState(null); setRoiState(null);
+    onCancelGps?.(); onCalibTabChange?.(false);
   }, [cctv?.cctvurl]);  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── HLS 스트림 ────────────────────────────────────────────────────
+  // ── HLS 스트림 (10-4: watchdog 개선) ─────────────────────────────
   useEffect(() => {
     if (!cctv?.cctvurl || !videoRef.current) return;
     setHlsError(null);
@@ -56,75 +147,114 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
     const video = videoRef.current;
-    // 이전 카메라 마지막 프레임 제거 (src 초기화)
     video.src = "";
     video.load();
 
-    let loadTimeout = null;  // declared in outer scope so cleanup can access it
+    let loadTimeout = null;
 
     if (Hls.isSupported()) {
       const hls = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 0 });
       hlsRef.current = hls;
-      // 15초 안에 MANIFEST_PARSED 없으면 로딩 해제 (스트림 불안정 방어)
       loadTimeout = setTimeout(() => setHlsLoading(false), 15000);
       hls.on(Hls.Events.MANIFEST_PARSED, () => { clearTimeout(loadTimeout); setHlsLoading(false); });
+
+      let networkErrCount = 0;
       hls.on(Hls.Events.ERROR, (_, d) => {
-        if (!d.fatal) return;
+        if (!d.fatal) {
+          if (d.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            networkErrCount++;
+            if (networkErrCount >= 3) {
+              // 라이브 엣지로 점프 후 재생 재개
+              hls.startLoad(-1);
+              video.play().catch(() => {});
+              networkErrCount = 0;
+            }
+          }
+          return;
+        }
+        networkErrCount = 0;
         if (d.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          // HLS 토큰 만료 가능성 → 백엔드에서 신선한 URL 받아 재로드
           fetch(
             `http://localhost:8000/cctv-refresh?name=${encodeURIComponent(cctv.name || "")}&lat=${cctv.lat}&lon=${cctv.lon}`
           )
             .then((r) => r.json())
             .then(({ cctvurl }) => {
               if (cctvurl) hls.loadSource(cctvurl);
-              hls.startLoad();
+              hls.startLoad(-1);
+              video.play().catch(() => {});
             })
-            .catch(() => hls.startLoad());
+            .catch(() => { hls.startLoad(-1); video.play().catch(() => {}); });
         } else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) {
           hls.recoverMediaError();
+          video.play().catch(() => {});
         } else {
-          setHlsError("스트림 연결 실패");
+          setHlsError(t("cctv.stream.error"));
           setHlsLoading(false);
         }
       });
+
+      // watchdog: 5초마다 currentTime 진행 여부 확인 → 미진행 시 라이브 엣지 복귀
+      let lastTime = -1;
+      const stallTimer = setInterval(() => {
+        if (!video || video.paused || video.readyState < 2) return;
+        if (video.currentTime === lastTime) {
+          hls.stopLoad();
+          hls.startLoad(-1);  // 라이브 엣지로 점프
+          video.play().catch(() => {});
+        }
+        lastTime = video.currentTime;
+      }, 5000);
+
+      // 브라우저 네이티브 stalled / waiting 이벤트
+      const handleStall = () => {
+        hls.stopLoad();
+        hls.startLoad(-1);
+        video.play().catch(() => {});
+      };
+      video.addEventListener("stalled", handleStall);
+      video.addEventListener("waiting", handleStall);
+
       hls.loadSource(cctv.cctvurl);
       hls.attachMedia(video);
       video.play().catch(() => {});
+
+      return () => {
+        clearTimeout(loadTimeout);
+        clearInterval(stallTimer);
+        video.removeEventListener("stalled", handleStall);
+        video.removeEventListener("waiting", handleStall);
+        if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+      };
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = cctv.cctvurl;
       video.addEventListener("loadedmetadata", () => setHlsLoading(false), { once: true });
       video.play().catch(() => {});
     } else {
-      setHlsError("HLS 미지원 브라우저");
+      setHlsError(t("cctv.stream.unsupported"));
       setHlsLoading(false);
     }
     return () => {
       clearTimeout(loadTimeout);
       if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
     };
-  }, [cctv?.cctvurl]);
+  }, [cctv?.cctvurl]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── YOLO WebSocket 연결 ───────────────────────────────────────────
+  // ── YOLO WebSocket ───────────────────────────────────────────────
   useEffect(() => {
     if (tab !== "yolo" || !cctv) return;
     setYoloStatus("loading");
-
     const ws = new WebSocket("ws://localhost:8000/ws/detect");
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
-
     ws.onopen  = () => setYoloStatus("running");
     ws.onerror = () => { setYoloStatus("error"); };
     ws.onclose = () => { inFlightRef.current = 0; };
-
     ws.onmessage = (e) => {
       inFlightRef.current = Math.max(0, inFlightRef.current - 1);
       const blob = new Blob([e.data], { type: "image/jpeg" });
       const url  = URL.createObjectURL(blob);
       setAnnotatedUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
     };
-
     return () => { ws.close(); wsRef.current = null; inFlightRef.current = 0; };
   }, [tab, cctv]);
 
@@ -133,39 +263,29 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const ws = wsRef.current;
-
     if (
       inFlightRef.current >= runtimeConfig.maxInFlight ||
       !video || !canvas || !ws ||
       ws.readyState !== WebSocket.OPEN ||
-      video.readyState < 2 ||
-      video.paused
+      video.readyState < 2 || video.paused
     ) return;
-
     inFlightRef.current++;
-
     const srcW = video.videoWidth  || 640;
     const srcH = video.videoHeight || 360;
     const scale = Math.min(1, runtimeConfig.captureWidth / srcW);
     const w = Math.round(srcW * scale);
     const h = Math.round(srcH * scale);
-    canvas.width = w;
-    canvas.height = h;
+    canvas.width = w; canvas.height = h;
     canvas.getContext("2d").drawImage(video, 0, 0, w, h);
-
     canvas.toBlob((blob) => {
       if (!blob) { inFlightRef.current = Math.max(0, inFlightRef.current - 1); return; }
       blob.arrayBuffer().then((buf) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(buf);
-        } else {
-          inFlightRef.current = Math.max(0, inFlightRef.current - 1);
-        }
+        if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(buf);
+        else inFlightRef.current = Math.max(0, inFlightRef.current - 1);
       });
     }, "image/jpeg", runtimeConfig.captureQuality);
   }, [runtimeConfig]);
 
-  // YOLO 탭 활성화 시 캡처 인터벌 시작
   useEffect(() => {
     if (tab !== "yolo") {
       if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
@@ -190,6 +310,13 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
 
   if (!cctv) return null;
 
+  const yoloStatusLabel = {
+    idle:    { text: t("cctv.yolo.idle"),    color: "#64748b" },
+    loading: { text: t("cctv.yolo.loading"), color: "#fbbf24" },
+    running: { text: t("cctv.yolo.running"), color: "#22d3ee" },
+    error:   { text: t("cctv.yolo.error"),   color: "#f87171" },
+  }[yoloStatus];
+
   const panelStyle = {
     position: "absolute", width: PANEL_W, zIndex: 20,
     background: "#0f172a", borderRadius: 10, overflow: "hidden",
@@ -197,13 +324,6 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
     userSelect: "none",
     ...(pos ? { left: pos.x, top: pos.y } : { left: 16, bottom: 130 }),
   };
-
-  const yoloStatusLabel = {
-    idle:    { text: "대기",       color: "#64748b" },
-    loading: { text: "모델 로드…", color: "#fbbf24" },
-    running: { text: "탐지 중",    color: "#22d3ee" },
-    error:   { text: "연결 실패",  color: "#f87171" },
-  }[yoloStatus];
 
   return (
     <div ref={panelRef} style={panelStyle}>
@@ -226,93 +346,83 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
       {/* 탭 */}
       <div style={{ display: "flex", background: "#0f172a", borderBottom: "1px solid #1e3a5f" }}>
         {[
-          { key: "live", label: "📷 실시간" },
-          { key: "yolo", label: "🤖 YOLO 탐지" },
-          { key: "roi",  label: "🎯 ROI 편집" },
-          { key: "cal",  label: "🔧 보정" },
-        ].map(({ key, label }) => (
+          { key: "live", labelKey: "cctv.tab.live" },
+          { key: "yolo", labelKey: "cctv.tab.yolo" },
+          { key: "cal",  labelKey: "cctv.tab.cal"  },
+          { key: "roi",  labelKey: "cctv.tab.roi"  },
+        ].map(({ key, labelKey }) => (
           <button key={key} onClick={() => {
             setTab(key);
             setRoiEditing(key === "roi");
-            if (key !== "cal") { setCalibrating(false); onCancelGps?.(); }
-            if (key === "cal") setCalibrating(true);
+            if (key !== "cal") { setCalibrating(false); setCalibState(null); onCancelGps?.(); onCalibTabChange?.(false); }
+            if (key === "cal") { setCalibrating(true); onCalibTabChange?.(true); }
+            if (key !== "roi") setRoiState(null);
           }} style={{
             flex: 1, padding: "7px 0", background: tab === key ? "#1e293b" : "transparent",
             border: "none", borderBottom: tab === key ? "2px solid #38bdf8" : "2px solid transparent",
             color: tab === key ? "#f1f5f9" : "#64748b", fontSize: 11, fontWeight: 600, cursor: "pointer",
           }}>
-            {label}
+            {t(labelKey)}
             {key === "yolo" && tab === "yolo" && (
               <span style={{ marginLeft: 6, fontSize: 10, color: yoloStatusLabel.color }}>
                 ● {yoloStatusLabel.text}
               </span>
             )}
             {key === "roi" && currentRoi && (
-              <span style={{ marginLeft: 6, fontSize: 10, color: "#22d3ee" }}>● 설정됨</span>
+              <span style={{ marginLeft: 6, fontSize: 10, color: "#22d3ee" }}>{t("cctv.roi.set")}</span>
             )}
             {key === "cal" && calibrated && (
-              <span style={{ marginLeft: 6, fontSize: 10, color: "#34d399" }}>● 완료</span>
+              <span style={{ marginLeft: 6, fontSize: 10, color: "#34d399" }}>{t("cctv.cal.done")}</span>
             )}
           </button>
         ))}
       </div>
 
+      {/* 보정 컨트롤 바 — 영상 위, 비디오 div 밖 */}
+      {calibrating && <CalibBar calibState={calibState} t={t} />}
+
       {/* 영상 영역 (16:9) */}
       <div style={{ position: "relative", aspectRatio: "16/9", background: "#000" }}>
 
-        {/* 실시간 HLS — live, roi, cal 탭에서 영상 표시 */}
         <video ref={videoRef} muted playsInline style={{
           width: "100%", height: "100%", objectFit: "contain",
           display: (tab === "live" || tab === "cal" || tab === "roi") ? "block" : "none",
         }} />
 
-        {/* YOLO 어노테이션 결과 */}
         {tab === "yolo" && (
           annotatedUrl
             ? <img src={annotatedUrl} alt="YOLO" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
-            : <div style={{
-                width: "100%", height: "100%", display: "flex", flexDirection: "column",
-                alignItems: "center", justifyContent: "center", color: "#475569", fontSize: 13,
-              }}>
+            : <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#475569", fontSize: 13 }}>
                 <div style={{ fontSize: 32, marginBottom: 10 }}>🤖</div>
-                {yoloStatus === "loading" ? "YOLO 모델 로드 중… (최초 1회)" : "영상에서 프레임 캡처 중…"}
+                {yoloStatus === "loading" ? t("cctv.yolo.msg.loading") : t("cctv.yolo.msg.wait")}
               </div>
         )}
 
-        {/* HLS 로딩 */}
         {tab === "live" && hlsLoading && !hlsError && (
-          <div style={{
-            position: "absolute", inset: 0, display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center",
-            background: "rgba(0,0,0,1)", color: "#94a3b8", fontSize: 13,
-          }}>
-            <div style={{ fontSize: 28, marginBottom: 8 }}>⏳</div>스트림 연결 중…
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,1)", color: "#94a3b8", fontSize: 13 }}>
+            <div style={{ fontSize: 28, marginBottom: 8 }}>⏳</div>{t("cctv.stream.loading")}
           </div>
         )}
 
-        {/* HLS 에러 */}
         {hlsError && (
-          <div style={{
-            position: "absolute", inset: 0, display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center",
-            background: "rgba(0,0,0,0.88)", color: "#f87171", fontSize: 12, padding: 16, textAlign: "center",
-          }}>
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.88)", color: "#f87171", fontSize: 12, padding: 16, textAlign: "center" }}>
             <div style={{ fontSize: 24, marginBottom: 8 }}>⚠️</div>{hlsError}
           </div>
         )}
 
-        {/* ROI 편집 오버레이 */}
+        {/* ROI 오버레이 — canvas only */}
         {roiEditing && cctv?.cctvurl && (
           <RoiEditor
             videoRef={videoRef}
             cctvurl={cctv.cctvurl}
             initialRoi={currentRoi}
-            onClose={() => { setRoiEditing(false); setTab("live"); }}
-            onSaved={(roi) => { setCurrentRoi(roi); setRoiEditing(false); setTab("live"); }}
+            onClose={() => { setRoiEditing(false); setRoiState(null); setTab("live"); }}
+            onSaved={(roi) => { setCurrentRoi(roi); setRoiEditing(false); setRoiState(null); setTab("live"); }}
+            onStateChange={setRoiState}
           />
         )}
 
-        {/* 보정 오버레이 */}
+        {/* 보정 오버레이 — canvas only */}
         {calibrating && cctv?.cctvurl && (
           <CalibrationMode
             videoRef={videoRef}
@@ -320,20 +430,21 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
             pendingGps={pendingGps}
             onNeedGps={onNeedGps}
             onCancelGps={onCancelGps}
-            onClose={() => { setCalibrating(false); setTab("live"); onCancelGps?.(); }}
-            onSaved={(heading) => {
-              setCalibrated(true);
-              setCalibrating(false);
-              setTab("roi");
-              setRoiEditing(true);
-              onCancelGps?.();
-              onCalibSaved?.(heading);
+            onClose={() => { setCalibrating(false); setCalibState(null); setTab("live"); onCancelGps?.(); }}
+            onSaved={(heading, gpsRing) => {
+              setCalibrated(true); setCalibrating(false); setCalibState(null);
+              setTab("roi"); setRoiEditing(true);
+              onCancelGps?.(); onCalibTabChange?.(false);
+              onCalibSaved?.(heading, gpsRing);
             }}
+            onStateChange={setCalibState}
           />
         )}
       </div>
 
-      {/* 숨김 캔버스 (프레임 캡처 전용) */}
+      {/* ROI 컨트롤 바 — 영상 아래, 비디오 div 밖 */}
+      {roiEditing && <RoiBar roiState={roiState} t={t} />}
+
       <canvas ref={canvasRef} style={{ display: "none" }} />
     </div>
   );

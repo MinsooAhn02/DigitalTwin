@@ -8,7 +8,7 @@ analytics.py — 교통 지표 계산 엔진
 
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
-from collections import defaultdict
+from collections import defaultdict, Counter
 import math
 import threading
 
@@ -120,13 +120,10 @@ class TrafficAnalytics:
 
         current_ts = timestamp_ms / 1000.0
 
-        # 위치 기반 주차 즉시 분류 (track_id 바뀌어도 적용)
         for v in vehicles:
             if self._is_near_parked(v.center_px):
                 v.is_parked = True
                 self._dwell[v.track_id] = PARKED_FRAMES_THRESHOLD
-
-        for v in vehicles:
             self._speed(v, current_ts)
             self._dwell_update(v)
 
@@ -233,10 +230,7 @@ class TrafficAnalytics:
 
     @staticmethod
     def _class_counts(vehicles: list[VehicleState]) -> dict[str, int]:
-        c: dict[str, int] = defaultdict(int)
-        for v in vehicles:
-            c[v.class_name] += 1
-        return dict(c)
+        return dict(Counter(v.class_name for v in vehicles))
 
     def _gc(self, active: set[int]) -> None:
         # 재등장 시 연속성 유지: grace period 동안 _prev/_speed_ema 보존

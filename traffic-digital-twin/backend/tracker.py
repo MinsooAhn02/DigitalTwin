@@ -33,7 +33,7 @@ class VehicleTracker:
         -------
         detections, cumulative_in, cumulative_out
         """
-        if len(detections) > 0 and detections.tracker_id is not None:
+        if len(detections) and detections.tracker_id is not None:
             crossed_in, crossed_out = self._line_zone.trigger(detections)
             self._in_count  += int(crossed_in.sum())
             self._out_count += int(crossed_out.sum())

@@ -94,6 +94,36 @@ def _make_placeholder() -> bytes:
 _placeholder_jpeg: bytes = _make_placeholder()
 
 
+def _parse_its_items(resp_json: dict) -> list[dict]:
+    """ITS API 응답에서 데이터 목록 추출. 단건 dict도 list로 정규화."""
+    raw = resp_json.get("response", {}).get("data", [])
+    if isinstance(raw, dict):
+        return [raw]
+    return raw if isinstance(raw, list) else []
+
+
+def _build_vehicles(tracked: "sv.Detections") -> "list[VehicleState]":
+    """BoT-SORT 결과를 VehicleState 리스트로 변환."""
+    vehicles: list[VehicleState] = []
+    for i in range(len(tracked)):
+        xyxy     = tracked.xyxy[i].tolist()
+        class_id = int(tracked.class_id[i])
+        track_id = _safe_tid(tracked.tracker_id, i, i)
+        cx = (xyxy[0] + xyxy[2]) / 2
+        cy = (xyxy[1] + xyxy[3]) / 2
+        lat, lon = _transformer.pixel_to_gps(cx, cy)
+        x_m, y_m = _transformer.pixel_to_meter(cx, cy)
+        vehicles.append(VehicleState(
+            track_id=track_id,
+            class_name=VEHICLE_CLASSES.get(class_id, "unknown"),
+            bbox_xyxy=xyxy,
+            center_px=(cx, cy),
+            lat=lat, lon=lon,
+            x_m=x_m, y_m=y_m,
+        ))
+    return vehicles
+
+
 # ── 앱 생명주기 ───────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -163,9 +193,7 @@ async def get_cctvs(
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(ITS_BASE_URL, params=params)
             resp.raise_for_status()
-            raw = resp.json().get("response", {}).get("data", [])
-            # ITS API returns a dict (not list) when exactly 1 result
-            items = [raw] if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+            items = _parse_its_items(resp.json())
             result = []
             for item in items:
                 try:
@@ -250,8 +278,7 @@ async def cctv_refresh(
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(ITS_BASE_URL, params=params)
             resp.raise_for_status()
-            raw = resp.json().get("response", {}).get("data", [])
-            items = [raw] if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+            items = _parse_its_items(resp.json())
         for item in items:
             if not name or item.get("cctvname") == name:
                 return {"cctvurl": item.get("cctvurl", "")}
@@ -310,24 +337,7 @@ async def ws_detect(ws: WebSocket):
                 )
 
             # GPS 변환 + VehicleState 생성
-            vehicles: list[VehicleState] = []
-            for i in range(len(tracked)):
-                xyxy     = tracked.xyxy[i].tolist()
-                class_id = int(tracked.class_id[i])
-                track_id = _safe_tid(tracked.tracker_id, i, i)
-                cx = (xyxy[0] + xyxy[2]) / 2
-                cy = (xyxy[1] + xyxy[3]) / 2
-                lat, lon = _transformer.pixel_to_gps(cx, cy)
-                x_m, y_m = _transformer.pixel_to_meter(cx, cy)
-                vehicles.append(VehicleState(
-                    track_id=track_id,
-                    class_name=VEHICLE_CLASSES.get(class_id, "unknown"),
-                    bbox_xyxy=xyxy,
-                    center_px=(cx, cy),
-                    lat=lat, lon=lon,
-                    x_m=x_m, y_m=y_m,
-                ))
-
+            vehicles = _build_vehicles(tracked)
             fid += 1
             result = analytics.update(fid, time.time() * 1000, vehicles, in_cnt, out_cnt)
             await _broadcast(result.to_dict())
@@ -386,8 +396,7 @@ async def get_roi(camera_key: str):
     if not roi_manager._CONFIG_PATH.exists():
         return {"polygon": None}
     try:
-        import json as _json
-        data = _json.loads(roi_manager._CONFIG_PATH.read_text(encoding="utf-8"))
+        data = json.loads(roi_manager._CONFIG_PATH.read_text(encoding="utf-8"))
         entry = data.get(camera_key)
         return {"polygon": entry.get("polygon") if entry else None}
     except Exception:
@@ -417,6 +426,8 @@ class CalibBody(BaseModel):
     cctvurl: str                          # camera URL (camera_key는 서버에서 계산)
     pixel_pts: list[list[float]]          # [[u,v] × 4]  실제 픽셀
     gps_pts:   list[list[float]]          # [[lat,lon] × 4]
+    frame_width:  int = 640
+    frame_height: int = 360
 
 
 @app.get("/calibration/{camera_key}")
@@ -456,6 +467,22 @@ async def save_calibration(body: CalibBody):
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
+    # 이미지 4 코너 → GPS 변환 (perspective transform 인라인 계산)
+    corner_gps_pts: list[list[float]] = []
+    try:
+        H, _ = cv2.findHomography(np.float32(body.pixel_pts), np.float32(body.gps_pts))
+        if H is not None:
+            corners_px = np.float32([
+                [[0, 0]],
+                [[body.frame_width, 0]],
+                [[body.frame_width, body.frame_height]],
+                [[0, body.frame_height]],
+            ])
+            res = cv2.perspectiveTransform(corners_px, H)
+            corner_gps_pts = [[float(r[0, 0]), float(r[0, 1])] for r in res]
+    except Exception as exc:
+        logger.warning("corner_gps_pts 계산 실패: %s", exc)
+
     # 현재 활성 카메라와 같으면 transformer 즉시 업데이트
     if _current_cam and roi_manager.camera_key(_current_cam.get("cctvurl", "")) == cam_key:
         try:
@@ -464,7 +491,7 @@ async def save_calibration(body: CalibBody):
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    return {"ok": True, "camera_key": cam_key}
+    return {"ok": True, "camera_key": cam_key, "corner_gps_pts": corner_gps_pts}
 
 
 @app.delete("/calibration/{camera_key}")
@@ -491,11 +518,10 @@ async def delete_roi(camera_key: str):
     if not roi_manager._CONFIG_PATH.exists():
         return {"ok": True}
     try:
-        import json as _json
-        data = _json.loads(roi_manager._CONFIG_PATH.read_text(encoding="utf-8"))
+        data = json.loads(roi_manager._CONFIG_PATH.read_text(encoding="utf-8"))
         data.pop(camera_key, None)
         roi_manager._CONFIG_PATH.write_text(
-            _json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except Exception:
         pass
@@ -654,26 +680,7 @@ def _live_process(frame_id, frame, detector, tracker) -> dict | None:
     tracked = detector.track(frame)
     tracked, in_cnt, out_cnt = tracker.update(tracked, (w, h))
 
-    vehicles: list[VehicleState] = []
-    for i in range(len(tracked)):
-        xyxy     = tracked.xyxy[i].tolist()
-        class_id = int(tracked.class_id[i])
-        track_id = _safe_tid(tracked.tracker_id, i, i)
-        cx = (xyxy[0] + xyxy[2]) / 2
-        cy = (xyxy[1] + xyxy[3]) / 2
-
-        lat, lon = _transformer.pixel_to_gps(cx, cy)
-        x_m, y_m = _transformer.pixel_to_meter(cx, cy)
-
-        vehicles.append(VehicleState(
-            track_id=track_id,
-            class_name=VEHICLE_CLASSES.get(class_id, "unknown"),
-            bbox_xyxy=xyxy,
-            center_px=(cx, cy),
-            lat=lat, lon=lon,
-            x_m=x_m, y_m=y_m,
-        ))
-
+    vehicles = _build_vehicles(tracked)
     _frame_count += 1
     result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt)
     return result.to_dict()
@@ -699,9 +706,7 @@ async def hls_refresh_loop(stream) -> None:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 resp = await client.get(ITS_BASE_URL, params=params)
                 resp.raise_for_status()
-                items = resp.json().get("response", {}).get("data", [])
-            raw = resp.json().get("response", {}).get("data", [])
-            items = [raw] if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+                items = _parse_its_items(resp.json())
             for item in items:
                 if item.get("cctvname") == name:
                     new_url = item.get("cctvurl", "")

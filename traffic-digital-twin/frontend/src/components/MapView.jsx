@@ -3,6 +3,7 @@ import DeckGL from "@deck.gl/react";
 import { ScatterplotLayer, TextLayer, PolygonLayer, IconLayer } from "@deck.gl/layers";
 import Map from "react-map-gl/maplibre";
 import { getVehicleColor } from "../utils/colorMap";
+import { useLang } from "../i18n/index.jsx";
 
 function makeCameraIconUrl(selected) {
   const stroke  = selected ? "#22d3ee" : "#fbbf24";
@@ -21,12 +22,28 @@ function makeCameraIconUrl(selected) {
 const ICON_NORMAL   = makeCameraIconUrl(false);
 const ICON_SELECTED = makeCameraIconUrl(true);
 
-const MAP_STYLE =
-  "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+const MAP_STYLES = {
+  dark:      "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+  light:     "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+  satellite: {
+    version: 8,
+    sources: {
+      satellite: {
+        type: "raster",
+        tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+        tileSize: 256,
+        attribution: "Esri World Imagery",
+      },
+    },
+    layers: [{ id: "satellite", type: "raster", source: "satellite" }],
+  },
+};
+
+const MAP_MODE_ICONS = { dark: "🌙", light: "☀️", satellite: "🛰️" };
+const MAP_MODE_NEXT  = { dark: "light", light: "satellite", satellite: "dark" };
 
 const VEHICLE_MIN_ZOOM = 15;
 
-// CCTV 지면 커버리지: 사다리꼴 (가까운 쪽 좁고 먼 쪽 넓음 — 실제 원근 투영)
 function computeFovPolygon(lat, lon, headingDeg = 0, fovDeg = 70, distM = 90, nearM = 15) {
   const R = 6371000;
   const dLatPerM = (1 / R) * (180 / Math.PI);
@@ -64,7 +81,10 @@ export default function MapView({
   onCctvClick,
   calibrationMode = false,
   onMapClick,
+  mapMode = "dark",
+  onMapModeChange,
 }) {
+  const { t } = useLang();
   const showVehicles = viewState.zoom >= VEHICLE_MIN_ZOOM;
 
   const sorted = useMemo(
@@ -72,20 +92,18 @@ export default function MapView({
     [vehicles]
   );
 
-  // ── 카메라 클릭 영역 (투명 ScatterplotLayer — 히트 테스트용) ──────────
   const cctvHitLayer = new ScatterplotLayer({
-    id:              "cctvs-hit",
-    data:            cctvList,
-    getPosition:     (d) => [d.lon, d.lat],
-    getRadius:       18,
-    getFillColor:    [0, 0, 0, 0],   // 완전 투명
-    getLineColor:    [0, 0, 0, 0],
-    radiusUnits:     "pixels",
-    pickable:        !calibrationMode,
-    onClick:         ({ object }) => !calibrationMode && object && onCctvClick?.(object),
+    id:           "cctvs-hit",
+    data:         cctvList,
+    getPosition:  (d) => [d.lon, d.lat],
+    getRadius:    18,
+    getFillColor: [0, 0, 0, 0],
+    getLineColor: [0, 0, 0, 0],
+    radiusUnits:  "pixels",
+    pickable:     !calibrationMode,
+    onClick:      ({ object }) => !calibrationMode && object && onCctvClick?.(object),
   });
 
-  // ── 카메라 아이콘 (SVG IconLayer — 이모지 WebGL 렌더링 문제 우회) ───
   const cctvIconLayer = new IconLayer({
     id:          "cctv-icons",
     data:        cctvList,
@@ -102,7 +120,6 @@ export default function MapView({
     updateTriggers: { getIcon: [selectedCctv?.id], getSize: [selectedCctv?.id] },
   });
 
-  // ── 카메라 이름 라벨 ──────────────────────────────────────────────────
   const cctvLabelLayer = new TextLayer({
     id:             "cctv-labels",
     data:           cctvList,
@@ -119,10 +136,9 @@ export default function MapView({
     updateTriggers: { getSize: [selectedCctv?.id], getColor: [selectedCctv?.id] },
   });
 
-  // ── 선택된 카메라 시야 범위 (PolygonLayer) ────────────────────────────
   const fovLayer = useMemo(() => {
     if (!selectedCctv) return null;
-    const ring = computeFovPolygon(
+    const ring = selectedCctv.calibGpsRing ?? computeFovPolygon(
       selectedCctv.lat,
       selectedCctv.lon,
       selectedCctv.heading ?? 0,
@@ -139,37 +155,45 @@ export default function MapView({
     });
   }, [selectedCctv]);
 
-  // ── 차량 레이어 ────────────────────────────────────────────────────────
+  const nodeStroked = mapMode !== "dark";
+  const nodeOutline = mapMode === "satellite" ? [0, 0, 0, 230] : [80, 80, 80, 180];
+  const parkedColor = mapMode === "light" ? [120, 120, 120, 160] : [80, 80, 80, 140];
+
   const scatterLayer = new ScatterplotLayer({
     id:           "vehicles",
     data:         sorted,
     getPosition:  (d) => [d.lon, d.lat],
     getRadius:    3,
-    getFillColor: (d) =>
-      d.is_parked ? [80, 80, 80, 140] : getVehicleColor(d.direction, false),
+    getFillColor: (d) => d.is_parked ? parkedColor : getVehicleColor(d.direction, mapMode !== "dark"),
+    getLineColor:    nodeOutline,
+    lineWidthMinPixels: nodeStroked ? 1.5 : 0,
+    stroked:      nodeStroked,
     pickable:     true,
     radiusUnits:  "meters",
     radiusMinPixels: 5,
-    updateTriggers: { getFillColor: vehicles },
+    updateTriggers: { getFillColor: [vehicles, mapMode], getLineColor: mapMode },
   });
 
+  const labelColor = mapMode === "light" ? [30, 30, 30, 220] : [255, 255, 255, 200];
   const textLayer = new TextLayer({
     id:             "vehicle-labels",
     data:           sorted,
     getPosition:    (d) => [d.lon, d.lat],
     getText:        (d) => `#${d.track_id}`,
     getSize:        11,
-    getColor:       [255, 255, 255, 200],
+    getColor:       labelColor,
     getPixelOffset: [0, -14],
-    updateTriggers: { getText: vehicles },
+    outlineWidth:   mapMode !== "dark" ? 2 : 0,
+    outlineColor:   mapMode === "light" ? [255, 255, 255, 200] : [0, 0, 0, 180],
+    updateTriggers: { getText: vehicles, getColor: mapMode },
   });
 
   const layers = [
     ...(showVehicles ? extraLayers : []),
-    fovLayer,           // FOV 시야 범위 (선택 시)
-    cctvHitLayer,       // 투명 히트 영역
-    cctvIconLayer,      // 📷 아이콘
-    cctvLabelLayer,     // 카메라 이름
+    fovLayer,
+    cctvHitLayer,
+    cctvIconLayer,
+    cctvLabelLayer,
     ...(showVehicles ? [scatterLayer, textLayer] : []),
   ].filter(Boolean);
 
@@ -188,12 +212,12 @@ export default function MapView({
           return {
             html: `
               <b>#${d.track_id}</b> &nbsp; <span style="color:#aaa">${d.class_name}</span>
-              ${d.is_parked ? ' &nbsp;<span style="color:#9ca3af">🅿 주차</span>' : ""}<br/>
-              방향: <b>${d.direction}</b><br/>
-              속도: <b>${d.speed_kph?.toFixed(1) ?? "—"} km/h</b>
-              ${d.is_speeding ? ' &nbsp;<span style="color:#f87171">🚨 과속</span>' : ""}<br/>
-              체류: ${d.dwell_frames}f
-              ${d.is_bottleneck ? ' &nbsp;<span style="color:#fbbf24">⚠ 병목</span>' : ""}
+              ${d.is_parked ? ` &nbsp;<span style="color:#9ca3af">${t("map.parked")}</span>` : ""}<br/>
+              ${t("map.dir")}: <b>${d.direction}</b><br/>
+              ${t("map.speed")}: <b>${d.speed_kph?.toFixed(1) ?? "—"} km/h</b>
+              ${d.is_speeding ? ` &nbsp;<span style="color:#f87171">${t("map.speeding")}</span>` : ""}<br/>
+              ${t("map.dwell")}: ${d.dwell_frames}f
+              ${d.is_bottleneck ? ` &nbsp;<span style="color:#fbbf24">${t("map.bottleneck")}</span>` : ""}
             `,
             style: {
               background: "#111827", color: "#f9fafb",
@@ -204,7 +228,7 @@ export default function MapView({
 
         if (d.id) {
           return {
-            html: `<b>📷 ${d.name || ""}</b><br/><span style="color:#9ca3af;font-size:11px">클릭 → 실시간 전환 · 시야 범위 표시</span>`,
+            html: `<b>📷 ${d.name || ""}</b><br/><span style="color:#9ca3af;font-size:11px">${t("map.clickHint")}</span>`,
             style: {
               background: "#111827", color: "#fbbf24",
               fontSize: "12px", borderRadius: "6px", padding: "8px",
@@ -215,7 +239,21 @@ export default function MapView({
         return null;
       }}
     >
-      <Map mapStyle={MAP_STYLE} />
+      <Map mapStyle={MAP_STYLES[mapMode] ?? MAP_STYLES.dark} />
+
+      <button
+        onClick={() => onMapModeChange?.(MAP_MODE_NEXT[mapMode])}
+        title={t("map.modeToggle", { mode: mapMode, next: MAP_MODE_NEXT[mapMode] })}
+        style={{
+          position: "absolute", top: 12, right: 12,
+          background: "rgba(17,24,39,0.88)", border: "1px solid #374151",
+          borderRadius: 8, padding: "6px 10px", cursor: "pointer",
+          fontSize: 18, lineHeight: 1,
+          backdropFilter: "blur(4px)", zIndex: 10,
+        }}
+      >
+        {MAP_MODE_ICONS[mapMode]}
+      </button>
     </DeckGL>
   );
 }

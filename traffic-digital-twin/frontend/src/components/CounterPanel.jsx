@@ -1,13 +1,12 @@
-/**
- * CounterPanel.jsx — In/Out 통행량 + 현재 차량 수 표시
- */
+import { useLang } from "../i18n/index.jsx";
 
 export default function CounterPanel({ inCount = 0, outCount = 0, vehicleCount = 0 }) {
+  const { t } = useLang();
   return (
     <div className="grid grid-cols-3 gap-3">
-      <Stat label="현재 차량" value={vehicleCount} color="text-blue-400" />
-      <Stat label="진입 (In)"  value={inCount}      color="text-green-400" />
-      <Stat label="진출 (Out)" value={outCount}     color="text-orange-400" />
+      <Stat label={t("counter.current")} value={vehicleCount} color="text-blue-400" />
+      <Stat label={t("counter.in")}      value={inCount}      color="text-green-400" />
+      <Stat label={t("counter.out")}     value={outCount}     color="text-orange-400" />
     </div>
   );
 }

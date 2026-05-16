@@ -110,47 +110,31 @@ def _move_to_backend(src: Path, dst: Path) -> Path:
     return dst
 
 
-def _export_engine(weights_path: Path) -> Path | None:
-    if not YOLO_AUTO_EXPORT_ENGINE or not _can_use_tensorrt():
+def _export_model(weights_path: Path, fmt: str) -> Path | None:
+    """YOLO 모델을 지정 포맷으로 export. 이미 존재하면 즉시 반환."""
+    if fmt == "engine" and (not YOLO_AUTO_EXPORT_ENGINE or not _can_use_tensorrt()):
         return None
-    engine_path = weights_path.with_suffix(".engine")
-    if engine_path.exists():
-        return engine_path
-    logger.info("TensorRT export: %s → %s", weights_path.name, engine_path.name)
+    out_path = weights_path.with_suffix(f".{fmt}")
+    if out_path.exists():
+        return out_path
+    logger.info("%s export: %s → %s", fmt.upper(), weights_path.name, out_path.name)
+    is_engine = fmt == "engine"
     try:
         m = YOLO(str(weights_path), task="detect")
-        exported = m.export(format="engine", half=True, device=0, imgsz=YOLO_IMGSZ, verbose=False)
+        exported = m.export(
+            format=fmt, imgsz=YOLO_IMGSZ,
+            half=is_engine, device=(0 if is_engine else None), verbose=False,
+        )
         if not exported:
-            return engine_path if engine_path.exists() else None
+            return out_path if out_path.exists() else None
         ep = Path(str(exported))
         if not ep.is_absolute():
             ep = (Path.cwd() / ep).resolve()
         if not ep.exists():
-            return engine_path if engine_path.exists() else None
-        return _move_to_backend(ep, engine_path)
+            return out_path if out_path.exists() else None
+        return _move_to_backend(ep, out_path)
     except Exception as exc:
-        logger.warning("TensorRT export failed for %s: %s", weights_path.name, exc)
-        return None
-
-
-def _export_onnx(weights_path: Path) -> Path | None:
-    onnx_path = weights_path.with_suffix(".onnx")
-    if onnx_path.exists():
-        return onnx_path
-    logger.info("ONNX export: %s → %s", weights_path.name, onnx_path.name)
-    try:
-        m = YOLO(str(weights_path), task="detect")
-        exported = m.export(format="onnx", imgsz=YOLO_IMGSZ, half=False, verbose=False)
-        if not exported:
-            return onnx_path if onnx_path.exists() else None
-        ep = Path(str(exported))
-        if not ep.is_absolute():
-            ep = (Path.cwd() / ep).resolve()
-        if not ep.exists():
-            return onnx_path if onnx_path.exists() else None
-        return _move_to_backend(ep, onnx_path)
-    except Exception as exc:
-        logger.warning("ONNX export failed for %s: %s", weights_path.name, exc)
+        logger.warning("%s export failed for %s: %s", fmt.upper(), weights_path.name, exc)
         return None
 
 
@@ -173,12 +157,12 @@ def resolve_model_selection() -> ModelSelection:
             return ModelSelection(engine_path, "tensorrt", "existing-engine")
 
         if trt_ok and pt_path.exists():
-            exported = _export_engine(pt_path)
+            exported = _export_model(pt_path, "engine")
             if exported and exported.exists():
                 return ModelSelection(exported, "tensorrt", "exported-engine")
             # TRT export 실패 → ONNX 시도
             if onnx_ok:
-                exported_onnx = _export_onnx(pt_path)
+                exported_onnx = _export_model(pt_path, "onnx")
                 if exported_onnx and exported_onnx.exists():
                     return ModelSelection(exported_onnx, "onnx", "exported-onnx")
             if pt_fallback is None:
@@ -190,7 +174,7 @@ def resolve_model_selection() -> ModelSelection:
             return ModelSelection(onnx_path, "onnx", "existing-onnx")
 
         if onnx_ok and pt_path.exists() and not trt_ok:
-            exported_onnx = _export_onnx(pt_path)
+            exported_onnx = _export_model(pt_path, "onnx")
             if exported_onnx and exported_onnx.exists():
                 return ModelSelection(exported_onnx, "onnx", "exported-onnx")
 
@@ -246,8 +230,6 @@ def _build_tracker(tier: str, device: Any) -> Any:
     except Exception as exc:
         logger.warning("Tracker %s 초기화 실패 (%s) → ByteTrack 폴백", tier, exc)
         return ByteTrack()
-
-    return ByteTrack()
 
 
 def _sv_to_boxmot(dets: sv.Detections) -> np.ndarray:

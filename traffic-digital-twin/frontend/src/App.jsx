@@ -8,6 +8,7 @@ import LOSBadge      from "./components/LOSBadge";
 import ClassPieChart from "./components/ClassPieChart";
 import CounterPanel  from "./components/CounterPanel";
 import CctvPlayer    from "./components/CctvPlayer";
+import { useLang }   from "./i18n/index.jsx";
 
 const INITIAL_VIEW = {
   longitude: 127.0386,
@@ -17,7 +18,6 @@ const INITIAL_VIEW = {
   bearing:   0,
 };
 
-// 현재 뷰포트에서 bbox 계산
 function viewBbox(vs) {
   const span = Math.min(360 / Math.pow(2, vs.zoom) * 2, 1.5);
   return {
@@ -33,7 +33,8 @@ function trailReducer(state, vehicles) {
 }
 
 export default function App() {
-  const { frameData, isConnected, error, cameraReady } = useWebSocket();
+  const { frameData, isConnected, error, cameraReady, cameraReadyInfo } = useWebSocket();
+  const { t, lang, setLang } = useLang();
   const [trailMap, dispatchTrail]         = useReducer(trailReducer, new Map());
   const [cctvList, setCctvList]           = useState([]);
   const [selectedCctv, setSelectedCctv]   = useState(null);
@@ -41,9 +42,10 @@ export default function App() {
   const [cctvLoading, setCctvLoading]     = useState(false);
   const [switching, setSwitching]         = useState(false);
   const [guideVisible, setGuideVisible]   = useState(true);
-  // 보정 상태: null = 비활성, "awaiting" = 지도 클릭 대기
   const [calMode, setCalMode]             = useState(null);
   const [pendingGps, setPendingGps]       = useState(null);
+  const [calibTabActive, setCalibTabActive] = useState(false);
+  const [mapMode, setMapMode]             = useState("dark");
   const switchDebounceRef                 = useRef(null);
   const switchTimeoutRef                  = useRef(null);
 
@@ -53,6 +55,21 @@ export default function App() {
       if (switchTimeoutRef.current) clearTimeout(switchTimeoutRef.current);
     }
   }, [cameraReady]);
+
+  useEffect(() => {
+    if (!cameraReadyInfo?.camera_key || !selectedCctv) return;
+    fetch(`http://localhost:8000/calibration/${cameraReadyInfo.camera_key}`)
+      .then((r) => r.json())
+      .then(({ calibration }) => {
+        if (!calibration?.gps_pts) return;
+        const ring = [
+          ...calibration.gps_pts.map(([lat, lon]) => [lon, lat]),
+          [calibration.gps_pts[0][1], calibration.gps_pts[0][0]],
+        ];
+        setSelectedCctv((prev) => prev ? { ...prev, calibGpsRing: ring } : prev);
+      })
+      .catch(() => {});
+  }, [cameraReadyInfo]);
 
   const activeData  = selectedCctv ? frameData : null;
   const vehicles    = activeData?.vehicles      ?? [];
@@ -77,19 +94,16 @@ export default function App() {
       .finally(() => setCctvLoading(false));
   }, [viewState]);
 
-  // 초기 로드
   useEffect(() => { fetchCctvs(INITIAL_VIEW); }, []);
 
-  // CCTV 로드 후 5초 뒤 안내 팝업 자동 소멸
   useEffect(() => {
     if (cctvList.length === 0) return;
-    const t = setTimeout(() => setGuideVisible(false), 5000);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => setGuideVisible(false), 5000);
+    return () => clearTimeout(timer);
   }, [cctvList.length]);
 
   const trailLayer = useTrailLayer(trailMap, vehicles);
 
-  // 보정 모드: 지도 클릭으로 GPS 좌표 수집
   const handleMapClick = useCallback((info) => {
     if (calMode !== "awaiting" || !info.coordinate) return;
     const [lon, lat] = info.coordinate;
@@ -103,19 +117,15 @@ export default function App() {
     setViewState({
       longitude: cctv.lon,
       latitude:  cctv.lat,
-      zoom: 18,
-      pitch: 45,
-      bearing: 0,
+      zoom: 18, pitch: 45, bearing: 0,
       transitionDuration: 1200,
       transitionInterpolator: new FlyToInterpolator(),
     });
     if (!cctv.cctvurl) return;
-    // 300ms 디바운스: 연속 클릭 시 마지막 것만 전송
     if (switchDebounceRef.current) clearTimeout(switchDebounceRef.current);
     if (switchTimeoutRef.current) clearTimeout(switchTimeoutRef.current);
     switchDebounceRef.current = setTimeout(() => {
       setSwitching(true);
-      // 10초 안에 camera_ready 없으면 강제 해제
       switchTimeoutRef.current = setTimeout(() => setSwitching(false), 10000);
       fetch("http://localhost:8000/switch-camera", {
         method:  "POST",
@@ -125,16 +135,14 @@ export default function App() {
     }, 300);
   }, [calMode]);
 
-  const handleCalibSaved = useCallback((heading) => {
+  const handleCalibSaved = useCallback((heading, calibGpsRing) => {
     if (!selectedCctv) return;
-    const updated = { ...selectedCctv, heading };
+    const updated = { ...selectedCctv, heading, ...(calibGpsRing ? { calibGpsRing } : {}) };
     setSelectedCctv(updated);
     setCctvList((prev) => prev.map((c) => c.id === updated.id ? updated : c));
   }, [selectedCctv]);
 
-  // CCTV 로드 후 5초 안에 선택 안 했을 때만 안내 표시
   const noCameraSelected = guideVisible && cctvList.length > 0 && !selectedCctv;
-
   const speedingVehicles = useMemo(() => vehicles.filter((v) => v.is_speeding), [vehicles]);
   const bottlenecks      = useMemo(() => vehicles.filter((v) => v.is_bottleneck), [vehicles]);
 
@@ -153,6 +161,8 @@ export default function App() {
           onCctvClick={handleCctvClick}
           calibrationMode={calMode === "awaiting"}
           onMapClick={handleMapClick}
+          mapMode={calibTabActive && mapMode !== "satellite" ? "satellite" : mapMode}
+          onMapModeChange={setMapMode}
         />
 
         {/* 연결 상태 칩 */}
@@ -162,19 +172,14 @@ export default function App() {
           background: "rgba(17,24,39,0.85)", padding: "6px 14px",
           borderRadius: 999, fontSize: 13, backdropFilter: "blur(4px)",
         }}>
-          <span style={{
-            width: 8, height: 8, borderRadius: "50%",
-            background: isConnected ? "#34d399" : "#f87171",
-            display: "inline-block",
-          }} />
-          {isConnected ? "실시간 연결 중" : (error ?? "재연결 중…")}
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: isConnected ? "#34d399" : "#f87171", display: "inline-block" }} />
+          {isConnected ? t("app.connected") : (error ?? t("app.reconnecting"))}
         </div>
 
         {/* 선택된 CCTV 표시 */}
         {selectedCctv && (
           <div style={{
-            position: "absolute", top: 12, left: "50%",
-            transform: "translateX(-50%)",
+            position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)",
             display: "flex", alignItems: "center", gap: 6,
             background: "rgba(17,24,39,0.90)", padding: "6px 16px",
             borderRadius: 999, fontSize: 13, backdropFilter: "blur(4px)",
@@ -182,91 +187,79 @@ export default function App() {
           }}>
             <span style={{ color: "#fbbf24", fontSize: 15 }}>📷</span>
             <span style={{ color: "#fde68a" }}>{selectedCctv.name || selectedCctv.id}</span>
-            <button
-              onClick={() => setSelectedCctv(null)}
-              style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", padding: 0, marginLeft: 4, fontSize: 14 }}
-            >✕</button>
+            <button onClick={() => setSelectedCctv(null)} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", padding: 0, marginLeft: 4, fontSize: 14 }}>✕</button>
           </div>
         )}
 
         {/* 카메라 미선택 안내 */}
         {noCameraSelected && (
           <div style={{
-            position: "absolute", top: "50%", left: "50%",
-            transform: "translate(-50%, -50%)",
+            position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
             background: "rgba(17,24,39,0.92)", padding: "18px 28px",
             borderRadius: 12, fontSize: 14, backdropFilter: "blur(6px)",
             border: "1px solid #374151", textAlign: "center", pointerEvents: "none",
           }}>
             <div style={{ fontSize: 28, marginBottom: 8 }}>📷</div>
-            <div style={{ color: "#f9fafb", fontWeight: 600, marginBottom: 4 }}>지도에서 CCTV를 클릭하세요</div>
-            <div style={{ color: "#9ca3af", fontSize: 12 }}>클릭하면 해당 카메라의 실시간 차량 탐지가 시작됩니다</div>
+            <div style={{ color: "#f9fafb", fontWeight: 600, marginBottom: 4 }}>{t("app.clickCctv")}</div>
+            <div style={{ color: "#9ca3af", fontSize: 12 }}>{t("app.clickCctvSub")}</div>
           </div>
         )}
 
         {/* 카메라 전환 중 */}
         {switching && (
           <div style={{
-            position: "absolute", top: 52, left: "50%",
-            transform: "translateX(-50%)",
+            position: "absolute", top: 52, left: "50%", transform: "translateX(-50%)",
             background: "rgba(17,24,39,0.90)", padding: "6px 16px",
             borderRadius: 999, fontSize: 12, backdropFilter: "blur(4px)",
             border: "1px solid #374151", whiteSpace: "nowrap", color: "#a5b4fc",
           }}>
-            ⏳ 스트림 연결 중…
+            {t("app.switching")}
           </div>
         )}
 
         {/* CCTV 새로고침 버튼 */}
-        <div style={{
-          position: "absolute", bottom: 56, right: 16,
-          display: "flex", flexDirection: "column", gap: 6,
-        }}>
+        <div style={{ position: "absolute", bottom: 56, right: 16, display: "flex", flexDirection: "column", gap: 6 }}>
           <button
             onClick={() => fetchCctvs()}
             disabled={cctvLoading}
-            title="현재 화면 기준 CCTV 새로고침"
+            title={t("app.refreshCctv")}
             style={{
               background: cctvLoading ? "#374151" : "rgba(17,24,39,0.90)",
               color: cctvLoading ? "#6b7280" : "#fbbf24",
-              border: "1px solid #374151",
-              borderRadius: 8, padding: "7px 12px",
+              border: "1px solid #374151", borderRadius: 8, padding: "7px 12px",
               fontSize: 12, cursor: cctvLoading ? "default" : "pointer",
               backdropFilter: "blur(4px)", whiteSpace: "nowrap",
             }}
           >
-            {cctvLoading ? "로딩 중…" : "📷 CCTV 새로고침"}
+            {cctvLoading ? t("app.loading") : t("app.refreshCctv")}
           </button>
           <div style={{ fontSize: 10, color: "#6b7280", textAlign: "center" }}>
-            {cctvList.length}개 카메라
+            {t("app.nCameras", { n: cctvList.length })}
           </div>
         </div>
 
-        {/* zoom out 시 안내 */}
+        {/* zoom out 안내 */}
         {viewState.zoom < 15 && (
           <div style={{
             position: "absolute", bottom: 16, right: 16,
             background: "rgba(17,24,39,0.85)", padding: "6px 14px",
-            borderRadius: 8, fontSize: 12, color: "#9ca3af",
-            backdropFilter: "blur(4px)",
+            borderRadius: 8, fontSize: 12, color: "#9ca3af", backdropFilter: "blur(4px)",
           }}>
-            zoom 15 이상으로 확대하면 차량이 표시됩니다
+            {t("app.zoomHint")}
           </div>
         )}
 
-        {/* 범례 */}
-        <Legend cctvCount={cctvList.length} />
+        <Legend t={t} cctvCount={cctvList.length} />
 
         {/* 보정 모드 안내 배너 */}
         {calMode === "awaiting" && (
           <div style={{
-            position: "absolute", top: 52, left: "50%",
-            transform: "translateX(-50%)",
+            position: "absolute", top: 52, left: "50%", transform: "translateX(-50%)",
             background: "rgba(30,58,138,0.95)", padding: "8px 20px",
             borderRadius: 999, fontSize: 13, backdropFilter: "blur(4px)",
             border: "1px solid #3b82f6", whiteSpace: "nowrap", color: "#bfdbfe", zIndex: 30,
           }}>
-            🗺 지도에서 동일 지점을 클릭하세요
+            {t("app.mapClickBanner")}
             <button
               onClick={() => { setCalMode(null); setPendingGps(null); }}
               style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", marginLeft: 10, fontSize: 14 }}
@@ -274,7 +267,6 @@ export default function App() {
           </div>
         )}
 
-        {/* CCTV 실시간 영상 — 지도 좌하단 플로팅 패널 */}
         <CctvPlayer
           cctv={selectedCctv}
           onClose={() => { setSelectedCctv(null); setCalMode(null); setPendingGps(null); }}
@@ -282,6 +274,7 @@ export default function App() {
           onNeedGps={() => { setPendingGps(null); setCalMode("awaiting"); }}
           onCancelGps={() => { setCalMode(null); setPendingGps(null); }}
           onCalibSaved={handleCalibSaved}
+          onCalibTabChange={setCalibTabActive}
         />
       </div>
 
@@ -291,9 +284,24 @@ export default function App() {
         padding: 16, background: "#111827",
         borderLeft: "1px solid #1f2937", overflowY: "auto",
       }}>
-        <h1 style={{ margin: 0, fontSize: 16, fontWeight: 700, letterSpacing: "-0.02em" }}>
-          🛣️ 교통 디지털 트윈
-        </h1>
+        {/* 헤더: 타이틀 + 언어 토글 */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <h1 style={{ margin: 0, fontSize: 16, fontWeight: 700, letterSpacing: "-0.02em" }}>
+            {t("app.title")}
+          </h1>
+          <button
+            onClick={() => setLang(lang === "en" ? "ko" : "en")}
+            title={lang === "en" ? "한국어로 전환" : "Switch to English"}
+            style={{
+              background: "rgba(30,41,59,0.9)", border: "1px solid #334155",
+              borderRadius: 6, padding: "3px 10px", cursor: "pointer",
+              fontSize: 12, fontWeight: 700,
+              color: lang === "en" ? "#38bdf8" : "#fbbf24",
+            }}
+          >
+            {lang === "en" ? "KO" : "EN"}
+          </button>
+        </div>
 
         <CounterPanel inCount={inCount} outCount={outCount} vehicleCount={vehicleCnt} />
 
@@ -304,14 +312,11 @@ export default function App() {
           </div>
         </Card>
 
-        <Card label="차종 분포">
+        <Card label={t("app.classDist")}>
           <ClassPieChart classCounts={classCounts} />
         </Card>
 
-        <AlertPanel
-          speeding={speedingVehicles}
-          bottlenecks={bottlenecks}
-        />
+        <AlertPanel speeding={speedingVehicles} bottlenecks={bottlenecks} t={t} />
       </aside>
     </div>
   );
@@ -326,60 +331,57 @@ function Card({ children, label }) {
   );
 }
 
-function Legend({ cctvCount }) {
+function Legend({ t, cctvCount }) {
   const items = [
-    { color: "#0078ff", label: "진입 (In)" },
-    { color: "#ff3232", label: "진출 (Out)" },
-    { color: "#ff1e1e", label: "과속", bold: true },
-    { color: "#c8c8c8", label: "Unknown" },
-    { color: "#fbbf24", label: `CCTV (${cctvCount})`, square: true },
-    { color: "#22d3ee", label: "시야 범위 (선택 시)", square: true, opacity: 0.4 },
+    { color: "#0078ff", key: "legend.in" },
+    { color: "#ff3232", key: "legend.out" },
+    { color: "#ff1e1e", key: "legend.speeding", bold: true },
+    { color: "#c8c8c8", key: "legend.unknown" },
+    { color: "#fbbf24", key: null, label: `CCTV (${cctvCount})`, square: true },
+    { color: "#22d3ee", key: "legend.fov", square: true, opacity: 0.4 },
   ];
   return (
     <div style={{
       position: "absolute", bottom: 16, left: 16,
-      background: "rgba(17,24,39,0.85)", borderRadius: 8,
-      padding: "8px 14px", fontSize: 12,
+      background: "rgba(17,24,39,0.85)", borderRadius: 8, padding: "8px 14px", fontSize: 12,
     }}>
       {items.map((it) => (
-        <div key={it.label} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+        <div key={it.key ?? it.label} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
           <span style={{
-            width: 10, height: 10,
-            borderRadius: it.square ? 2 : "50%",
-            background: it.color,
-            opacity: it.opacity ?? 1,
-            display: "inline-block",
+            width: 10, height: 10, borderRadius: it.square ? 2 : "50%",
+            background: it.color, opacity: it.opacity ?? 1, display: "inline-block",
             border: it.square ? "1.5px solid #fff" : "none",
           }} />
-          <span style={{ color: "#d1d5db", fontWeight: it.bold ? 700 : 400 }}>{it.label}</span>
+          <span style={{ color: "#d1d5db", fontWeight: it.bold ? 700 : 400 }}>
+            {it.key ? t(it.key) : it.label}
+          </span>
         </div>
       ))}
     </div>
   );
 }
 
-const AlertPanel = memo(function AlertPanel({ speeding, bottlenecks }) {
+const AlertPanel = memo(function AlertPanel({ speeding, bottlenecks, t }) {
   const total = speeding.length + bottlenecks.length;
   if (total === 0) return null;
-
   return (
-    <Card label={`경보 (${total})`}>
+    <Card label={t("app.alerts", { n: total })}>
       <ul style={{ margin: 0, padding: 0, listStyle: "none", maxHeight: 160, overflowY: "auto", contain: "layout" }}>
         {speeding.map((v) => (
           <AlertItem key={`sp-${v.track_id}`} id={v.track_id} cls={v.class_name}
-            tag="과속" tagColor="#f87171" extra={`${v.speed_kph?.toFixed(0)} km/h`} />
+            tag={t("app.speeding")} tagColor="#f87171" extra={`${v.speed_kph?.toFixed(0)} km/h`} />
         ))}
         {bottlenecks.map((v) => (
           <AlertItem key={`bn-${v.track_id}`} id={v.track_id} cls={v.class_name}
-            tag="병목" tagColor="#a78bfa" extra={`${v.dwell_frames}f`} />
+            tag={t("app.bottleneck")} tagColor="#a78bfa" extra={`${v.dwell_frames}f`} />
         ))}
       </ul>
     </Card>
   );
 }, (prev, next) => {
-  // track_id 집합이 동일하고 값도 같으면 리렌더 스킵
   if (prev.speeding.length !== next.speeding.length) return false;
   if (prev.bottlenecks.length !== next.bottlenecks.length) return false;
+  if (prev.t !== next.t) return false;
   const prevIds = new Set(prev.speeding.map((v) => v.track_id));
   if (!next.speeding.every((v) => prevIds.has(v.track_id))) return false;
   const prevBnIds = new Set(prev.bottlenecks.map((v) => v.track_id));

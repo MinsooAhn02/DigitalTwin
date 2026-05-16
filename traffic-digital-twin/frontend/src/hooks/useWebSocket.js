@@ -2,10 +2,11 @@
  * useWebSocket.js — 실시간 WebSocket 데이터 수신 훅
  *
  * 반환값:
- *   frameData    : 최신 FrameAnalytics JSON (null 초기값)
- *   isConnected  : 연결 상태 boolean
- *   error        : 에러 메시지 string | null
- *   cameraReady  : 카메라 전환 완료 이벤트 카운터 (변경될 때마다 useEffect 트리거용)
+ *   frameData      : 최신 FrameAnalytics JSON (null 초기값)
+ *   isConnected    : 연결 상태 boolean
+ *   error          : 에러 메시지 string | null
+ *   cameraReady    : 카메라 전환 완료 이벤트 카운터 (변경될 때마다 useEffect 트리거용)
+ *   cameraReadyInfo: 최신 camera_ready 페이로드 { camera_key, roi, name }
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -14,10 +15,11 @@ const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:8000/ws";
 const RECONNECT_DELAY_MS = 3000;
 
 export function useWebSocket() {
-  const [frameData,   setFrameData]   = useState(null);
-  const [isConnected, setIsConnected] = useState(false);
-  const [error,       setError]       = useState(null);
-  const [cameraReady, setCameraReady] = useState(0);
+  const [frameData,       setFrameData]       = useState(null);
+  const [isConnected,     setIsConnected]     = useState(false);
+  const [error,           setError]           = useState(null);
+  const [cameraReady,     setCameraReady]     = useState(0);
+  const [cameraReadyInfo, setCameraReadyInfo] = useState(null);
 
   const wsRef      = useRef(null);
   const retryTimer = useRef(null);
@@ -38,6 +40,7 @@ export function useWebSocket() {
         const data = JSON.parse(evt.data);
         // 메시지 타입 분기
         if (data.type === "camera_ready") {
+          setCameraReadyInfo({ camera_key: data.camera_key, roi: data.roi, name: data.name });
           setCameraReady((n) => n + 1);
         } else if (data.type === "camera_error") {
           setError(`카메라 전환 실패: ${data.message ?? ""}`);
@@ -68,5 +71,5 @@ export function useWebSocket() {
     };
   }, [connect]);
 
-  return { frameData, isConnected, error, cameraReady };
+  return { frameData, isConnected, error, cameraReady, cameraReadyInfo };
 }

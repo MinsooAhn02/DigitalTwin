@@ -30,7 +30,7 @@
 - [x] 4-3. backend/main.py — /cctvs 응답에 heading(기본 0°), fov_deg(70) 필드 추가
 - [x] 4-4. frontend/App.jsx — Legend에 시야범위 항목 추가
 
-## 버그 수정 (테스트 중 발견)
+## 버그 수정 (Phase 1~4 테스트 중 발견) ✅ 완료
 - [x] ITS API 단건 응답 dict 처리 (3곳: /cctvs, /cctv-refresh, hls_refresh_loop)
 - [x] boxmot 트래커 동시성 버그: ws/detect 활성 시 live_loop track() 스킵
 - [x] ws/detect 종료 시 boxmot reset_tracker() 호출 (live_loop 재개 준비)
@@ -72,3 +72,26 @@
 - [x] explanation.txt — 전면 재작성: 아키텍처·데이터흐름·모듈 상세·워크플로우·설계 결정 포함 (모르는 사람도 이해 가능한 수준)
 - [x] readme.md — 정리: 빠른 시작·명령어·기술스택·기능 목록으로 재구성
 - [x] tasks/lessons.md — 삭제 (내용을 explanation.txt 섹션 10으로 통합)
+
+## Phase 8 — 코드 최적화 및 정리 ✅ 완료
+- [x] 8-1. backend/main.py — _parse_its_items 헬퍼(3곳 ITS 파싱 통합) + _build_vehicles 헬퍼(ws/detect·_live_process 중복 제거), 중복 json import 제거
+- [x] 8-2. backend/detector.py — _export_engine/_export_onnx → _export_model(fmt) 통합, dead return 제거
+- [x] 8-3. backend/analytics.py — 차량 루프 2회→1회 병합, _class_counts Counter 활용
+- [x] 8-4. backend/transform.py — _transform_point/_batch_transform 헬퍼 추출, pixel_to_meter·batch_* 위임
+- [x] 8-5. backend/roi_manager.py — _load_config 유틸 추출, load_roi·save_roi 중복 제거
+- [x] 8-6. backend/tracker.py — 조건문 단순화 (len > 0 → truthy)
+
+## Phase 9 — UX 개선 Round 1 ✅ 완료
+- [x] 9-1. frontend/CctvPlayer.jsx — 탭 순서 변경: 실시간→YOLO→보정→ROI
+- [x] 9-2. frontend/MapView.jsx + CalibrationMode.jsx + CctvPlayer.jsx + App.jsx + useWebSocket.js — 보정 GPS 점으로 FOV 교체 (calibGpsRing), camera_ready 시 저장된 calibration 자동 로드
+- [x] 9-3. frontend/MapView.jsx + CctvPlayer.jsx + App.jsx — 보정 탭 자동 위성 전환 + 지도 우상단 🌙/☀️/🛰️ 3단계 토글 (dark→light→satellite 순환)
+- [x] 9-4. frontend/CctvPlayer.jsx — HLS watchdog(10s currentTime 미진행 감지) + stalled 이벤트 + non-fatal NETWORK_ERROR 3회 누적 시 재시작
+
+## Phase 10 — UX 개선 Round 2 ✅ 완료
+- [x] 10-1. frontend/CalibrationMode.jsx + CctvPlayer.jsx — 보정 UI 영상 밖으로 이동: canvas-only 컴포넌트 + onStateChange 콜백, CctvPlayer가 CalibBar를 비디오 div 위에 렌더링
+- [x] 10-2. frontend/RoiEditor.jsx + CctvPlayer.jsx — ROI 컨트롤 바 영상 밖으로 이동: canvas-only + onStateChange, CctvPlayer가 RoiBar를 비디오 div 아래에 렌더링
+- [x] 10-3. backend/main.py — 보정 POST에 frame_width/height 수신, 이미지 4코너 GPS 계산(perspectiveTransform) → corner_gps_pts 반환; CalibrationMode.jsx가 corner_gps_pts로 실제 FOV 사다리꼴 생성
+- [x] 10-4. frontend/CctvPlayer.jsx — HLS watchdog 5초로 단축, startLoad(-1)로 라이브 엣지 복귀, video.play() 재개, waiting 이벤트 추가
+- [x] 10-5. frontend/MapView.jsx + colorMap.js — Light/Satellite 모드 노드 고대비 색상 (DIRECTION_COLORS_CONTRAST), 텍스트 outline, stroked ScatterplotLayer
+- [x] 10-6. backend/config.py — SPEED_LIMIT_KPH 60→120, BOTTLENECK_DWELL_FRAMES 60→150 (env 변수로 외부 설정 가능)
+- [x] 10-7. 한/영 전환 (i18n) — src/i18n/index.jsx (LangProvider + useLang + t(key,params)), main.jsx 래핑, 전체 컴포넌트 적용; 사이드바 우상단 KO/EN 토글 버튼

@@ -23,15 +23,22 @@ export const DIRECTION_COLORS = {
 
 export const SPEEDING_COLOR = [255, 30, 30, 255];   // 강렬한 빨강
 
+// 라이트/위성 모드에서 더 진한 색상
+const DIRECTION_COLORS_CONTRAST = {
+  In:      [0,   80, 200, 230],
+  Out:     [200,  20,  20, 230],
+  Unknown: [80,  80,  80, 200],
+};
+
 /**
  * 우선순위: 과속 > 방향 색상
  * @param {string} direction  "In" | "Out" | "Unknown"
- * @param {boolean} isSpeeding
+ * @param {boolean} highContrast  라이트/위성 모드에서 true
  * @returns {[number, number, number, number]}
  */
-export function getVehicleColor(direction, isSpeeding) {
-  if (isSpeeding) return SPEEDING_COLOR;
-  return DIRECTION_COLORS[direction] ?? DIRECTION_COLORS.Unknown;
+export function getVehicleColor(direction, highContrast = false) {
+  const palette = highContrast ? DIRECTION_COLORS_CONTRAST : DIRECTION_COLORS;
+  return palette[direction] ?? palette.Unknown;
 }
 
 export const LOS_BADGE_COLORS = {

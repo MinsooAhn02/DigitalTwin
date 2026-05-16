@@ -55,11 +55,22 @@ class PerspectiveTransformer:
         self._gps_center_lon: float = float(np.mean(gps_arr[:, 1]))
 
     # ──────────────────────────────────────────────────────────────────
+    def _transform_point(self, H: np.ndarray, u: float, v: float) -> tuple[float, float]:
+        result = cv2.perspectiveTransform(np.float32([[[u, v]]]), H)
+        return float(result[0, 0, 0]), float(result[0, 0, 1])
+
+    def _batch_transform(
+        self, H: np.ndarray, points: list[tuple[float, float]]
+    ) -> list[tuple[float, float]]:
+        if not points:
+            return []
+        arr = np.float32([[p] for p in points])
+        res = cv2.perspectiveTransform(arr, H)
+        return [(float(r[0, 0]), float(r[0, 1])) for r in res]
+
     def pixel_to_gps(self, u: float, v: float) -> tuple[float, float]:
         """픽셀 (u, v) → (latitude, longitude), 카메라 베어링 보정 포함."""
-        pt = np.float32([[[u, v]]])
-        result = cv2.perspectiveTransform(pt, self._H_gps)  # (1,1,2)
-        lat, lon = float(result[0, 0, 0]), float(result[0, 0, 1])
+        lat, lon = self._transform_point(self._H_gps, u, v)
 
         if self._bearing_rad == 0.0:
             return lat, lon
@@ -75,20 +86,13 @@ class PerspectiveTransformer:
 
     def pixel_to_meter(self, u: float, v: float) -> tuple[float, float]:
         """픽셀 (u, v) → (x_m, y_m) — 속도 계산용 실세계 미터 좌표"""
-        pt = np.float32([[[u, v]]])
-        result = cv2.perspectiveTransform(pt, self._H_meter)
-        x_m, y_m = float(result[0, 0, 0]), float(result[0, 0, 1])
-        return x_m, y_m
+        return self._transform_point(self._H_meter, u, v)
 
     def batch_pixel_to_gps(
         self, points: list[tuple[float, float]]
     ) -> list[tuple[float, float]]:
         """여러 픽셀 좌표를 한 번에 변환 (OpenCV 벡터 연산 활용)"""
-        if not points:
-            return []
-        arr = np.float32([[p] for p in points])          # (N, 1, 2)
-        res = cv2.perspectiveTransform(arr, self._H_gps) # (N, 1, 2)
-        return [(float(r[0, 0]), float(r[0, 1])) for r in res]
+        return self._batch_transform(self._H_gps, points)
 
     def update_from_calibration(
         self,
@@ -138,8 +142,4 @@ class PerspectiveTransformer:
     def batch_pixel_to_meter(
         self, points: list[tuple[float, float]]
     ) -> list[tuple[float, float]]:
-        if not points:
-            return []
-        arr = np.float32([[p] for p in points])
-        res = cv2.perspectiveTransform(arr, self._H_meter)
-        return [(float(r[0, 0]), float(r[0, 1])) for r in res]
+        return self._batch_transform(self._H_meter, points)

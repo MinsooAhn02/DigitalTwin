@@ -1,13 +1,11 @@
-/**
- * SpeedGauge.jsx — 평균 속도 게이지 (RadialBar 스타일)
- */
-
 import { RadialBarChart, RadialBar, ResponsiveContainer } from "recharts";
+import { useLang } from "../i18n/index.jsx";
 
 const MAX_SPEED = 120;
 
 export default function SpeedGauge({ avgSpeed = 0 }) {
-  const pct = Math.min(avgSpeed / MAX_SPEED, 1);
+  const { t } = useLang();
+  const pct   = Math.min(avgSpeed / MAX_SPEED, 1);
   const color = avgSpeed > 100 ? "#ef4444" : avgSpeed > 70 ? "#f59e0b" : "#10b981";
 
   return (
@@ -26,7 +24,7 @@ export default function SpeedGauge({ avgSpeed = 0 }) {
         {avgSpeed.toFixed(0)}
         <span className="text-sm font-normal text-gray-400"> km/h</span>
       </p>
-      <p className="text-xs text-gray-500 mt-1">평균 속도</p>
+      <p className="text-xs text-gray-500 mt-1">{t("gauge.avgSpeed")}</p>
     </div>
   );
 }

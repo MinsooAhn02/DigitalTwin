@@ -3,18 +3,8 @@ import { useRef, useEffect, useState, useCallback } from "react";
 /**
  * CalibrationMode — 4-point pixel→GPS 보정 UI
  *
- * 동작 흐름:
- *  홀수 단계 (0,2,4,6): 영상에서 픽셀 좌표 클릭
- *  짝수 단계 (1,3,5,7): 지도에서 GPS 좌표 클릭 (App.jsx가 pendingGps로 전달)
- *
- * props:
- *  videoRef         — <video> ref
- *  cctvurl          — 현재 카메라 URL
- *  pendingGps       — App.jsx가 지도 클릭으로 넘겨준 {lat,lon} | null
- *  onNeedGps(n)     — 지도 클릭 모드 요청 (n번째 점 표시용)
- *  onCancelGps()    — 지도 클릭 모드 해제
- *  onClose()        — 보정 취소
- *  onSaved()        — 보정 완료
+ * 캔버스 오버레이만 렌더링. 컨트롤 UI는 onStateChange를 통해
+ * 부모(CctvPlayer)에서 영상 밖에 렌더링됨.
  */
 
 function getVideoRect(video) {
@@ -47,24 +37,31 @@ export default function CalibrationMode({
   onCancelGps,
   onClose,
   onSaved,
+  onStateChange,  // (state) → 부모에서 컨트롤 UI 렌더링용
 }) {
   const canvasRef = useRef(null);
-  // pairs: [{pixel:[u,v], gps:[lat,lon]|null}, ...]
   const [pairs, setPairs]   = useState([]);
   const [step, setStep]     = useState(0);
   const stepRef             = useRef(0);
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState(null);
 
-  // stepRef를 step과 동기화 (stale closure 방지)
   useEffect(() => { stepRef.current = step; }, [step]);
 
-  // ── 캔버스에 현재 points 그리기 ─────────────────────────────────────
+  const pairIdx     = Math.floor(step / 2);
+  const isPixelStep = step % 2 === 0 && step < 8;
+  const isGpsStep   = step % 2 === 1 && step < 8;
+  const isDone      = pairs.length === 4 && pairs.every((p) => p.gps);
+
+  // 상태 변경 시 부모에게 전달
+  useEffect(() => {
+    onStateChange?.({ pairs, step, pairIdx, isPixelStep, isGpsStep, isDone, saving, error });
+  }, [pairs, step, saving, error]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     const video  = videoRef.current;
     if (!canvas || !video) return;
-
     const r = getVideoRect(video);
     if (!r) return;
     canvas.width  = r.cw;
@@ -75,7 +72,6 @@ export default function CalibrationMode({
     pairs.forEach(({ pixel }, i) => {
       const cx = r.ox + (pixel[0] / r.vw) * r.rw;
       const cy = r.oy + (pixel[1] / r.vh) * r.rh;
-
       ctx.beginPath();
       ctx.arc(cx, cy, 9, 0, Math.PI * 2);
       ctx.fillStyle = COLORS[i] + "cc";
@@ -83,7 +79,6 @@ export default function CalibrationMode({
       ctx.strokeStyle = "#fff";
       ctx.lineWidth = 2;
       ctx.stroke();
-
       ctx.fillStyle = "#fff";
       ctx.font = "bold 11px system-ui";
       ctx.textAlign = "center";
@@ -100,179 +95,111 @@ export default function CalibrationMode({
     return () => obs.disconnect();
   }, [draw]);
 
-  // ── 지도 GPS 좌표 수신 ────────────────────────────────────────────────
   useEffect(() => {
     if (!pendingGps) return;
     const cur = stepRef.current;
-    if (cur % 2 !== 1) return; // GPS 입력 단계가 아니면 무시
-
-    const pairIdx = Math.floor(cur / 2);
+    if (cur % 2 !== 1) return;
+    const idx = Math.floor(cur / 2);
     setPairs((prev) => {
       const next = [...prev];
-      next[pairIdx] = { ...next[pairIdx], gps: [pendingGps.lat, pendingGps.lon] };
+      next[idx] = { ...next[idx], gps: [pendingGps.lat, pendingGps.lon] };
       return next;
     });
     onCancelGps();
     setStep(cur + 1);
   }, [pendingGps, onCancelGps]);
 
-  // ── 영상 클릭: 픽셀 좌표 기록 ────────────────────────────────────────
   const handleCanvasClick = useCallback((e) => {
     const cur = stepRef.current;
     if (cur % 2 !== 0 || cur >= 8) return;
-
     const canvas = canvasRef.current;
     const video  = videoRef.current;
     if (!canvas || !video) return;
-
     const r = getVideoRect(video);
     if (!r) return;
-
     const rect = canvas.getBoundingClientRect();
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
-
-    // letterbox 영역 안인지 확인
     if (cx < r.ox || cx > r.ox + r.rw || cy < r.oy || cy > r.oy + r.rh) return;
-
     const u = Math.round(((cx - r.ox) / r.rw) * r.vw);
     const v = Math.round(((cy - r.oy) / r.rh) * r.vh);
-
-    const pairIdx = Math.floor(cur / 2);
+    const idx = Math.floor(cur / 2);
     setPairs((prev) => {
       const next = [...prev];
-      next[pairIdx] = { pixel: [u, v], gps: null };
+      next[idx] = { pixel: [u, v], gps: null };
       return next;
     });
     setStep(cur + 1);
-    onNeedGps(pairIdx + 1);
+    onNeedGps(idx + 1);
   }, [videoRef, onNeedGps]);
 
-  const handleReset = () => {
-    setPairs([]);
-    setStep(0);
-    setError(null);
-    onCancelGps();
-  };
+  // 부모에서 호출할 수 있는 액션을 ref로 노출
+  const handleReset = useCallback(() => {
+    setPairs([]); setStep(0); setError(null); onCancelGps();
+  }, [onCancelGps]);
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     if (pairs.length < 4 || pairs.some((p) => !p.gps)) return;
     setSaving(true);
     setError(null);
     try {
+      const video = videoRef.current;
+      const frameWidth  = video?.videoWidth  || 640;
+      const frameHeight = video?.videoHeight || 360;
       const res = await fetch("http://localhost:8000/calibration", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           cctvurl,
-          pixel_pts: pairs.map((p) => p.pixel),
-          gps_pts:   pairs.map((p) => p.gps),
+          pixel_pts:    pairs.map((p) => p.pixel),
+          gps_pts:      pairs.map((p) => p.gps),
+          frame_width:  frameWidth,
+          frame_height: frameHeight,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
-      // GPS 점 0→3 방향으로 카메라 heading 계산
+      const result = await res.json();
+
       const [lat1, lon1] = pairs[0].gps;
       const [lat2, lon2] = pairs[3].gps;
       const rawBearing = Math.atan2(lon2 - lon1, lat2 - lat1) * 180 / Math.PI;
       const heading = (rawBearing + 360) % 360;
-      onSaved(heading);
+
+      // 백엔드가 이미지 코너 GPS를 반환하면 그것을 사용, 아니면 보정 점 사용
+      let gpsRing;
+      if (result.corner_gps_pts?.length === 4) {
+        const c = result.corner_gps_pts; // [[lat,lon],...]
+        gpsRing = [...c.map(([lat, lon]) => [lon, lat]), [c[0][1], c[0][0]]];
+      } else {
+        gpsRing = [...pairs.map((p) => [p.gps[1], p.gps[0]]), [pairs[0].gps[1], pairs[0].gps[0]]];
+      }
+      onSaved(heading, gpsRing);
     } catch (err) {
       setError(err.message ?? "저장 실패");
     } finally {
       setSaving(false);
     }
-  };
+  }, [pairs, cctvurl, videoRef, onSaved]);
 
-  const pairIdx     = Math.floor(step / 2);
-  const isPixelStep = step % 2 === 0 && step < 8;
-  const isGpsStep   = step % 2 === 1 && step < 8;
-  const isDone      = pairs.length === 4 && pairs.every((p) => p.gps);
+  // 부모가 reset/save를 호출할 수 있도록 onStateChange에 actions 포함
+  useEffect(() => {
+    onStateChange?.({
+      pairs, step, pairIdx, isPixelStep, isGpsStep, isDone, saving, error,
+      actions: { reset: handleReset, save: handleSave, close: () => { onCancelGps(); onClose(); } },
+    });
+  }, [pairs, step, saving, error, handleReset, handleSave]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div style={{ position: "absolute", inset: 0, zIndex: 10 }}>
-
-      {/* 클릭 가능 캔버스 — 전체 영역 커버 (RoiEditor와 동일 패턴) */}
-      <canvas
-        ref={canvasRef}
-        onClick={handleCanvasClick}
-        style={{
-          position: "absolute", inset: 0,
-          width: "100%", height: "100%",
-          cursor: isPixelStep ? "crosshair" : "default",
-        }}
-      />
-
-      {/* 안내 배너 — 상단 absolute overlay */}
-      <div style={{
-        position: "absolute", top: 0, left: 0, right: 0,
-        background: isGpsStep ? "rgba(30,58,138,0.95)" : "rgba(15,23,42,0.88)",
-        padding: "7px 12px",
-        display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-        borderBottom: "1px solid #334155",
-      }}>
-        <span style={{ fontSize: 12, color: "#e2e8f0", fontWeight: 600 }}>
-          🔧 카메라 보정 ({Math.min(pairIdx + 1, 4)}/4)
-        </span>
-        {!isDone && (
-          <span style={{ fontSize: 11, color: COLORS[Math.min(pairIdx, 3)] }}>
-            {isPixelStep && `▶ 영상에서 ${pairIdx + 1}번 점 클릭`}
-            {isGpsStep   && `▶ 지도에서 동일 지점 클릭`}
-          </span>
-        )}
-        {isDone && <span style={{ fontSize: 11, color: "#34d399" }}>✔ 4쌍 완료</span>}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          <button onClick={handleReset} disabled={saving} style={btn("#475569")}>초기화</button>
-          <button onClick={handleSave} disabled={!isDone || saving} style={btn(isDone && !saving ? "#0ea5e9" : "#1e293b")}>
-            {saving ? "저장 중…" : "저장"}
-          </button>
-          <button onClick={() => { onCancelGps(); onClose(); }} disabled={saving} style={btn("#6b7280")}>✕</button>
-        </div>
-      </div>
-
-      {/* 수집된 점 목록 — 우측 상단 */}
-      <div style={{
-        position: "absolute", top: 44, right: 8,
-        background: "rgba(15,23,42,0.85)", borderRadius: 8, padding: "8px 12px",
-        fontSize: 11, color: "#94a3b8", minWidth: 170,
-      }}>
-        {[0, 1, 2, 3].map((i) => {
-          const p = pairs[i];
-          return (
-            <div key={i} style={{ marginBottom: 4, display: "flex", gap: 6, alignItems: "center" }}>
-              <span style={{ color: COLORS[i], fontWeight: 700 }}>●{i + 1}</span>
-              {p ? (
-                <>
-                  <span style={{ color: "#e2e8f0" }}>({p.pixel[0]}, {p.pixel[1]})</span>
-                  {p.gps
-                    ? <span style={{ color: "#34d399" }}>GPS ✔</span>
-                    : <span style={{ color: "#fbbf24" }}>지도 대기…</span>
-                  }
-                </>
-              ) : (
-                <span style={{ color: "#475569" }}>미설정</span>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* 에러 배너 — 하단 */}
-      {error && (
-        <div style={{
-          position: "absolute", bottom: 0, left: 0, right: 0,
-          padding: "6px 14px", background: "#7f1d1d", color: "#fca5a5", fontSize: 12,
-        }}>
-          ⚠ {error}
-        </div>
-      )}
-    </div>
+    <canvas
+      ref={canvasRef}
+      onClick={handleCanvasClick}
+      style={{
+        position: "absolute", inset: 0,
+        width: "100%", height: "100%",
+        cursor: isPixelStep ? "crosshair" : "default",
+      }}
+    />
   );
 }
 
-function btn(bg) {
-  return {
-    background: bg, border: "none", borderRadius: 6,
-    padding: "4px 10px", color: "#f1f5f9", fontSize: 11,
-    cursor: "pointer", fontWeight: 600,
-  };
-}
+export const CALIB_COLORS = COLORS;

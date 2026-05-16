@@ -31,3 +31,28 @@
 - **현상**: `handleCctvClick`에서 `calMode` 읽었지만 `[]`으로 선언 → 보정 중에도 카메라 전환 가능
 - **수정**: `[calMode]` 추가
 - **교훈**: state를 읽는 callback은 반드시 해당 state를 dependency에 포함.
+
+## 2026-05-17
+
+### L7. useEffect cleanup에서 블록 스코프 변수에 접근 불가 → React 흰 화면
+- **현상**: `if (Hls.isSupported()) { const loadTimeout = setTimeout(...) }` 안에서 선언 후, cleanup 함수 `return () => { clearTimeout(loadTimeout) }` 실행 시 `ReferenceError` → React 오류 경계가 없으면 전체 앱 흰 화면
+- **수정**: `let loadTimeout = null`을 `if` 블록 밖 useEffect 스코프에 선언, 블록 안에서 할당
+- **교훈**: useEffect cleanup에서 접근할 변수는 반드시 cleanup과 같은 스코프(또는 상위)에 선언해야 함. `const`를 조건 블록 안에 쓰면 cleanup에서 참조 불가.
+
+### L8. HLS destroy 후 video 요소에 이전 프레임이 남음 → 뿌연 화면
+- **현상**: `hls.destroy()` 호출해도 `<video>` DOM 요소가 마지막으로 디코딩한 프레임을 유지함. 로딩 오버레이가 반투명(0.75)이면 이전 카메라 화면이 비쳐 보임
+- **수정**: `hls.destroy()` 직후 `video.src = ""; video.load()` → 프레임 클리어. 로딩 오버레이 `background: "rgba(0,0,0,1)"` (완전 불투명)
+- **교훈**: HLS 인스턴스와 video DOM 요소는 별개. destroy는 HLS 내부 상태만 정리하고 video 버퍼는 직접 비워야 함.
+
+### L9. speed 0→폭발 반복의 3가지 근본 원인
+- **현상**: 차량 추적 중 speed_kph가 0→100→0→90 식으로 매 프레임 날뜀
+- **원인 3가지**:
+  1. `_gc()` 즉각 삭제: 1프레임 미감지 시 `_prev[tid]` 삭제 → 재감지 시 이전 위치 없어서 속도 0 시작 → 다음 프레임 큰 dt로 폭발
+  2. bbox 노이즈가 `SPEED_JITTER_THRESHOLD_M` 경계를 넘나들며 0⟷raw_speed 반복
+  3. `SPEED_SMOOTHING_ALPHA=0.4` 너무 반응적 → 노이즈 측정값이 EMA에 40% 반영
+- **수정**: (1) 5프레임 grace period `_lost_frames` 도입 (2) `raw_kph > 180` 이상치 스킵 (3) alpha 0.4→0.15
+- **교훈**: 속도 노이즈는 단일 원인이 아님. 트래킹 연속성(GC) + 이상치 제거 + EMA smoothing 세 층을 모두 잡아야 함.
+
+### L10. Tkinter BooleanVar trace_add는 forward reference로 동작
+- **현상**: `_on_cuda_toggle`이 `fps_labels`를 참조하는데 `fps_labels`가 그 아래 줄에서 정의됨 → 실행 시 이미 채워진 후 호출되므로 문제 없음
+- **교훈**: Python 클로저는 호출 시점에 변수를 조회(late binding). trace callback은 UI 렌더링 완료 후에만 실행되므로 forward reference가 안전함. 단, 모듈 레벨에서 즉시 실행되는 코드라면 순서를 지켜야 함.

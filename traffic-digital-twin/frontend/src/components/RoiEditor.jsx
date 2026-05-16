@@ -53,7 +53,7 @@ export default function RoiEditor({ videoRef, cctvurl, initialRoi, onClose, onSa
   const [points, setPoints] = useState(initialRoi ?? []);
   const [closed, setClosed] = useState((initialRoi?.length ?? 0) >= 3);
   const [saving, setSaving] = useState(false);
-  const [hint, setHint]     = useState("클릭으로 꼭짓점 추가, 더블클릭으로 완성");
+  const [hint, setHint]     = useState("초록 영역 내 차량만 감지됩니다 · 클릭으로 꼭짓점 추가, 더블클릭으로 완성");
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -72,12 +72,12 @@ export default function RoiEditor({ videoRef, cctvurl, initialRoi, onClose, onSa
 
     const pxPts = points.map((n) => toCanvas(n, rect));
 
-    // 반투명 채우기
+    // 반투명 채우기 (초록 = 감지 포함 영역)
     ctx.beginPath();
     ctx.moveTo(pxPts[0][0], pxPts[0][1]);
     pxPts.slice(1).forEach(([x, y]) => ctx.lineTo(x, y));
     if (closed) ctx.closePath();
-    ctx.fillStyle = "rgba(56,189,248,0.18)";
+    ctx.fillStyle = "rgba(0,220,100,0.22)";
     ctx.fill();
 
     // 테두리
@@ -85,7 +85,7 @@ export default function RoiEditor({ videoRef, cctvurl, initialRoi, onClose, onSa
     ctx.moveTo(pxPts[0][0], pxPts[0][1]);
     pxPts.slice(1).forEach(([x, y]) => ctx.lineTo(x, y));
     if (closed) ctx.closePath();
-    ctx.strokeStyle = "#38bdf8";
+    ctx.strokeStyle = "#22c55e";
     ctx.lineWidth = 2;
     ctx.setLineDash(closed ? [] : [6, 3]);
     ctx.stroke();
@@ -95,9 +95,9 @@ export default function RoiEditor({ videoRef, cctvurl, initialRoi, onClose, onSa
     pxPts.forEach(([x, y], i) => {
       ctx.beginPath();
       ctx.arc(x, y, 6, 0, Math.PI * 2);
-      ctx.fillStyle = i === 0 ? "#22d3ee" : "#fff";
+      ctx.fillStyle = i === 0 ? "#22c55e" : "#fff";
       ctx.fill();
-      ctx.strokeStyle = "#38bdf8";
+      ctx.strokeStyle = "#22c55e";
       ctx.lineWidth = 1.5;
       ctx.stroke();
     });
@@ -195,7 +195,7 @@ export default function RoiEditor({ videoRef, cctvurl, initialRoi, onClose, onSa
             color: points.length >= 3 ? "#fff" : "#6b7280",
             cursor: points.length >= 3 ? "pointer" : "default",
           }}
-        >{saving ? "저장 중…" : "✓ 저장"}</button>
+        >{saving ? "저장 중…" : "✓ 저장 (포함 영역)"}</button>
         <button
           onClick={onClose}
           style={{ fontSize: 11, padding: "4px 10px", borderRadius: 6, border: "1px solid #374151", background: "#1e293b", color: "#94a3b8", cursor: "pointer" }}

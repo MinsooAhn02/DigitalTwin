@@ -1,4 +1,4 @@
-import { useReducer, useEffect, useState, useCallback, useMemo, memo } from "react";
+import { useReducer, useEffect, useState, useCallback, useMemo, memo, useRef } from "react";
 import { FlyToInterpolator } from "deck.gl";
 import { useWebSocket } from "./hooks/useWebSocket";
 import MapView from "./components/MapView";
@@ -44,10 +44,14 @@ export default function App() {
   // 보정 상태: null = 비활성, "awaiting" = 지도 클릭 대기
   const [calMode, setCalMode]             = useState(null);
   const [pendingGps, setPendingGps]       = useState(null);
+  const switchDebounceRef                 = useRef(null);
+  const switchTimeoutRef                  = useRef(null);
 
-  // camera_ready 신호 수신 시 switching 상태 해제
   useEffect(() => {
-    if (cameraReady > 0) setSwitching(false);
+    if (cameraReady > 0) {
+      setSwitching(false);
+      if (switchTimeoutRef.current) clearTimeout(switchTimeoutRef.current);
+    }
   }, [cameraReady]);
 
   const activeData  = selectedCctv ? frameData : null;
@@ -94,7 +98,7 @@ export default function App() {
   }, [calMode]);
 
   const handleCctvClick = useCallback((cctv) => {
-    if (calMode === "awaiting") return; // 보정 중 카메라 전환 방지
+    if (calMode === "awaiting") return;
     setSelectedCctv(cctv);
     setViewState({
       longitude: cctv.lon,
@@ -105,16 +109,28 @@ export default function App() {
       transitionDuration: 1200,
       transitionInterpolator: new FlyToInterpolator(),
     });
-    // 라이브 카메라 전환 — switching 해제는 WS camera_ready 신호로 처리
-    if (cctv.cctvurl) {
+    if (!cctv.cctvurl) return;
+    // 300ms 디바운스: 연속 클릭 시 마지막 것만 전송
+    if (switchDebounceRef.current) clearTimeout(switchDebounceRef.current);
+    if (switchTimeoutRef.current) clearTimeout(switchTimeoutRef.current);
+    switchDebounceRef.current = setTimeout(() => {
       setSwitching(true);
+      // 10초 안에 camera_ready 없으면 강제 해제
+      switchTimeoutRef.current = setTimeout(() => setSwitching(false), 10000);
       fetch("http://localhost:8000/switch-camera", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ cctvurl: cctv.cctvurl, lat: cctv.lat, lon: cctv.lon, name: cctv.name ?? "" }),
       }).catch(() => setSwitching(false));
-    }
+    }, 300);
   }, [calMode]);
+
+  const handleCalibSaved = useCallback((heading) => {
+    if (!selectedCctv) return;
+    const updated = { ...selectedCctv, heading };
+    setSelectedCctv(updated);
+    setCctvList((prev) => prev.map((c) => c.id === updated.id ? updated : c));
+  }, [selectedCctv]);
 
   // CCTV 로드 후 5초 안에 선택 안 했을 때만 안내 표시
   const noCameraSelected = guideVisible && cctvList.length > 0 && !selectedCctv;
@@ -265,6 +281,7 @@ export default function App() {
           pendingGps={pendingGps}
           onNeedGps={() => { setPendingGps(null); setCalMode("awaiting"); }}
           onCancelGps={() => { setCalMode(null); setPendingGps(null); }}
+          onCalibSaved={handleCalibSaved}
         />
       </div>
 

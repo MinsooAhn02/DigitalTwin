@@ -67,3 +67,8 @@
 - [x] CctvPlayer.jsx — 카메라 전환 시 뿌연 화면: video.src=""; video.load()로 이전 프레임 클리어 + 로딩 오버레이 완전 불투명 처리
 - [x] CctvPlayer.jsx — X 버튼 클릭 시 흰 화면(React 전체 크래시): loadTimeout을 if 블록 밖 outer scope에 선언 (ReferenceError 수정)
 - [x] model_setup.py — CUDA 체크박스 토글 시 FPS 수치 미변경: _fps_line()에 use_cuda 파라미터 추가 + trace_add("write") 실시간 라벨 갱신
+
+## Phase 7 — 문서화 ✅ 완료
+- [x] explanation.txt — 전면 재작성: 아키텍처·데이터흐름·모듈 상세·워크플로우·설계 결정 포함 (모르는 사람도 이해 가능한 수준)
+- [x] readme.md — 정리: 빠른 시작·명령어·기술스택·기능 목록으로 재구성
+- [x] tasks/lessons.md — 삭제 (내용을 explanation.txt 섹션 10으로 통합)

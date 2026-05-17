@@ -95,3 +95,19 @@
 - [x] 10-5. frontend/MapView.jsx + colorMap.js — Light/Satellite 모드 노드 고대비 색상 (DIRECTION_COLORS_CONTRAST), 텍스트 outline, stroked ScatterplotLayer
 - [x] 10-6. backend/config.py — SPEED_LIMIT_KPH 60→120, BOTTLENECK_DWELL_FRAMES 60→150 (env 변수로 외부 설정 가능)
 - [x] 10-7. 한/영 전환 (i18n) — src/i18n/index.jsx (LangProvider + useLang + t(key,params)), main.jsx 래핑, 전체 컴포넌트 적용; 사이드바 우상단 KO/EN 토글 버튼
+
+## Phase 11 — 속도 정확도·FPS·이름 개선 ✅ 완료
+- [x] 11-1. backend/transform.py — update_from_calibration(): _H_gps만 갱신하던 버그 수정
+         → 캘리브레이션 GPS 4점으로 로컬 ENU 미터 좌표 계산(_gps_pts_to_local_meters)
+         → _H_meter도 함께 재계산 (속도 계산 일관성 확보)
+- [x] 11-2. backend/config.py — SPEED_SMOOTHING_ALPHA 0.15 → 0.30
+         (EMA 응답 2배 빠름 — 잘못된 낮은 속도값 정정 속도 향상)
+- [x] 11-3. backend/detector.py — model.predict()에 half=True(CUDA FP16) 적용
+         → GPU 환경에서 추론 속도 약 30~50% 향상 (기존 FP32 추론 → FP16)
+- [x] 11-4. backend/detector.py — YOLO_DETECT_INTERVAL(=3) 실제 구현
+         (config에만 정의되고 dead code였음) → 3프레임 중 1회만 YOLO 추론,
+         나머지 2프레임은 tracker Kalman 예측만 실행 → YOLO 부하 2/3 절감
+- [x] 11-5. backend/main.py — _korname_to_en() 추가, /cctvs 응답 이름 한영 병기
+         패턴: 국도N호선→Nat'l Rt.N, 지방도→Prov.Rt., 고속도로→Expwy,
+               상행→NB↑, 하행→SB↓, 양방향→Both↕
+         형식: "원래이름 (영어약칭)"

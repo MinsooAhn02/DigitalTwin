@@ -165,14 +165,15 @@ export default function CalibrationMode({
       const rawBearing = Math.atan2(lon2 - lon1, lat2 - lat1) * 180 / Math.PI;
       const heading = (rawBearing + 360) % 360;
 
-      // 백엔드가 이미지 코너 GPS를 반환하면 그것을 사용, 아니면 보정 점 사용
-      let gpsRing;
-      if (result.corner_gps_pts?.length === 4) {
-        const c = result.corner_gps_pts; // [[lat,lon],...]
-        gpsRing = [...c.map(([lat, lon]) => [lon, lat]), [c[0][1], c[0][0]]];
-      } else {
-        gpsRing = [...pairs.map((p) => [p.gps[1], p.gps[0]]), [pairs[0].gps[1], pairs[0].gps[0]]];
-      }
+      // 사용자가 직접 찍은 GPS 4점 → 항상 유효한 폴리곤 (homography 코너 계산 사용 안 함)
+      // 중심 기준 각도 정렬로 convex 순서 보장
+      const lonLatPts = pairs.map((p) => [p.gps[1], p.gps[0]]); // [lon, lat]
+      const cx = lonLatPts.reduce((s, p) => s + p[0], 0) / lonLatPts.length;
+      const cy = lonLatPts.reduce((s, p) => s + p[1], 0) / lonLatPts.length;
+      const sorted = [...lonLatPts].sort((a, b) =>
+        Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx)
+      );
+      const gpsRing = [...sorted, sorted[0]];
       onSaved(heading, gpsRing);
     } catch (err) {
       setError(err.message ?? "저장 실패");

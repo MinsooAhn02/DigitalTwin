@@ -6,6 +6,7 @@ main.py — FastAPI WebSocket 브로드캐스트 서버
     GET  /cctvs           뷰포트 범위 CCTV 목록
     POST /switch-camera   라이브 카메라 전환 + boxmot 트래커 리셋
     GET  /cctv-refresh    HLS 토큰 만료 시 신선한 URL 반환 (브라우저용)
+    GET  /hls-proxy       ITS HLS 스트림 CORS 프록시 (m3u8 + ts 세그먼트)
     GET  /health          헬스체크
 
   파이프라인 구조:
@@ -20,6 +21,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 from contextlib import asynccontextmanager
 
@@ -28,8 +30,9 @@ import httpx
 import numpy as np
 import supervision as sv
 from cachetools import TTLCache
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from analytics import TrafficAnalytics, VehicleState
@@ -63,6 +66,10 @@ _detect_clients: int = 0   # ws/detect 활성 연결 수 — live_loop 브로드
 # 현재 선택된 카메라 정보 (lat, lon, name, cctvurl)
 _current_cam: dict | None = None
 _cam_version: int = 0
+
+# MJPEG 스트림용 최신 프레임 버퍼
+_latest_frame_jpeg: bytes | None = None       # 원본 프레임
+_latest_annotated_jpeg: bytes | None = None   # YOLO 어노테이션 프레임
 
 _box_ann   = sv.BoxAnnotator(thickness=2)
 _label_ann = sv.LabelAnnotator(text_scale=0.4, text_thickness=1, text_padding=3)
@@ -168,6 +175,34 @@ async def ws_endpoint(ws: WebSocket):
         logger.info("클라이언트 해제 (총 %d명)", len(_clients))
 
 
+# ── CCTV 이름 한영 병기 ───────────────────────────────────────────────
+def _korname_to_en(name: str) -> str:
+    """ITS CCTV 한국어 이름에서 영어 약칭을 파싱해 괄호로 병기한다."""
+    en_parts: list[str] = []
+
+    m = re.search(r'국도\s*(\d+)\s*호선?', name)
+    if m:
+        en_parts.append(f"Nat'l Rt.{m.group(1)}")
+
+    m = re.search(r'지방도\s*(\d+)\s*호?', name)
+    if m:
+        en_parts.append(f"Prov.Rt.{m.group(1)}")
+
+    if re.search(r'고속(도로|국도)', name):
+        en_parts.append("Expwy")
+
+    if '상행' in name:
+        en_parts.append("NB↑")
+    elif '하행' in name:
+        en_parts.append("SB↓")
+    elif '양방향' in name:
+        en_parts.append("Both↕")
+
+    if not en_parts:
+        return name
+    return f"{name} ({' '.join(en_parts)})"
+
+
 # ── CCTV 목록 ─────────────────────────────────────────────────────────
 @app.get("/cctvs")
 async def get_cctvs(
@@ -202,7 +237,7 @@ async def get_cctvs(
                     if not (lat and lon):
                         continue
                     url  = item.get("cctvurl", "")
-                    name = item.get("cctvname", "")
+                    name = _korname_to_en(item.get("cctvname", ""))
                     result.append({
                         "id":      url or name,
                         "name":    name,
@@ -285,6 +320,65 @@ async def cctv_refresh(
     except Exception as e:
         logger.warning("cctv-refresh 실패: %s", e)
     return {"cctvurl": ""}
+
+
+# ── HLS CORS 프록시 ──────────────────────────────────────────────────
+@app.get("/hls-proxy")
+async def hls_proxy(request: Request, url: str = Query(...)):
+    """
+    브라우저가 ITS CCTV HLS 스트림을 직접 요청하면 CORS 차단됨.
+    이 엔드포인트가 백엔드에서 ITS 서버로 요청을 중계하고
+    m3u8 파일 내 세그먼트 URL을 이 프록시를 통해 다시 쓴다.
+    """
+    import urllib.parse
+
+    proxy_base = str(request.base_url).rstrip("/") + "/hls-proxy?url="
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": url,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+    except Exception as exc:
+        logger.warning("hls-proxy 요청 실패: %s", exc)
+        return Response(status_code=502, content=str(exc))
+
+    content_type = resp.headers.get("content-type", "")
+
+    # m3u8 플레이리스트: 세그먼트 URL을 프록시 경유로 재작성
+    if "mpegurl" in content_type or url.split("?")[0].endswith(".m3u8"):
+        lines = []
+        for line in resp.text.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                # urljoin이 절대·루트·상대 경로를 모두 올바르게 처리
+                seg_url = urllib.parse.urljoin(url, stripped)
+                lines.append(proxy_base + urllib.parse.quote(seg_url, safe=""))
+            else:
+                lines.append(line)
+        rewritten = "\n".join(lines)
+        return Response(
+            content=rewritten,
+            media_type="application/vnd.apple.mpegurl",
+            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+        )
+
+    # ts 세그먼트: 그대로 스트리밍
+    async def stream_segment():
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            async with client.stream("GET", url, headers=headers) as r:
+                async for chunk in r.aiter_bytes(8192):
+                    yield chunk
+
+    return StreamingResponse(
+        stream_segment(),
+        media_type="video/MP2T",
+        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+    )
 
 
 # ── YOLO + BoT-SORT WebSocket ────────────────────────────────────────
@@ -479,7 +573,13 @@ async def save_calibration(body: CalibBody):
                 [[0, body.frame_height]],
             ])
             res = cv2.perspectiveTransform(corners_px, H)
-            corner_gps_pts = [[float(r[0, 0]), float(r[0, 1])] for r in res]
+            raw_pts = [[float(r[0, 0]), float(r[0, 1])] for r in res]
+
+            # convex hull 순서로 정렬 → 카메라 방향과 무관하게 폴리곤 자기교차 방지
+            # lon(x), lat(y) 순으로 hull 계산 후 lat,lon으로 되돌림
+            coords = np.float32([[p[1], p[0]] for p in raw_pts])  # lon, lat
+            hull   = cv2.convexHull(coords.reshape(-1, 1, 2))
+            corner_gps_pts = [[float(h[0][1]), float(h[0][0])] for h in hull]  # lat, lon
     except Exception as exc:
         logger.warning("corner_gps_pts 계산 실패: %s", exc)
 
@@ -529,6 +629,55 @@ async def delete_roi(camera_key: str):
     if det is not None:
         det.set_roi(None)
     return {"ok": True}
+
+
+# ── MJPEG 라이브 스트림 ───────────────────────────────────────────────
+@app.get("/video-stream")
+async def video_stream():
+    """
+    백엔드가 이미 OpenCV로 읽고 있는 프레임을 MJPEG multipart로 브라우저에 전달.
+    HLS CORS 문제를 우회하고, 토큰 만료와 무관하게 항상 최신 프레임을 전송한다.
+    """
+    async def generate():
+        boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        last_sent: bytes | None = None
+        while True:
+            jpeg = _latest_frame_jpeg
+            if jpeg is None or jpeg is last_sent:
+                await asyncio.sleep(0.04)
+                continue
+            last_sent = jpeg
+            yield boundary + jpeg + b"\r\n"
+            await asyncio.sleep(0.04)  # 최대 25 fps
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
+    )
+
+
+# ── MJPEG YOLO 어노테이션 스트림 ─────────────────────────────────────
+@app.get("/video-stream-yolo")
+async def video_stream_yolo():
+    """live_loop의 YOLO 탐지 결과(박스+레이블)를 MJPEG으로 스트리밍."""
+    async def generate():
+        boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        last_sent: bytes | None = None
+        while True:
+            jpeg = _latest_annotated_jpeg
+            if jpeg is None or jpeg is last_sent:
+                await asyncio.sleep(0.04)
+                continue
+            last_sent = jpeg
+            yield boundary + jpeg + b"\r\n"
+            await asyncio.sleep(0.04)
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
+    )
 
 
 # ── 헬스체크 ──────────────────────────────────────────────────────────
@@ -647,6 +796,12 @@ async def live_loop(detector, stream) -> None:
             await stream.reconnect()
             continue
 
+        # MJPEG 스트림용 버퍼 업데이트 (모든 프레임, 탐지 여부 무관)
+        global _latest_frame_jpeg
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if ok:
+            _latest_frame_jpeg = buf.tobytes()
+
         if skip_budget > 0:
             skip_budget -= 1
             continue
@@ -671,14 +826,30 @@ async def live_loop(detector, stream) -> None:
 
 
 def _live_process(frame_id, frame, detector, tracker) -> dict | None:
-    global _frame_count
+    global _frame_count, _latest_annotated_jpeg
 
     h, w = frame.shape[:2]
     timestamp_ms = time.time() * 1000
 
-    # BoT-SORT 탐지+추적 (매 프레임)
     tracked = detector.track(frame)
     tracked, in_cnt, out_cnt = tracker.update(tracked, (w, h))
+
+    # YOLO annotated 프레임 생성 → /video-stream-yolo 버퍼
+    try:
+        labels = [
+            f"#{int(tracked.tracker_id[i])} {VEHICLE_CLASSES[int(tracked.class_id[i])]} "
+            f"{float(tracked.confidence[i]):.0%}"
+            for i in range(len(tracked))
+        ]
+        ann = _box_ann.annotate(frame.copy(), tracked)
+        ann = _label_ann.annotate(ann, tracked, labels)
+        cv2.putText(ann, f"vehicles: {len(tracked)}", (8, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 80), 2)
+        ok, buf = cv2.imencode(".jpg", ann, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if ok:
+            _latest_annotated_jpeg = buf.tobytes()
+    except Exception:
+        pass
 
     vehicles = _build_vehicles(tracked)
     _frame_count += 1

@@ -35,6 +35,7 @@ from config import (
     TRACKER_TIER,
     YOLO_AUTO_EXPORT_ENGINE,
     YOLO_CONF,
+    YOLO_DETECT_INTERVAL,
     YOLO_IMGSZ,
     YOLO_IOU,
     YOLO_MODEL,
@@ -282,8 +283,10 @@ class VehicleDetector:
         if selection.backend not in ("tensorrt",):
             self.model.to(self._device)
 
-        # 모델 락 (live_loop + ws/detect 공유)
+        self._half = self._device == "cuda" and selection.backend not in ("tensorrt",)
         self._lock = threading.Lock()
+        self._track_frame_count: int = 0
+        self._last_dets_np: np.ndarray = np.empty((0, 6))
 
         # ROI polygon (정규화 좌표 0~1). None이면 전체 프레임
         self._roi: list[list[float]] | None = None
@@ -327,30 +330,34 @@ class VehicleDetector:
             results = self.model.predict(
                 frame,
                 imgsz=YOLO_IMGSZ, conf=YOLO_CONF, iou=YOLO_IOU,
-                classes=self.CLASS_IDS, device=self._inference_device, verbose=False,
+                classes=self.CLASS_IDS, device=self._inference_device,
+                half=self._half, verbose=False,
             )[0]
         return sv.Detections.from_ultralytics(results)
 
     def track(self, frame: np.ndarray) -> sv.Detections:
         """
         YOLO predict → ROI 필터 → boxmot tracker update → sv.Detections 반환.
+        YOLO_DETECT_INTERVAL 프레임마다 한 번만 추론, 나머지는 직전 결과 재사용.
         """
-        # 1. YOLO 탐지 (tracking state 없음)
-        with self._lock:
-            results = self.model.predict(
-                frame,
-                imgsz=YOLO_IMGSZ, conf=YOLO_CONF, iou=YOLO_IOU,
-                classes=self.CLASS_IDS, device=self._inference_device, verbose=False,
-            )[0]
-        dets = sv.Detections.from_ultralytics(results)
+        self._track_frame_count += 1
 
-        # 2. ROI 필터 (tracking 전에 적용)
-        dets = self._apply_roi(dets, frame)
+        # 1. YOLO_DETECT_INTERVAL 마다 YOLO 추론, 나머지 프레임은 직전 박스 재사용
+        if self._track_frame_count % YOLO_DETECT_INTERVAL == 1:
+            with self._lock:
+                results = self.model.predict(
+                    frame,
+                    imgsz=YOLO_IMGSZ, conf=YOLO_CONF, iou=YOLO_IOU,
+                    classes=self.CLASS_IDS, device=self._inference_device,
+                    half=self._half, verbose=False,
+                )[0]
+            dets = sv.Detections.from_ultralytics(results)
+            dets = self._apply_roi(dets, frame)
+            self._last_dets_np = _sv_to_boxmot(dets)
 
-        # 3. boxmot tracker update
-        dets_np = _sv_to_boxmot(dets)
+        # 2. boxmot tracker update (항상 실행 — Kalman 예측 유지)
         try:
-            tracks = self._tracker.update(dets_np, frame)
+            tracks = self._tracker.update(self._last_dets_np, frame)
         except Exception as exc:
             logger.warning("Tracker update 실패: %s", exc)
             return sv.Detections.empty()

@@ -94,6 +94,19 @@ class PerspectiveTransformer:
         """여러 픽셀 좌표를 한 번에 변환 (OpenCV 벡터 연산 활용)"""
         return self._batch_transform(self._H_gps, points)
 
+    @staticmethod
+    def _gps_pts_to_local_meters(gps_pts: np.ndarray) -> np.ndarray:
+        """GPS 4점을 첫 번째 점 기준 로컬 ENU 미터 좌표로 변환."""
+        R = 6_371_000.0
+        lat0, lon0 = float(gps_pts[0, 0]), float(gps_pts[0, 1])
+        lat0_r = math.radians(lat0)
+        pts = []
+        for lat, lon in gps_pts:
+            x = R * math.radians(lon - lon0) * math.cos(lat0_r)
+            y = R * math.radians(lat - lat0)
+            pts.append([x, y])
+        return np.float32(pts)
+
     def update_from_calibration(
         self,
         pixel_pts: list[list[float]],
@@ -108,14 +121,20 @@ class PerspectiveTransformer:
             raise ValueError("정확히 4쌍의 대응점이 필요합니다")
         src = np.float32(pixel_pts)
         dst_gps = np.float32(gps_pts)
-        H, mask = cv2.findHomography(src, dst_gps)
+        H, _ = cv2.findHomography(src, dst_gps)
         if H is None:
             raise RuntimeError("Homography 계산 실패 — 점들이 동일선상에 있을 수 있습니다")
         self._H_gps = H
-        gps_arr = dst_gps
-        self._gps_center_lat = float(np.mean(gps_arr[:, 0]))
-        self._gps_center_lon = float(np.mean(gps_arr[:, 1]))
-        self._bearing_rad = 0.0  # 캘리브레이션 후 bearing 보정 불필요
+        self._gps_center_lat = float(np.mean(dst_gps[:, 0]))
+        self._gps_center_lon = float(np.mean(dst_gps[:, 1]))
+        self._bearing_rad = 0.0
+
+        # 캘리브레이션 GPS점으로 로컬 미터 좌표계 계산 → H_meter 재계산
+        dst_meter = self._gps_pts_to_local_meters(dst_gps)
+        H_m, _ = cv2.findHomography(src, dst_meter)
+        if H_m is not None:
+            self._H_meter = H_m
+
         logger.info(
             "캘리브레이션 적용 완료: pixel=%s gps=%s",
             pixel_pts, gps_pts,

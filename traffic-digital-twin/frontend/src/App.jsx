@@ -1,11 +1,10 @@
-import { useReducer, useEffect, useState, useCallback, useMemo, memo, useRef } from "react";
+import { useReducer, useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { FlyToInterpolator } from "deck.gl";
 import { useWebSocket } from "./hooks/useWebSocket";
 import MapView from "./components/MapView";
 import { updateTrailMap, useTrailLayer } from "./components/TrailLayer";
-import SpeedGauge    from "./components/SpeedGauge";
-import LOSBadge      from "./components/LOSBadge";
-import ClassPieChart from "./components/ClassPieChart";
+import ClassBarChart  from "./components/ClassBarChart";
+import VehicleTable   from "./components/VehicleTable";
 import CounterPanel  from "./components/CounterPanel";
 import CctvPlayer    from "./components/CctvPlayer";
 import { useLang }   from "./i18n/index.jsx";
@@ -56,6 +55,21 @@ export default function App() {
     }
   }, [cameraReady]);
 
+  // calibTabActive 켜질 때 zoom > 16이면 위성사진 없음 → 16으로 축소 + pitch 0
+  useEffect(() => {
+    if (!calibTabActive) return;
+    setViewState((prev) => {
+      if (prev.zoom <= 16) return prev;
+      return {
+        ...prev,
+        zoom: 16,
+        pitch: 0,
+        transitionDuration: 800,
+        transitionInterpolator: new FlyToInterpolator(),
+      };
+    });
+  }, [calibTabActive]);
+
   useEffect(() => {
     if (!cameraReadyInfo?.camera_key || !selectedCctv) return;
     fetch(`http://localhost:8000/calibration/${cameraReadyInfo.camera_key}`)
@@ -73,8 +87,6 @@ export default function App() {
 
   const activeData  = selectedCctv ? frameData : null;
   const vehicles    = activeData?.vehicles      ?? [];
-  const avgSpeed    = activeData?.avg_speed_kph ?? 0;
-  const losGrade    = activeData?.los_grade     ?? "A";
   const inCount     = activeData?.in_count      ?? 0;
   const outCount    = activeData?.out_count     ?? 0;
   const vehicleCnt  = activeData?.vehicle_count ?? 0;
@@ -143,9 +155,6 @@ export default function App() {
   }, [selectedCctv]);
 
   const noCameraSelected = guideVisible && cctvList.length > 0 && !selectedCctv;
-  const speedingVehicles = useMemo(() => vehicles.filter((v) => v.is_speeding), [vehicles]);
-  const bottlenecks      = useMemo(() => vehicles.filter((v) => v.is_bottleneck), [vehicles]);
-
   return (
     <div style={{ display: "flex", height: "100vh", background: "#111827", color: "#f9fafb", fontFamily: "system-ui, sans-serif", overflow: "hidden" }}>
 
@@ -305,18 +314,13 @@ export default function App() {
 
         <CounterPanel inCount={inCount} outCount={outCount} vehicleCount={vehicleCnt} />
 
-        <Card>
-          <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center" }}>
-            <SpeedGauge avgSpeed={avgSpeed} />
-            <LOSBadge grade={losGrade} />
-          </div>
-        </Card>
-
         <Card label={t("app.classDist")}>
-          <ClassPieChart classCounts={classCounts} />
+          <ClassBarChart classCounts={classCounts} />
         </Card>
 
-        <AlertPanel speeding={speedingVehicles} bottlenecks={bottlenecks} t={t} />
+        <Card label={t("app.vehicleList")}>
+          <VehicleTable vehicles={vehicles} />
+        </Card>
       </aside>
     </div>
   );
@@ -361,42 +365,3 @@ function Legend({ t, cctvCount }) {
   );
 }
 
-const AlertPanel = memo(function AlertPanel({ speeding, bottlenecks, t }) {
-  const total = speeding.length + bottlenecks.length;
-  if (total === 0) return null;
-  return (
-    <Card label={t("app.alerts", { n: total })}>
-      <ul style={{ margin: 0, padding: 0, listStyle: "none", maxHeight: 160, overflowY: "auto", contain: "layout" }}>
-        {speeding.map((v) => (
-          <AlertItem key={`sp-${v.track_id}`} id={v.track_id} cls={v.class_name}
-            tag={t("app.speeding")} tagColor="#f87171" extra={`${v.speed_kph?.toFixed(0)} km/h`} />
-        ))}
-        {bottlenecks.map((v) => (
-          <AlertItem key={`bn-${v.track_id}`} id={v.track_id} cls={v.class_name}
-            tag={t("app.bottleneck")} tagColor="#a78bfa" extra={`${v.dwell_frames}f`} />
-        ))}
-      </ul>
-    </Card>
-  );
-}, (prev, next) => {
-  if (prev.speeding.length !== next.speeding.length) return false;
-  if (prev.bottlenecks.length !== next.bottlenecks.length) return false;
-  if (prev.t !== next.t) return false;
-  const prevIds = new Set(prev.speeding.map((v) => v.track_id));
-  if (!next.speeding.every((v) => prevIds.has(v.track_id))) return false;
-  const prevBnIds = new Set(prev.bottlenecks.map((v) => v.track_id));
-  if (!next.bottlenecks.every((v) => prevBnIds.has(v.track_id))) return false;
-  return true;
-});
-
-function AlertItem({ id, cls, tag, tagColor, extra }) {
-  return (
-    <li style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, padding: "3px 0", borderBottom: "1px solid #374151" }}>
-      <span style={{ color: "#d1d5db" }}>#{id} {cls}</span>
-      <span>
-        <span style={{ color: tagColor, fontWeight: 600 }}>{tag}</span>
-        <span style={{ color: "#6b7280", marginLeft: 6 }}>{extra}</span>
-      </span>
-    </li>
-  );
-}

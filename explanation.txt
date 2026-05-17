@@ -165,11 +165,12 @@ DigitalTwin/
     YOLO_CONF / YOLO_IOU    탐지 임계값 (0.25 / 0.45)
     VEHICLE_CLASSES         탐지 대상 클래스 {2:car, 3:motorcycle, 5:bus, 7:truck}
     TRACKER_TIER            트래커 선택 (auto/cpu/low/medium/high)
-    SPEED_LIMIT_KPH         과속 기준 (기본 60)
-    SPEED_SMOOTHING_ALPHA   EMA 평활화 계수 (0.15 — 낮을수록 부드러움)
+    SPEED_LIMIT_KPH         과속 기준 (기본 120)
+    SPEED_SMOOTHING_ALPHA   EMA 평활화 계수 (0.30 — 높을수록 현재 프레임 반응 빠름)
     MAX_REASONABLE_KPH      이상치 제거 상한 (180)
     GC_GRACE_FRAMES         트랙 GC 유예 프레임 수 (5)
-    BOTTLENECK_DWELL_FRAMES 병목 판정 정지 프레임 (60 = 2초)
+    YOLO_DETECT_INTERVAL    YOLO 추론 주기 (3 — 3프레임 중 1회만 추론)
+    BOTTLENECK_DWELL_FRAMES 병목 판정 정지 프레임 (150 = 5초)
     PARKED_FRAMES_THRESHOLD 주차 판정 정지 프레임 (300 = 10초)
     PARKED_POSITION_RADIUS_PX  주차 위치 메모리 반경 (30px)
 
@@ -179,10 +180,12 @@ DigitalTwin/
     - YOLO 모델 로딩: .pt (PyTorch) 또는 .engine (TensorRT FP16) 자동 선택
     - detect(frame): 단순 YOLO 추론 (tracker_id 없음)
     - track(frame): BoxMOT 트래커 연동 추론
-        1. YOLO predict → 바운딩 박스
-        2. ROI 마스킹 (roi_manager에서 불러온 폴리곤 적용)
-        3. tracker.update(bboxes) → track_id 할당/유지
-        4. supervision.Detections 객체 반환
+        1. YOLO_DETECT_INTERVAL(=3)마다 YOLO predict 실행,
+           나머지 프레임은 직전 탐지 결과 재사용 (YOLO 부하 2/3 절감)
+        2. CUDA 환경에서 half=True(FP16) 추론 (약 30~50% 속도 향상)
+        3. ROI 마스킹 (roi_manager에서 불러온 폴리곤 적용)
+        4. tracker.update(bboxes, frame) → track_id 할당/유지 (Kalman 예측 포함)
+        5. supervision.Detections 객체 반환
     - set_roi(polygon): ROI 폴리곤 업데이트
     - reset_tracker(): 카메라 전환 시 트래커 내부 상태 초기화
     - threading.Lock: live_loop + ws/detect 동시 접근 직렬화
@@ -236,6 +239,11 @@ DigitalTwin/
   pixel_to_gps(cx, cy)   → (lat, lon)
   pixel_to_meter(cx, cy) → (x_m, y_m)  (속도 계산 보조)
   update_from_calibration(data): 보정 데이터 적용 + 행렬 재계산
+    - _H_gps: 픽셀→GPS 호모그래피 재계산
+    - _H_meter: GPS 4점에서 로컬 ENU 미터 좌표 계산(_gps_pts_to_local_meters)
+                → 픽셀→미터 호모그래피도 함께 재계산 (두 행렬 일관성 보장)
+    * 보정 전: _H_meter는 config.py 기본 격자값 사용 → 속도 오차 큼
+    * 보정 후: 실측 GPS 기반 미터 좌표로 _H_meter 갱신 → 거리 계산 정확도 향상
 
 
 [ roi_manager.py ]
@@ -266,6 +274,8 @@ DigitalTwin/
 
   REST 엔드포인트:
     GET  /cctvs           ITS API에서 뷰포트 내 CCTV 목록 조회 (TTL 5분 캐시)
+                            cctvname 필드에 _korname_to_en() 적용:
+                            "국도 3호선 상행" → "국도 3호선 상행 (Nat'l Rt.3 NB↑)"
     POST /switch-camera   카메라 전환:
                             → _camera_queue push (live_loop 스트림 전환)
                             → detector.reset_tracker()
@@ -475,7 +485,8 @@ DigitalTwin/
   4. raw_kph = dist_m / dt × 3.6
   5. dist_m < 0.20 → speed=0 즉시 (지터 제거)
   6. raw_kph > 180 → 이 프레임 스킵, 이전 EMA 유지 (이상치 제거)
-  7. EMA: speed = 0.15 × raw + 0.85 × prev_ema (평활화)
+  7. EMA: speed = 0.30 × raw + 0.70 × prev_ema (평활화)
+     (α=0.30: 현재 프레임 반응이 빠름 — 먼 거리 과소 속도값이 빠르게 보정됨)
 
   GC grace period: track_id가 5프레임 이상 미감지 시에만 삭제
   → 1~2프레임 놓쳐도 이전 위치/속도 유지, 재감지 시 속도 연속성 보장
@@ -511,6 +522,15 @@ DigitalTwin/
     GPU+PyTorch(yolov8x) ~33ms/frame
     TensorRT FP16(yolov8x) ~9.6ms/frame
     정확도 변화 없음 (FP16 오차 < 1%)
+
+  YOLO_DETECT_INTERVAL=3 효과 (live_loop 기준)
+    매 프레임 YOLO          ~9.6ms × 30fps = 288ms/초 GPU 점유
+    3프레임 중 1회 YOLO     ~9.6ms × 10fps = 96ms/초 GPU 점유
+    나머지 2프레임은 tracker Kalman 예측만 (~0.5ms) → GPU 여유 증가
+
+  model.predict(half=True) 효과 (CUDA 환경)
+    FP32 → FP16 전환: ~30~50% 추론 속도 향상 (.pt 모델 한정)
+    TensorRT .engine은 이미 FP16이므로 변화 없음
 
   inFlight 제어 (maxInFlight=2)
     동시 전송 2프레임 제한 → 처리량 최대화 + 순서 보장
@@ -551,6 +571,18 @@ DigitalTwin/
     렌즈 왜곡을 모두 암묵적으로 인코딩함.
     정확한 속도 측정을 위해서는 실제 도로 위 측정 가능한 4개 지점으로
     보정하는 것이 필수. 기본값은 근사치라 오차가 큼.
+
+  [거리별 속도 오차 문제]
+    4점 호모그래피는 캘리브레이션 사각형 내부에서만 정확.
+    프레임 상단(카메라에서 먼 차량)은 외삽(extrapolation) 구간으로
+    GPS 좌표 오차가 누적되어 속도가 실제보다 낮게 측정되는 경향이 있음.
+
+    완화 전략:
+      1. update_from_calibration()이 _H_gps와 _H_meter를 함께 갱신
+         (두 행렬 일관성 확보, GPS 기반 haversine 거리 정확도 향상)
+      2. SPEED_SMOOTHING_ALPHA=0.30 — 잘못된 낮은 속도값이 빨리 보정됨
+      3. 캘리브레이션 포인트를 가까운 2점 + 먼 2점으로 배치하면
+         호모그래피가 depth range를 더 잘 커버하여 오차 감소
 
   [Tkinter forward reference]
     model_setup.py의 _on_cuda_toggle은 fps_labels를 참조하는데,

@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import RoiEditor from "./RoiEditor";
 import CalibrationMode, { CALIB_COLORS } from "./CalibrationMode";
 import { useLang } from "../i18n/index.jsx";
 
 const PANEL_W = 720;
+const MJPEG_URL      = "http://localhost:8000/video-stream";
+const MJPEG_YOLO_URL = "http://localhost:8000/video-stream-yolo";
+const HLS_PROXY = (url) => `http://localhost:8000/hls-proxy?url=${encodeURIComponent(url)}`;
 const DEFAULT_RUNTIME_CONFIG = {
   captureIntervalMs: 33,
   captureWidth: 640,
@@ -104,19 +107,13 @@ const btnStyle = {
 export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCancelGps, onCalibSaved, onCalibTabChange }) {
   const { t } = useLang();
   const videoRef  = useRef(null);
-  const canvasRef = useRef(null);
   const hlsRef    = useRef(null);
   const panelRef  = useRef(null);
-  const wsRef       = useRef(null);
-  const inFlightRef = useRef(0);
-  const intervalRef = useRef(null);
 
   const [hlsError, setHlsError]       = useState(null);
   const [hlsLoading, setHlsLoading]   = useState(true);
   const [tab, setTab]                 = useState("live");
   const [pos, setPos]                 = useState(null);
-  const [annotatedUrl, setAnnotatedUrl] = useState(null);
-  const [yoloStatus, setYoloStatus]   = useState("idle");
   const [runtimeConfig, setRuntimeConfig] = useState(DEFAULT_RUNTIME_CONFIG);
   const [roiEditing, setRoiEditing]       = useState(false);
   const [currentRoi, setCurrentRoi]       = useState(null);
@@ -179,7 +176,7 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
           )
             .then((r) => r.json())
             .then(({ cctvurl }) => {
-              if (cctvurl) hls.loadSource(cctvurl);
+              if (cctvurl) hls.loadSource(HLS_PROXY(cctvurl));
               hls.startLoad(-1);
               video.play().catch(() => {});
             })
@@ -214,7 +211,7 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
       video.addEventListener("stalled", handleStall);
       video.addEventListener("waiting", handleStall);
 
-      hls.loadSource(cctv.cctvurl);
+      hls.loadSource(HLS_PROXY(cctv.cctvurl));
       hls.attachMedia(video);
       video.play().catch(() => {});
 
@@ -226,7 +223,7 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
         if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
       };
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = cctv.cctvurl;
+      video.src = HLS_PROXY(cctv.cctvurl);
       video.addEventListener("loadedmetadata", () => setHlsLoading(false), { once: true });
       video.play().catch(() => {});
     } else {
@@ -239,61 +236,6 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
     };
   }, [cctv?.cctvurl]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── YOLO WebSocket ───────────────────────────────────────────────
-  useEffect(() => {
-    if (tab !== "yolo" || !cctv) return;
-    setYoloStatus("loading");
-    const ws = new WebSocket("ws://localhost:8000/ws/detect");
-    ws.binaryType = "arraybuffer";
-    wsRef.current = ws;
-    ws.onopen  = () => setYoloStatus("running");
-    ws.onerror = () => { setYoloStatus("error"); };
-    ws.onclose = () => { inFlightRef.current = 0; };
-    ws.onmessage = (e) => {
-      inFlightRef.current = Math.max(0, inFlightRef.current - 1);
-      const blob = new Blob([e.data], { type: "image/jpeg" });
-      const url  = URL.createObjectURL(blob);
-      setAnnotatedUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
-    };
-    return () => { ws.close(); wsRef.current = null; inFlightRef.current = 0; };
-  }, [tab, cctv]);
-
-  // ── 프레임 캡처 & 전송 ───────────────────────────────────────────
-  const captureAndSend = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ws = wsRef.current;
-    if (
-      inFlightRef.current >= runtimeConfig.maxInFlight ||
-      !video || !canvas || !ws ||
-      ws.readyState !== WebSocket.OPEN ||
-      video.readyState < 2 || video.paused
-    ) return;
-    inFlightRef.current++;
-    const srcW = video.videoWidth  || 640;
-    const srcH = video.videoHeight || 360;
-    const scale = Math.min(1, runtimeConfig.captureWidth / srcW);
-    const w = Math.round(srcW * scale);
-    const h = Math.round(srcH * scale);
-    canvas.width = w; canvas.height = h;
-    canvas.getContext("2d").drawImage(video, 0, 0, w, h);
-    canvas.toBlob((blob) => {
-      if (!blob) { inFlightRef.current = Math.max(0, inFlightRef.current - 1); return; }
-      blob.arrayBuffer().then((buf) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(buf);
-        else inFlightRef.current = Math.max(0, inFlightRef.current - 1);
-      });
-    }, "image/jpeg", runtimeConfig.captureQuality);
-  }, [runtimeConfig]);
-
-  useEffect(() => {
-    if (tab !== "yolo") {
-      if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
-      return;
-    }
-    intervalRef.current = setInterval(captureAndSend, runtimeConfig.captureIntervalMs);
-    return () => { clearInterval(intervalRef.current); intervalRef.current = null; };
-  }, [tab, captureAndSend, runtimeConfig.captureIntervalMs]);
 
   // ── 드래그 ────────────────────────────────────────────────────────
   const handleMouseDown = (e) => {
@@ -309,13 +251,6 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
   };
 
   if (!cctv) return null;
-
-  const yoloStatusLabel = {
-    idle:    { text: t("cctv.yolo.idle"),    color: "#64748b" },
-    loading: { text: t("cctv.yolo.loading"), color: "#fbbf24" },
-    running: { text: t("cctv.yolo.running"), color: "#22d3ee" },
-    error:   { text: t("cctv.yolo.error"),   color: "#f87171" },
-  }[yoloStatus];
 
   const panelStyle = {
     position: "absolute", width: PANEL_W, zIndex: 20,
@@ -363,11 +298,7 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
             color: tab === key ? "#f1f5f9" : "#64748b", fontSize: 11, fontWeight: 600, cursor: "pointer",
           }}>
             {t(labelKey)}
-            {key === "yolo" && tab === "yolo" && (
-              <span style={{ marginLeft: 6, fontSize: 10, color: yoloStatusLabel.color }}>
-                ● {yoloStatusLabel.text}
-              </span>
-            )}
+
             {key === "roi" && currentRoi && (
               <span style={{ marginLeft: 6, fontSize: 10, color: "#22d3ee" }}>{t("cctv.roi.set")}</span>
             )}
@@ -384,27 +315,44 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
       {/* 영상 영역 (16:9) */}
       <div style={{ position: "relative", aspectRatio: "16/9", background: "#000" }}>
 
+        {/* live 탭: MJPEG 스트림 (HLS CORS 우회) */}
+        {tab === "live" && (
+          <img
+            src={MJPEG_URL}
+            alt="live"
+            style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#000" }}
+          />
+        )}
+
+        {/* cal / roi 탭: MJPEG 배경 + 투명 video (오버레이 dimension 기준용) */}
+        {(tab === "cal" || tab === "roi") && (
+          <img
+            src={MJPEG_URL}
+            alt="cal-bg"
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }}
+          />
+        )}
         <video ref={videoRef} muted playsInline style={{
+          position: "absolute", inset: 0,
           width: "100%", height: "100%", objectFit: "contain",
-          display: (tab === "live" || tab === "cal" || tab === "roi") ? "block" : "none",
+          opacity: 0, pointerEvents: "none",
         }} />
 
         {tab === "yolo" && (
-          annotatedUrl
-            ? <img src={annotatedUrl} alt="YOLO" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
-            : <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#475569", fontSize: 13 }}>
-                <div style={{ fontSize: 32, marginBottom: 10 }}>🤖</div>
-                {yoloStatus === "loading" ? t("cctv.yolo.msg.loading") : t("cctv.yolo.msg.wait")}
-              </div>
+          <img
+            src={MJPEG_YOLO_URL}
+            alt="YOLO"
+            style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#000" }}
+          />
         )}
 
-        {tab === "live" && hlsLoading && !hlsError && (
+        {(tab === "cal" || tab === "roi") && hlsLoading && !hlsError && (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,1)", color: "#94a3b8", fontSize: 13 }}>
             <div style={{ fontSize: 28, marginBottom: 8 }}>⏳</div>{t("cctv.stream.loading")}
           </div>
         )}
 
-        {hlsError && (
+        {hlsError && (tab === "cal" || tab === "roi") && (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.88)", color: "#f87171", fontSize: 12, padding: 16, textAlign: "center" }}>
             <div style={{ fontSize: 24, marginBottom: 8 }}>⚠️</div>{hlsError}
           </div>
@@ -445,7 +393,6 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
       {/* ROI 컨트롤 바 — 영상 아래, 비디오 div 밖 */}
       {roiEditing && <RoiBar roiState={roiState} t={t} />}
 
-      <canvas ref={canvasRef} style={{ display: "none" }} />
     </div>
   );
 }

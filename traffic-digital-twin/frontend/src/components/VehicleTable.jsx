@@ -16,7 +16,7 @@ export default function VehicleTable({ vehicles = [] }) {
 
   return (
     <div>
-      <div style={{ maxHeight: 180, overflowY: "auto" }}>
+      <div>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
           <thead>
             <tr style={{ color: "#6b7280", borderBottom: "1px solid #374151" }}>

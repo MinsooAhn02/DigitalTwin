@@ -118,8 +118,10 @@ def _build_vehicles(tracked: "sv.Detections") -> "list[VehicleState]":
         track_id = _safe_tid(tracked.tracker_id, i, i)
         cx = (xyxy[0] + xyxy[2]) / 2
         cy = (xyxy[1] + xyxy[3]) / 2
-        lat, lon = _transformer.pixel_to_gps(cx, cy)
-        x_m, y_m = _transformer.pixel_to_meter(cx, cy)
+        # 호모그래피는 도로 평면 기준 → ground contact point(bbox 바닥 중심) 사용
+        gx, gy = cx, xyxy[3]
+        lat, lon = _transformer.pixel_to_gps(gx, gy)
+        x_m, y_m = _transformer.pixel_to_meter(gx, gy)
         vehicles.append(VehicleState(
             track_id=track_id,
             class_name=VEHICLE_CLASSES.get(class_id, "unknown"),

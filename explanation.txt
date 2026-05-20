@@ -166,9 +166,10 @@ DigitalTwin/
     VEHICLE_CLASSES         탐지 대상 클래스 {2:car, 3:motorcycle, 5:bus, 7:truck}
     TRACKER_TIER            트래커 선택 (auto/cpu/low/medium/high)
     SPEED_LIMIT_KPH         과속 기준 (기본 120)
-    SPEED_SMOOTHING_ALPHA   EMA 평활화 계수 (0.30 — 높을수록 현재 프레임 반응 빠름)
-    MAX_REASONABLE_KPH      이상치 제거 상한 (180)
-    GC_GRACE_FRAMES         트랙 GC 유예 프레임 수 (5)
+    SPEED_SMOOTHING_ALPHA   EMA 평활화 계수 (0.15 — 낮을수록 스파이크 잔류 감소)
+    MAX_REASONABLE_KPH      이상치 제거 상한 (120 — 도로 제한속도 기준)
+    GC_GRACE_FRAMES         트랙 GC 유예 프레임 수 (30 — 약 1초간 ID 보존)
+    SPEED_WINDOW_FRAMES     슬라이딩 윈도우 속도 계산 이력 크기 (8프레임)
     YOLO_DETECT_INTERVAL    YOLO 추론 주기 (3 — 3프레임 중 1회만 추론)
     BOTTLENECK_DWELL_FRAMES 병목 판정 정지 프레임 (150 = 5초)
     PARKED_FRAMES_THRESHOLD 주차 판정 정지 프레임 (300 = 10초)
@@ -210,14 +211,25 @@ DigitalTwin/
   출력: FrameAnalytics (vehicles, vehicle_count, avg_speed_kph, los_grade, ...)
 
   처리 순서:
-    1. _gc(active): 미감지 트랙 정리 (5프레임 grace period 후 삭제)
+    1. _gc(active): 미감지 트랙 정리 (30프레임 grace period 후 삭제)
     2. _is_near_parked(): 등록된 주차 위치 30px 이내 → 즉시 is_parked
-    3. _speed(): Haversine 거리 기반 속도 계산
-       - dist < 0.20m → speed=0 (지터 제거)
-       - raw_kph > 180 → 이상치 스킵 (EMA 유지)
+    3. _speed(): 3단계 안정화 속도 계산
+       - 단계A (bbox 센터 EMA): 픽셀 center_px를 EMA(α=0.15)로 스무딩
+         → YOLO bbox 지터(10~20px 튐)를 흡수
+       - 단계B (슬라이딩 윈도우): 최근 8프레임 (x_m, y_m, ts) 이력 유지
+         가장 오래된 위치~현재 위치 총 이동거리 / 총 시간 → raw_kph
+         단발 spike를 희석, 1프레임 노이즈 증폭 방지
+       - dist < 0.5m → speed=0 (지터 제거)
+       - raw_kph > 120 → 이상치 스킵 (EMA 유지)
        - EMA(α=0.15) 평활화 → speed_kph 확정
     4. _dwell_update(): 정지 프레임 누적 → 병목/주차 판정
     5. 주차 차량 제외 후 통계 집계 (avg_speed, LOS, class_counts)
+
+  * 좌표 변환 기준점: bbox 기하학적 중심(center_px)이 아닌 바닥 중심
+    (bottom center = cx, xyxy[3])을 호모그래피에 입력.
+    호모그래피는 도로 평면 기준으로 캘리브레이션되므로
+    차량이 실제로 닿는 지면 접촉점을 사용해야 거리·속도 오차가 최소화됨.
+    center_px는 지도 마커 표시용으로만 별도 유지.
 
   VehicleState 주요 필드:
     track_id, class_name, bbox_xyxy, center_px
@@ -479,17 +491,36 @@ DigitalTwin/
 
 
 [ 속도 계산 로직 ]
-  1. 픽셀 좌표 → GPS 좌표 (호모그래피 변환)
-  2. Haversine(이전GPS, 현재GPS) → dist_m
-  3. dt = 현재_timestamp - 이전_timestamp (초)
-  4. raw_kph = dist_m / dt × 3.6
-  5. dist_m < 0.20 → speed=0 즉시 (지터 제거)
-  6. raw_kph > 180 → 이 프레임 스킵, 이전 EMA 유지 (이상치 제거)
-  7. EMA: speed = 0.30 × raw + 0.70 × prev_ema (평활화)
-     (α=0.30: 현재 프레임 반응이 빠름 — 먼 거리 과소 속도값이 빠르게 보정됨)
+  속도 불안정의 3가지 원인을 각각 차단하는 구조로 설계됨.
 
-  GC grace period: track_id가 5프레임 이상 미감지 시에만 삭제
-  → 1~2프레임 놓쳐도 이전 위치/속도 유지, 재감지 시 속도 연속성 보장
+  원인 1 — Track ID 재탄생:
+    YOLO 탐지 누락·가림 시 BoxMOT이 새 track_id를 부여 → 위치 이력 없음
+    → 재탄생 직후 프레임에서 dt가 매우 짧거나 이전 위치 오차가 커 속도 폭등.
+    대응: GC_GRACE_FRAMES=30 (약 1초) 동안 미감지 track_id의 이력·EMA 보존.
+          차량이 잠깐 가려져도 동일 ID로 복귀 가능성 대폭 증가.
+
+  원인 2 — YOLO bbox 픽셀 지터:
+    동일 차량이라도 bbox 중심이 매 프레임 10~20px씩 불규칙 이동.
+    640px = 20m 스케일에서 0.3~0.6m/frame → 30fps 기준 40~70 km/h 유령 속도.
+    대응: center_px를 EMA(α=0.15)로 먼저 스무딩 (bbox 센터 EMA).
+
+  원인 3 — 1프레임 차이 속도 계산:
+    N→N+1 프레임 이동거리만으로 속도 계산 시 순간 bbox 튐이 그대로 반영.
+    대응: 슬라이딩 윈도우(8프레임) — 가장 오래된 위치~현재 위치 총 이동거리 /
+          총 경과 시간으로 평균 속도 산출. 단발 튐이 8배 희석됨.
+
+  계산 순서:
+    1. main.py에서 bbox 바닥 중심(gx=cx, gy=xyxy[3])으로 호모그래피 변환
+       → (x_m, y_m) 획득 (도로 평면 기준 정확한 실세계 좌표)
+    2. center_px EMA 스무딩 (α=0.15) — bbox 픽셀 지터 흡수
+    3. (x_m, y_m, timestamp) 을 슬라이딩 윈도우(maxlen=8)에 push
+    4. 윈도우[0] → 윈도우[-1] 누적 dist_m / dt → raw_kph
+    5. dist_m < 0.5m → speed=0 (지터 제거)
+    6. raw_kph > 120 → 이상치 스킵, 이전 EMA 유지
+    7. EMA: speed = 0.15 × raw + 0.85 × prev_ema (최종 평활화)
+
+  GC grace period: track_id가 30프레임 이상 미감지 시에만 삭제
+  → 1초 이내 재감지 시 이전 위치/속도/윈도우 이력 연속성 유지
 
 
 [ 주차 차량 감지 ]
@@ -580,7 +611,8 @@ DigitalTwin/
     완화 전략:
       1. update_from_calibration()이 _H_gps와 _H_meter를 함께 갱신
          (두 행렬 일관성 확보, GPS 기반 haversine 거리 정확도 향상)
-      2. SPEED_SMOOTHING_ALPHA=0.30 — 잘못된 낮은 속도값이 빨리 보정됨
+      2. 슬라이딩 윈도우(8프레임) 평균 속도 + EMA(α=0.15) 이중 평활화
+         — 단발 오차 희석 + 낮은 속도값 잔류 시간 단축
       3. 캘리브레이션 포인트를 가까운 2점 + 먼 2점으로 배치하면
          호모그래피가 depth range를 더 잘 커버하여 오차 감소
 

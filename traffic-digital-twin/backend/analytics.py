@@ -8,7 +8,7 @@ analytics.py — 교통 지표 계산 엔진
 
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, deque
 import math
 import threading
 
@@ -22,6 +22,7 @@ from config import (
     GC_GRACE_FRAMES,
     PARKED_FRAMES_THRESHOLD,
     PARKED_POSITION_RADIUS_PX,
+    SPEED_WINDOW_FRAMES,
 )
 
 # ── Haversine 거리 계산 ───────────────────────────────────────────────
@@ -86,6 +87,10 @@ class TrafficAnalytics:
         self._lost_frames: dict[int, int] = {}
         # 주차 확정된 픽셀 위치 목록 — track_id 변경에도 유지
         self._parked_positions: list[tuple[float, float]] = []
+        # B: bbox 센터 EMA (픽셀) — 지터 완충
+        self._center_ema: dict[int, tuple[float, float]] = {}
+        # C: 슬라이딩 윈도우 — (x_m, y_m, timestamp_s) 이력
+        self._pos_window: dict[int, deque] = {}
 
     def reset(self) -> None:
         """카메라 전환 시 상태 초기화."""
@@ -95,6 +100,8 @@ class TrafficAnalytics:
             self._speed_ema.clear()
             self._lost_frames.clear()
             self._parked_positions.clear()
+            self._center_ema.clear()
+            self._pos_window.clear()
 
     def update(
         self,
@@ -158,23 +165,39 @@ class TrafficAnalytics:
     def _speed(self, v: VehicleState, current_ts: float) -> None:
         if v.is_parked:
             return
-        prev = self._prev.get(v.track_id)
-        if prev is None:
-            return
-        plat, plon, px_m, py_m, prev_ts = prev
 
-        dt = current_ts - prev_ts
+        tid = v.track_id
+
+        # B: bbox 센터 EMA — 픽셀 지터를 스무딩한 뒤 x_m/y_m 재계산에 활용
+        cx, cy = v.center_px
+        if tid in self._center_ema:
+            ecx, ecy = self._center_ema[tid]
+            ecx = SPEED_SMOOTHING_ALPHA * cx + (1.0 - SPEED_SMOOTHING_ALPHA) * ecx
+            ecy = SPEED_SMOOTHING_ALPHA * cy + (1.0 - SPEED_SMOOTHING_ALPHA) * ecy
+        else:
+            ecx, ecy = cx, cy
+        self._center_ema[tid] = (ecx, ecy)
+
+        # C: 슬라이딩 윈도우에 현재 스무딩된 위치 추가
+        if tid not in self._pos_window:
+            self._pos_window[tid] = deque(maxlen=SPEED_WINDOW_FRAMES)
+        self._pos_window[tid].append((v.x_m, v.y_m, current_ts))
+
+        window = self._pos_window[tid]
+        if len(window) < 2:
+            return
+
+        # 윈도우 전체 구간 이동거리 / 시간으로 평균 속도 계산
+        oldest_x, oldest_y, oldest_ts = window[0]
+        newest_x, newest_y, newest_ts = window[-1]
+        dt = newest_ts - oldest_ts
         if dt <= 0:
             return
 
-        if plat != 0.0 and v.lat != 0.0:
-            dist_m = haversine_m(plat, plon, v.lat, v.lon)
-        else:
-            dist_m = math.hypot(v.x_m - px_m, v.y_m - py_m)
+        dist_m = math.hypot(newest_x - oldest_x, newest_y - oldest_y)
 
-        # 지터 미만 이동은 즉시 정지 처리
         if dist_m < SPEED_JITTER_THRESHOLD_M:
-            self._speed_ema[v.track_id] = 0.0
+            self._speed_ema[tid] = 0.0
             v.speed_kph = 0.0
             v.is_speeding = False
             return
@@ -183,14 +206,14 @@ class TrafficAnalytics:
 
         # 물리적으로 불가능한 속도는 노이즈 — 이번 프레임 스킵 (EMA 유지)
         if raw_kph > MAX_REASONABLE_KPH:
-            prev_ema = self._speed_ema.get(v.track_id, 0.0)
+            prev_ema = self._speed_ema.get(tid, 0.0)
             v.speed_kph = round(prev_ema, 1)
             v.is_speeding = v.speed_kph > SPEED_LIMIT_KPH
             return
 
-        prev_ema = self._speed_ema.get(v.track_id, raw_kph)
+        prev_ema = self._speed_ema.get(tid, raw_kph)
         smoothed = SPEED_SMOOTHING_ALPHA * raw_kph + (1.0 - SPEED_SMOOTHING_ALPHA) * prev_ema
-        self._speed_ema[v.track_id] = smoothed
+        self._speed_ema[tid] = smoothed
 
         v.speed_kph = round(smoothed, 1)
         v.is_speeding = v.speed_kph > SPEED_LIMIT_KPH
@@ -242,6 +265,8 @@ class TrafficAnalytics:
                 self._dwell.pop(tid, None)
                 self._speed_ema.pop(tid, None)
                 self._lost_frames.pop(tid, None)
+                self._center_ema.pop(tid, None)
+                self._pos_window.pop(tid, None)
         # 재등장한 track의 grace counter 초기화
         for tid in active:
             self._lost_frames.pop(tid, None)

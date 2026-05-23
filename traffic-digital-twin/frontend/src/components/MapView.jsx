@@ -80,6 +80,7 @@ export default function MapView({
   onViewStateChange,
   onCctvClick,
   calibrationMode = false,
+  snapNodes = [],
   onMapClick,
   mapMode = "dark",
   onMapModeChange,
@@ -188,6 +189,36 @@ export default function MapView({
     updateTriggers: { getText: vehicles, getColor: mapMode },
   });
 
+  const snapNodeLayer = calibrationMode && snapNodes.length > 0
+    ? new ScatterplotLayer({
+        id:           "snap-nodes",
+        data:         snapNodes,
+        getPosition:  (d) => [d.lon, d.lat],
+        getRadius:    6,
+        radiusUnits:  "pixels",
+        getFillColor: [251, 191, 36, 220],
+        getLineColor: [255, 255, 255, 255],
+        lineWidthMinPixels: 2,
+        stroked:      true,
+        pickable:     true,
+      })
+    : null;
+
+  const snapNodeLabelLayer = calibrationMode && snapNodes.length > 0
+    ? new TextLayer({
+        id:             "snap-node-labels",
+        data:           snapNodes,
+        getPosition:    (d) => [d.lon, d.lat],
+        getText:        (d) => d.node_name || d.node_id,
+        getSize:        10,
+        getColor:       [251, 191, 36, 220],
+        getPixelOffset: [0, 14],
+        outlineWidth:   2,
+        outlineColor:   [0, 0, 0, 200],
+        pickable:       false,
+      })
+    : null;
+
   const layers = [
     ...(showVehicles ? extraLayers : []),
     fovLayer,
@@ -195,6 +226,8 @@ export default function MapView({
     cctvIconLayer,
     cctvLabelLayer,
     ...(showVehicles ? [scatterLayer, textLayer] : []),
+    snapNodeLayer,
+    snapNodeLabelLayer,
   ].filter(Boolean);
 
   return (
@@ -221,6 +254,16 @@ export default function MapView({
             `,
             style: {
               background: "#111827", color: "#f9fafb",
+              fontSize: "12px", borderRadius: "6px", padding: "8px",
+            },
+          };
+        }
+
+        if (d.node_id) {
+          return {
+            html: `<b>📍 ${d.node_name || d.node_id}</b><br/><span style="color:#9ca3af;font-size:11px">클릭하면 이 노드 GPS 사용</span>`,
+            style: {
+              background: "#111827", color: "#fbbf24",
               fontSize: "12px", borderRadius: "6px", padding: "8px",
             },
           };

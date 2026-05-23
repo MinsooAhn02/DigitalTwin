@@ -22,6 +22,14 @@ __pycache__/
 *.engine
 *.onnx
 
+# 노드링크 데이터 (용량 큼, make dev 최초 실행 시 생성)
+node-link-data/*.shp
+node-link-data/*.dbf
+node-link-data/*.shx
+node-link-data/*.prj
+node-link-data/*.cpg
+node-link-data/*.sqlite
+
 # OS
 .DS_Store
 Thumbs.db

@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from analytics import TrafficAnalytics, VehicleState
 from transform import PerspectiveTransformer, CALIBRATION_PATH
 import roi_manager
+from nodelink import get_road_info
 from config import (
     CAPTURE_INTERVAL_MS,
     CAPTURE_QUALITY,
@@ -45,13 +46,14 @@ from config import (
     FPS,
     ITS_API_KEY,
     ITS_BASE_URL,
+    ITS_TRAFFIC_URL,
     JPEG_QUALITY,
     MAX_IN_FLIGHT,
     RUNTIME_PROFILE_NAME,
     VEHICLE_CLASSES,
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 analytics    = TrafficAnalytics()
@@ -77,6 +79,9 @@ _label_ann = sv.LabelAnnotator(text_scale=0.4, text_thickness=1, text_padding=3)
 # ITS API 응답 캐시 (TTL 5분, 최대 50개 bbox 조합)
 _cctv_cache: TTLCache = TTLCache(maxsize=50, ttl=300)
 
+# ITS 구간속도 (5분 주기 폴링) — None이면 데이터 없음
+_its_speed_kph: float | None = None
+
 
 def _safe_tid(tracker_id_arr, idx: int, fallback: int) -> int:
     """BoT-SORT가 미확정 트랙에 np.nan을 반환할 때 ValueError 방지."""
@@ -99,6 +104,89 @@ def _make_placeholder() -> bytes:
     return buf.tobytes()
 
 _placeholder_jpeg: bytes = _make_placeholder()
+
+
+def _parse_traffic_items(resp_json: dict) -> list[dict]:
+    """ITS 교통소통정보 API 응답에서 링크 목록 추출.
+    구조: response.body.items.item (cctvInfo의 response.data와 다름)"""
+    raw = resp_json.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+    if isinstance(raw, dict):
+        return [raw]
+    return raw if isinstance(raw, list) else []
+
+
+async def _fetch_its_section_speed(lat: float, lon: float) -> float | None:
+    """카메라 위치 주변 ITS 구간속도 평균 조회 (bbox 기반, type=all)."""
+    margin = 0.005  # 약 500m (~카메라 시야 반경)
+    params = {
+        "apiKey":  ITS_API_KEY,
+        "type":    "all",
+        "drcType": "all",
+        "minX": str(lon - margin), "maxX": str(lon + margin),
+        "minY": str(lat - margin), "maxY": str(lat + margin),
+        "getType": "json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(ITS_TRAFFIC_URL, params=params)
+            resp.raise_for_status()
+            items = _parse_traffic_items(resp.json())
+        speeds = [float(it["speed"]) for it in items
+                  if it.get("speed") and float(it["speed"]) > 5]
+        return round(sum(speeds) / len(speeds), 1) if speeds else None
+    except Exception as exc:
+        logger.warning("ITS 구간속도 조회 실패: %s", exc)
+        return None
+
+
+async def _update_its_speed() -> None:
+    global _its_speed_kph
+    if not _current_cam:
+        return
+    result = await _fetch_its_section_speed(_current_cam["lat"], _current_cam["lon"])
+    if result is not None:
+        _its_speed_kph = result
+        logger.info("ITS 구간속도 갱신: %.1f kph", result)
+
+
+_NAME_BEARING: dict[str, float] = {
+    "정북": 0.0,   "북방향": 0.0,   "북쪽": 0.0,   "북측": 0.0,   "북부": 0.0,   "(북)": 0.0,
+    "북동방향": 45.0, "북동쪽": 45.0, "북동측": 45.0, "(북동)": 45.0,
+    "정동": 90.0,  "동방향": 90.0,  "동쪽": 90.0,  "동측": 90.0,  "동부": 90.0,  "(동)": 90.0,
+    "남동방향": 135.0, "남동쪽": 135.0, "남동측": 135.0, "(남동)": 135.0,
+    "정남": 180.0, "남방향": 180.0, "남쪽": 180.0, "남측": 180.0, "남부": 180.0, "(남)": 180.0,
+    "남서방향": 225.0, "남서쪽": 225.0, "남서측": 225.0, "(남서)": 225.0,
+    "정서": 270.0, "서방향": 270.0, "서쪽": 270.0, "서측": 270.0, "서부": 270.0, "(서)": 270.0,
+    "북서방향": 315.0, "북서쪽": 315.0, "북서측": 315.0, "(북서)": 315.0,
+}
+
+
+_ROAD_NAME_RE = re.compile(
+    r"\[([^\]]*(?:국도|지방도|고속도로|특별시도|광역시도|시도|군도)[^\]]*)\]"
+)
+
+def _parse_road_name_hint(cctv_name: str) -> str | None:
+    """CCTV 이름에서 '[국도 1호선]' 형태의 도로명을 파싱해 반환."""
+    if not cctv_name:
+        return None
+    m = _ROAD_NAME_RE.search(cctv_name)
+    return m.group(1).strip() if m else None
+
+
+def _parse_name_bearing(name: str, road_bearing: float | None = None) -> float | None:
+    """CCTV 이름에서 방향각 추출. 명시된 방위 우선, 상행/하행은 road_bearing 보조 사용."""
+    if not name:
+        return None
+    for keyword, deg in _NAME_BEARING.items():
+        if keyword in name:
+            return deg
+    # 상행(toward Seoul) = road 반대방향, 하행(away from Seoul) = road 방향
+    if road_bearing is not None:
+        if "하행" in name:
+            return road_bearing
+        if "상행" in name:
+            return (road_bearing + 180) % 360
+    return None
 
 
 def _parse_its_items(resp_json: dict) -> list[dict]:
@@ -144,10 +232,12 @@ async def lifespan(app: FastAPI):
     app.state.detector = detector
     task         = asyncio.create_task(live_loop(detector, stream))
     refresh_task = asyncio.create_task(hls_refresh_loop(stream))
+    its_task     = asyncio.create_task(_its_speed_poll_loop())
 
     yield
     task.cancel()
     refresh_task.cancel()
+    its_task.cancel()
     if hasattr(app.state, "stream"):
         app.state.stream.release()
 
@@ -288,8 +378,28 @@ async def switch_camera(body: CameraSwitch):
     if det is not None:
         det.reset_tracker()
 
+    # 새 카메라 위치 기준 ITS 구간속도 즉시 갱신 (비동기, 응답 안 기다림)
+    global _its_speed_kph
+    _its_speed_kph = None
+    asyncio.create_task(_update_its_speed())
+
+    # 노드링크 DB에서 가장 가까운 도로의 제한속도 자동 적용
+    road = await asyncio.to_thread(get_road_info, body.lat, body.lon, _parse_road_name_hint(body.name))
+    if road and road["max_spd"] > 0:
+        analytics.speed_limit_kph = float(road["max_spd"])
+        logger.info("노드링크 제한속도 적용: %d kph (%s)", road["max_spd"], road.get("road_name", ""))
+    else:
+        from config import SPEED_LIMIT_KPH
+        analytics.speed_limit_kph = SPEED_LIMIT_KPH
+    # FOV 삼각형과 동일한 우선순위: name_bearing → road_bearing
+    road_bearing = road["bearing_deg"] if road else None
+    name_bearing = _parse_name_bearing(body.name, road_bearing)
+    analytics.road_bearing_deg = name_bearing if name_bearing is not None else road_bearing
+    analytics.cam_lat = body.lat
+    analytics.cam_lon = body.lon
+
     logger.info("카메라 전환: %s (%.4f, %.4f)", body.name, body.lat, body.lon)
-    return {"ok": True}
+    return {"ok": True, "road": road}
 
 
 # ── HLS URL 갱신 (브라우저용) ────────────────────────────────────────
@@ -425,7 +535,7 @@ async def ws_detect(ws: WebSocket):
             )
 
             # LineZone 카운팅
-            tracked, in_cnt, out_cnt = tracker.update(detections, (fw, fh))
+            tracked, in_cnt, out_cnt, in_ids, out_ids = tracker.update(detections, (fw, fh))
             if fid % 10 == 1:
                 logger.info(
                     "[BoT-SORT] frame=%d  tracked=%d  in=%d  out=%d",
@@ -435,8 +545,8 @@ async def ws_detect(ws: WebSocket):
             # GPS 변환 + VehicleState 생성
             vehicles = _build_vehicles(tracked)
             fid += 1
-            result = analytics.update(fid, time.time() * 1000, vehicles, in_cnt, out_cnt)
-            await _broadcast(result.to_dict())
+            result = analytics.update(fid, fid / FPS * 1000, vehicles, in_cnt, out_cnt, in_ids, out_ids)
+            await _broadcast(_inject_its_speed(result.to_dict()))
             await ws.send_bytes(ann_bytes)
 
     except WebSocketDisconnect:
@@ -682,6 +792,22 @@ async def video_stream_yolo():
     )
 
 
+# ── 노드링크 근처 노드 조회 ───────────────────────────────────────────
+@app.get("/nodelink/nodes")
+async def nearby_nodes(
+    lat: float = Query(...),
+    lon: float = Query(...),
+    radius_km: float = Query(0.3),
+):
+    """캘리브레이션 GPS 스냅용: 카메라 주변 도로 노드 목록 반환."""
+    from nodelink import get_nodes_near
+    try:
+        nodes = await asyncio.to_thread(get_nodes_near, lat, lon, min(radius_km, 1.0))
+        return {"nodes": nodes}
+    except FileNotFoundError:
+        return {"nodes": []}
+
+
 # ── 헬스체크 ──────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
@@ -710,6 +836,18 @@ async def runtime_config():
         "trackerTier": tracker_info.get("tier", "unknown"),
         "inferenceBackend": tracker_info.get("backend", "unknown"),
     }
+
+
+# ── ITS 속도 비교 주입 ────────────────────────────────────────────────
+def _inject_its_speed(payload: dict) -> dict:
+    """FrameAnalytics dict에 ITS 구간속도 및 오차율 추가."""
+    if _its_speed_kph is None:
+        return payload
+    payload["its_speed_kph"] = _its_speed_kph
+    avg = payload.get("avg_speed_kph", 0.0)
+    if avg > 0 and _its_speed_kph > 0:
+        payload["speed_error_pct"] = round((avg - _its_speed_kph) / _its_speed_kph * 100, 1)
+    return payload
 
 
 # ── 브로드캐스트 헬퍼 ─────────────────────────────────────────────────
@@ -778,11 +916,23 @@ async def live_loop(detector, stream) -> None:
                         logger.warning("캘리브레이션 로드 실패: %s", exc)
 
                 # 스트림 준비 완료 신호를 모든 WS 클라이언트에 전송
+                road_info = await asyncio.to_thread(
+                    get_road_info, cam["lat"], cam["lon"], _parse_road_name_hint(cam.get("name", ""))
+                )
                 await _broadcast({
                     "type": "camera_ready",
                     "name": cam.get("name", ""),
                     "roi": saved_roi,
                     "camera_key": cam_key,
+                    "calibrated": _transformer.is_calibrated,
+                    "road_name": road_info["road_name"] if road_info else None,
+                    "road_lanes": road_info["lanes"] if road_info else None,
+                    "road_max_spd": road_info["max_spd"] if road_info else None,
+                    "road_bearing": road_info["bearing_deg"] if road_info else None,
+                    "name_bearing": _parse_name_bearing(
+                        cam.get("name", ""),
+                        road_info["bearing_deg"] if road_info else None,
+                    ),
                 })
                 logger.info("카메라 전환 완료, camera_ready 신호 전송")
             except RuntimeError as e:
@@ -815,7 +965,7 @@ async def live_loop(detector, stream) -> None:
 
         t0 = time.perf_counter()
         payload = await asyncio.to_thread(
-            _live_process, frame_id, frame, detector, tracker
+            _live_process, frame_id, frame, detector, tracker, stream.fps
         )
         if payload:
             await _broadcast(payload)
@@ -827,14 +977,14 @@ async def live_loop(detector, stream) -> None:
             await asyncio.sleep(target_interval - elapsed)
 
 
-def _live_process(frame_id, frame, detector, tracker) -> dict | None:
+def _live_process(frame_id, frame, detector, tracker, fps: float = 30.0) -> dict | None:
     global _frame_count, _latest_annotated_jpeg
 
     h, w = frame.shape[:2]
-    timestamp_ms = time.time() * 1000
+    timestamp_ms = frame_id / fps * 1000  # 처리 지연 무관, 프레임 번호 기반
 
     tracked = detector.track(frame)
-    tracked, in_cnt, out_cnt = tracker.update(tracked, (w, h))
+    tracked, in_cnt, out_cnt, in_ids, out_ids = tracker.update(tracked, (w, h))
 
     # YOLO annotated 프레임 생성 → /video-stream-yolo 버퍼
     try:
@@ -855,8 +1005,16 @@ def _live_process(frame_id, frame, detector, tracker) -> dict | None:
 
     vehicles = _build_vehicles(tracked)
     _frame_count += 1
-    result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt)
-    return result.to_dict()
+    result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt, in_ids, out_ids)
+    return _inject_its_speed(result.to_dict())
+
+
+# ── ITS 구간속도 폴링 ─────────────────────────────────────────────────
+async def _its_speed_poll_loop() -> None:
+    """5분(API 집계주기)마다 ITS 구간속도 갱신. 카메라 선택 시에만 실제 조회."""
+    while True:
+        await asyncio.sleep(300)
+        await _update_its_speed()
 
 
 # ── HLS URL 자동 갱신 (서버사이드 live_loop 용) ───────────────────────

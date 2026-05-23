@@ -53,6 +53,7 @@ class PerspectiveTransformer:
         gps_arr = np.float32(gps_pts)
         self._gps_center_lat: float = float(np.mean(gps_arr[:, 0]))
         self._gps_center_lon: float = float(np.mean(gps_arr[:, 1]))
+        self._is_calibrated: bool = False  # 4-point 사용자 캘리브레이션 여부
 
     # ──────────────────────────────────────────────────────────────────
     def _transform_point(self, H: np.ndarray, u: float, v: float) -> tuple[float, float]:
@@ -107,6 +108,10 @@ class PerspectiveTransformer:
             pts.append([x, y])
         return np.float32(pts)
 
+    @property
+    def is_calibrated(self) -> bool:
+        return self._is_calibrated
+
     def update_from_calibration(
         self,
         pixel_pts: list[list[float]],
@@ -135,6 +140,7 @@ class PerspectiveTransformer:
         if H_m is not None:
             self._H_meter = H_m
 
+        self._is_calibrated = True
         logger.info(
             "캘리브레이션 적용 완료: pixel=%s gps=%s",
             pixel_pts, gps_pts,
@@ -153,9 +159,14 @@ class PerspectiveTransformer:
         ])
         src = np.float32(PIXEL_POINTS)
         self._H_gps, _ = cv2.findHomography(src, new_gps)
+        dst_meter = self._gps_pts_to_local_meters(new_gps)
+        H_m, _ = cv2.findHomography(src, dst_meter)
+        if H_m is not None:
+            self._H_meter = H_m
         self._bearing_rad = math.radians(CAMERA_BEARING_DEG)
         self._gps_center_lat = float(np.mean(new_gps[:, 0]))
         self._gps_center_lon = float(np.mean(new_gps[:, 1]))
+        self._is_calibrated = False
         logger.info("GPS 캘리브레이션 갱신: 중심 (%.4f, %.4f)", center_lat, center_lon)
 
     def batch_pixel_to_meter(

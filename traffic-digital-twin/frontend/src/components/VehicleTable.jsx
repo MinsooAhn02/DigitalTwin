@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { useLang } from "../i18n/index.jsx";
 
-export default function VehicleTable({ vehicles = [] }) {
+export default function VehicleTable({ vehicles = [], calibrated = false }) {
   const { t } = useLang();
   const [logOpen, setLogOpen] = useState(false);
 
@@ -32,7 +32,9 @@ export default function VehicleTable({ vehicles = [] }) {
                 <td style={{ padding: "4px 4px", color: "#e2e8f0" }}>
                   <span style={{ color: "#94a3b8" }}>#{v.track_id}</span> {v.class_name}
                 </td>
-                <td style={{ padding: "4px 4px", textAlign: "right", color: v.is_speeding ? "#f87171" : "#d1d5db" }}>
+                <td style={{ padding: "4px 4px", textAlign: "right", color: v.is_speeding ? "#f87171" : calibrated ? "#d1d5db" : "#fbbf24" }}
+                    title={!calibrated ? "캘리브레이션 미설정 — 근사값" : undefined}>
+                  {!calibrated && <span style={{ fontSize: 9, marginRight: 1 }}>~</span>}
                   {v.speed_kph?.toFixed(1)} <span style={{ color: "#4b5563" }}>km/h</span>
                 </td>
                 <td style={{ padding: "4px 4px", textAlign: "center" }}>

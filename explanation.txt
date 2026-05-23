@@ -1,6 +1,6 @@
 ================================================================
   Traffic Digital Twin — 시스템 설명서
-  최종 업데이트: 2026-05-17
+  최종 업데이트: 2026-05-24
 ================================================================
 
 이 문서는 프로젝트를 처음 접하는 사람도 전체 구조와 동작 방식을
@@ -20,6 +20,9 @@
   - 픽셀 좌표 → GPS 좌표 변환 (4점 호모그래피 보정)
   - deck.gl 지도 위 차량 마커, 속도, LOS, 경보 실시간 표시
   - ROI(관심 영역) 설정, 카메라 방향 보정 UI
+  - 국가 노드링크 DB 연동: 도로명·제한속도·bearing 자동 조회
+  - CCTV 이름에서 도로명·방향 파싱 → 지도 FOV 정렬, 과속 기준 자동 적용
+  - GPU(CUDA/TensorRT) 추론 자동 선택
 
 
 ================================================================
@@ -108,16 +111,19 @@
 DigitalTwin/
 ├── readme.md                    설치·실행 가이드
 ├── explanation.txt              이 파일 (시스템 설명서)
-├── tasks/
-│   └── todo.md                  개발 이력 및 완료 항목
+├── Makefile                     dev/backend/frontend/kill + nodelink DB 자동 빌드
+├── scripts/
+│   ├── with_best_python.cmd     CUDA Python 자동 선택 (venv-cuda → venv → system)
+│   └── build_nodelink_db.py     국가 노드링크 shapefile → SQLite 변환 (최초 1회)
+├── node-link-data/              MOCT_NODE/LINK shapefile + nodelink.sqlite (git 제외)
 └── traffic-digital-twin/
-    ├── Makefile                 dev/backend/frontend/kill 명령어
     ├── backend/
     │   ├── main.py              FastAPI 서버, 엔드포인트, WebSocket 핸들러
     │   ├── detector.py          VehicleDetector (YOLO + BoxMOT), VideoStream
     │   ├── tracker.py           VehicleTracker (LineZone In/Out 카운팅)
-    │   ├── analytics.py         TrafficAnalytics (속도/LOS/주차/경보)
+    │   ├── analytics.py         TrafficAnalytics (속도/LOS/주차/경보/도로축 투영)
     │   ├── transform.py         PerspectiveTransformer (픽셀→GPS 호모그래피)
+    │   ├── nodelink.py          국가 노드링크 DB 조회 (도로명/제한속도/bearing)
     │   ├── roi_manager.py       ROI 저장·로드 (정규화 좌표 기반)
     │   ├── model_setup.py       최초 실행 시 모델/트래커 선택 GUI (Tkinter)
     │   ├── config.py            전역 설정값 (API키, YOLO 파라미터, 임계값 등)
@@ -127,8 +133,7 @@ DigitalTwin/
     │   ├── .runtime_profile.json  선택된 성능 프로파일 캐시
     │   ├── roi_config.json      카메라별 ROI 폴리곤 저장소
     │   ├── calibration_data.json  카메라 보정 데이터 저장소
-    │   ├── yolov8x.pt / .engine   YOLO 모델 (고정확도)
-    │   └── yolov8s.pt / .engine   YOLO 모델 (경량)
+    │   └── yolov8n.pt / .engine   YOLO 모델
     └── frontend/
         ├── vite.config.js
         ├── package.json
@@ -166,11 +171,13 @@ DigitalTwin/
     VEHICLE_CLASSES         탐지 대상 클래스 {2:car, 3:motorcycle, 5:bus, 7:truck}
     TRACKER_TIER            트래커 선택 (auto/cpu/low/medium/high)
     SPEED_LIMIT_KPH         과속 기준 (기본 120)
-    SPEED_SMOOTHING_ALPHA   EMA 평활화 계수 (0.15 — 낮을수록 스파이크 잔류 감소)
     MAX_REASONABLE_KPH      이상치 제거 상한 (120 — 도로 제한속도 기준)
-    GC_GRACE_FRAMES         트랙 GC 유예 프레임 수 (30 — 약 1초간 ID 보존)
-    SPEED_WINDOW_FRAMES     슬라이딩 윈도우 속도 계산 이력 크기 (8프레임)
+    GC_GRACE_FRAMES         트랙 GC 유예 프레임 수 (90 — 약 3초간 ID 보존)
+    SPEED_WINDOW_FRAMES     슬라이딩 윈도우 속도 계산 이력 크기 (18프레임)
+                            DETECT_INTERVAL=3 기준 실제 샘플 6개 → 회귀 안정성 확보
     YOLO_DETECT_INTERVAL    YOLO 추론 주기 (3 — 3프레임 중 1회만 추론)
+    BYTE_TRACK_BUFFER       ByteTrack 트랙 생존 버퍼 (90프레임 = 3초)
+    BYTE_TRACK_FPS          ByteTrack 기준 FPS (30)
     BOTTLENECK_DWELL_FRAMES 병목 판정 정지 프레임 (150 = 5초)
     PARKED_FRAMES_THRESHOLD 주차 판정 정지 프레임 (300 = 10초)
     PARKED_POSITION_RADIUS_PX  주차 위치 메모리 반경 (30px)
@@ -186,10 +193,28 @@ DigitalTwin/
         2. CUDA 환경에서 half=True(FP16) 추론 (약 30~50% 속도 향상)
         3. ROI 마스킹 (roi_manager에서 불러온 폴리곤 적용)
         4. tracker.update(bboxes, frame) → track_id 할당/유지 (Kalman 예측 포함)
-        5. supervision.Detections 객체 반환
+        5. [cpu/low 티어] _dedup_tracks() → 중복 트랙 제거
+        6. [cpu/low 티어] IDStabilizer.update() → ID 안정화
+        7. supervision.Detections 객체 반환
     - set_roi(polygon): ROI 폴리곤 업데이트
-    - reset_tracker(): 카메라 전환 시 트래커 내부 상태 초기화
+    - reset_tracker(): 카메라 전환 시 트래커 + IDStabilizer 초기화
     - threading.Lock: live_loop + ws/detect 동시 접근 직렬화
+
+  _dedup_tracks(dets, iou_thr=0.3, dist_thr=90px)
+    ByteTrack이 동일 차량에 두 개의 ID를 동시에 출력할 때 제거.
+    Kalman 예측(유령 트랙)과 실제 탐지 트랙이 박스가 겹치지 않아도
+    중심 거리 90px 이내이면 높은 ID(최신 트랙)를 제거.
+    IoU 기준만 쓰면 박스가 안 겹칠 때 유령 트랙을 못 잡는 문제 보완.
+
+  IDStabilizer (cpu/low 티어 전용)
+    BoxMOT이 잠깐 놓친 차량에 새 ID를 부여할 때 이전 ID로 복원.
+    동작 원리:
+      - 매 프레임 이전 활성 트랙을 _lost 딕셔너리로 이동 (매칭 루프 전)
+      - 새 raw_id 등장 시 _lost 중 중심 거리 150px 이내 트랙 탐색
+      - 찾으면: remap[raw_id] = old_stable_id → 이전 ID 복원
+      - 90프레임(3초) 이상 미등장 시 lost 항목 삭제
+    핵심 설계: prev_centers를 루프 전에 lost로 이동해야
+    같은 프레임에서 사라진 트랙을 즉시 매칭 가능 (루프 후 이동 시 타이밍 버그)
 
   VideoStream
     - switch_to(url): OpenCV(FFmpeg 백엔드)로 HLS 스트림 전환
@@ -197,11 +222,29 @@ DigitalTwin/
     - reconnect(): 스트림 끊김 자동 재연결
 
 
+[ nodelink.py ]
+  국가 표준 노드링크 SQLite DB를 런타임에 조회하는 모듈.
+  DB는 scripts/build_nodelink_db.py로 최초 1회 생성 (MOCT_NODE/LINK shapefile 필요).
+
+  get_road_info(lat, lon, road_name_hint=None) → LinkInfo | None
+    카메라 GPS 기준 500m 반경 내 가장 가까운 링크 정보 반환.
+    road_name_hint 제공 시 ("국도 1호선") 이름 매칭 링크 우선 선택 → 거리 폴백.
+
+  get_nodes_near(lat, lon) → list[NodeInfo]
+    보정 모드 캘리브레이션 클릭 시 노드 GPS 스냅핑에 활용.
+
+  LinkInfo 주요 필드:
+    road_name, lanes, max_spd, bearing_deg (F_NODE→T_NODE 방향, 0=북 시계방향)
+
+  DB Path: node-link-data/nodelink.sqlite (R*tree 공간 인덱스)
+
+
 [ tracker.py ]
   VehicleTracker
     - LineZone 교차 판정으로 In/Out 카운팅
-    - ByteTrack은 제거됨 — 현재 BoxMOT이 tracker.py 외부에서 처리
-    - update(detections, frame_wh): supervision LineZone 결과 반환
+    - update() 반환: (detections, in_count, out_count, crossed_in_ids, crossed_out_ids)
+    - crossed_in_ids / crossed_out_ids: 해당 프레임에 라인을 넘은 track_id set
+      → analytics._update_locked()에서 _vehicle_direction[tid] 갱신에 활용
 
 
 [ analytics.py ]
@@ -210,31 +253,39 @@ DigitalTwin/
   입력: VehicleState 리스트 (track_id, class_name, center_px, lat, lon 등)
   출력: FrameAnalytics (vehicles, vehicle_count, avg_speed_kph, los_grade, ...)
 
+  인스턴스 속성 (카메라 전환 시 main.py가 설정):
+    speed_limit_kph   과속 기준 — nodelink DB max_spd 우선, 없으면 config 기본값
+    road_bearing_deg  도로 진행 방향 (name_bearing ?? road_bearing)
+    cam_lat / cam_lon 카메라 GPS
+
   처리 순서:
-    1. _gc(active): 미감지 트랙 정리 (30프레임 grace period 후 삭제)
-    2. _is_near_parked(): 등록된 주차 위치 30px 이내 → 즉시 is_parked
-    3. _speed(): 3단계 안정화 속도 계산
-       - 단계A (bbox 센터 EMA): 픽셀 center_px를 EMA(α=0.15)로 스무딩
-         → YOLO bbox 지터(10~20px 튐)를 흡수
-       - 단계B (슬라이딩 윈도우): 최근 8프레임 (x_m, y_m, ts) 이력 유지
-         가장 오래된 위치~현재 위치 총 이동거리 / 총 시간 → raw_kph
-         단발 spike를 희석, 1프레임 노이즈 증폭 방지
-       - dist < 0.5m → speed=0 (지터 제거)
-       - raw_kph > 120 → 이상치 스킵 (EMA 유지)
-       - EMA(α=0.15) 평활화 → speed_kph 확정
-    4. _dwell_update(): 정지 프레임 누적 → 병목/주차 판정
-    5. 주차 차량 제외 후 통계 집계 (avg_speed, LOS, class_counts)
+    1. _gc(active): 미감지 트랙 정리 (90프레임 grace period 후 삭제)
+    2. LineZone 교차 이벤트(crossed_in_ids, crossed_out_ids)로 direction 갱신
+    3. _is_near_parked(): 등록된 주차 위치 30px 이내 → 즉시 is_parked
+    4. _speed(): 선형 회귀 기반 속도 계산
+       - 슬라이딩 윈도우(maxlen=18): (x_m, y_m, timestamp) 이력 유지
+       - 윈도우 전체 변위 < 0.5m → speed=0 (지터 제거)
+       - 선형 회귀(OLS)로 vx·vy 추정 → sqrt(vx²+vy²)×3.6 = kph
+       - kph > MAX_REASONABLE_KPH → 이상치 스킵
+       - is_speeding = speed_kph > self.speed_limit_kph (도로 제한속도 기준)
+    5. _dwell_update(): 정지 프레임 누적 → 병목/주차 판정
+    6. _project_to_road_axis(): 차량 GPS를 도로 bearing 축에 투영
+       - 현재 프레임 차량들의 평균 위치를 기준점으로 사용
+       - 횡방향(도로 수직) 흔들림 제거 → 지도 위 차량이 도로선 위에 정렬
+    7. 주차 차량 제외 후 통계 집계 (avg_speed, LOS, class_counts)
+
+  * 과속 기준: 카메라 전환 시 nodelink DB에서 해당 도로 max_spd 자동 적용.
+    DB 없거나 정보 없으면 config.SPEED_LIMIT_KPH(기본 120) 사용.
 
   * 좌표 변환 기준점: bbox 기하학적 중심(center_px)이 아닌 바닥 중심
     (bottom center = cx, xyxy[3])을 호모그래피에 입력.
-    호모그래피는 도로 평면 기준으로 캘리브레이션되므로
-    차량이 실제로 닿는 지면 접촉점을 사용해야 거리·속도 오차가 최소화됨.
     center_px는 지도 마커 표시용으로만 별도 유지.
 
   VehicleState 주요 필드:
     track_id, class_name, bbox_xyxy, center_px
-    lat, lon, x_m, y_m       (GPS + 미터 좌표)
-    speed_kph, is_speeding    (속도 및 과속 여부)
+    lat, lon, x_m, y_m          (GPS + 미터 좌표)
+    direction                    "In" / "Out" / "Unknown" (LineZone 교차 기반)
+    speed_kph, is_speeding       (속도 및 과속 여부)
     dwell_frames, is_bottleneck, is_parked
 
 
@@ -250,6 +301,10 @@ DigitalTwin/
 
   pixel_to_gps(cx, cy)   → (lat, lon)
   pixel_to_meter(cx, cy) → (x_m, y_m)  (속도 계산 보조)
+  is_calibrated (property)
+    - update_from_calibration() 호출 후 True
+    - update_gps_center() (근사) 호출 후 False
+    - camera_ready WS 메시지에 포함 → 프론트엔드 미보정 표시에 활용
   update_from_calibration(data): 보정 데이터 적용 + 행렬 재계산
     - _H_gps: 픽셀→GPS 호모그래피 재계산
     - _H_meter: GPS 4점에서 로컬 ENU 미터 좌표 계산(_gps_pts_to_local_meters)
@@ -286,24 +341,32 @@ DigitalTwin/
 
   REST 엔드포인트:
     GET  /cctvs           ITS API에서 뷰포트 내 CCTV 목록 조회 (TTL 5분 캐시)
-                            cctvname 필드에 _korname_to_en() 적용:
-                            "국도 3호선 상행" → "국도 3호선 상행 (Nat'l Rt.3 NB↑)"
     POST /switch-camera   카메라 전환:
-                            → _camera_queue push (live_loop 스트림 전환)
-                            → detector.reset_tracker()
-                            → transform.update_gps_center()
-                            → analytics.reset()
+                            → nodelink DB에서 도로 정보 조회
+                              (_parse_road_name_hint로 CCTV 이름 [국도 N호선] 파싱)
+                            → analytics.speed_limit_kph = 도로 max_spd (또는 기본값)
+                            → analytics.road_bearing_deg = name_bearing ?? road_bearing
+                            → detector.reset_tracker(), analytics.reset()
                             → "camera_ready" WS 신호 발송
+                              (road_name, road_lanes, road_max_spd, road_bearing,
+                               name_bearing 포함)
+    GET  /nodelink/nodes  보정 모드용 주변 노드 목록 반환 (GPS 스냅핑용)
     GET  /cctv-refresh    HLS NETWORK_ERROR 시 신선한 URL 반환
     GET  /runtime-config  현재 캡처 설정 반환 (프론트엔드 동기화용)
     GET/POST/DELETE /roi  ROI 폴리곤 관리
     GET/POST/DELETE /calibration  보정 데이터 관리
     GET  /health          서버 상태
 
+  CCTV 이름 파싱:
+    _parse_road_name_hint(name): "[국도 1호선]", "[지방도 23호선]" 등 추출
+    _parse_name_bearing(name, road_bearing):
+      - 명시적 방위 키워드 우선: 남측/북측/(북)/(남)/동방향 등 → 절대 각도
+      - 상행/하행: road_bearing 기반 ±180° 계산
+      FOV 삼각형 방향과 GPS 투영 축 모두 동일 우선순위 적용
+
   WebSocket:
     WS /ws          JSON 브로드캐스트 구독 (FrameAnalytics 데이터)
     WS /ws/detect   JPEG 수신 → 추론 → 어노테이션 JPEG 반환
-                    수신 시 live_loop의 track() 호출을 스킵 (동시성 충돌 방지)
 
   백그라운드:
     live_loop       OpenCV로 HLS 스트림 읽기 → 탐지 → 브로드캐스트
@@ -481,10 +544,18 @@ DigitalTwin/
   TRACKER_TIER 환경변수 (config.py) 또는 model_setup GUI로 선택:
 
     auto    VRAM 크기 자동 감지 → 적합한 티어 선택
+              ≥ 10GB → high / ≥ 6GB → medium / ≥ 3.5GB → low / 그 외 → cpu
+              (3.5GB threshold: RTX 2050 등 4GB 카드가 ~3.9996GB 보고하는 문제 대응)
     cpu     ByteTrack  — ReID 없음, VRAM 불필요, 가장 빠름
     low     OcSort     — ReID 없음, 가림 처리 강함
+              min_hits=1: YOLO_DETECT_INTERVAL=3 환경에서 트랙 미출력 문제 방지
+              (기본 min_hits=3이면 탐지 공백 2프레임에 의해 트랙이 확정 전 삭제됨)
     medium  BotSort    — appearance ReID, VRAM 6~8GB 권장
     high    DeepOcSort — appearance ReID, VRAM 8GB+ 권장
+
+  ByteTrack 전용 패치 (_patched_activate):
+    boxmot 12.x 버그: STrack.activate가 frame_id==1일 때만 is_activated=True.
+    DETECT_INTERVAL > 1 환경에서 새 트랙이 영원히 반환되지 않는 문제를 패치.
 
   ReID(Re-Identification): 차량이 잠시 화면에서 사라져도
   외형 특징으로 동일 track_id 재할당 → ID 끊김 최소화.
@@ -535,33 +606,28 @@ DigitalTwin/
 
 
 ================================================================
-9. 성능 수치 (RTX 4070 Laptop 기준)
+9. 성능 수치
 ================================================================
 
-  파이프라인 구간별 소요 시간
-    캔버스 캡처 + JPEG 인코딩    ~8ms
-    WebSocket 왕복 (로컬호스트)  ~3ms
-    JPEG 디코딩 (서버)           ~3ms
-    YOLO + BoxMOT 추론           ~9.6ms (yolov8x) / ~3ms (yolov8s)
-    어노테이션 + JPEG 인코딩     ~3ms
-    ─────────────────────────────────────
-    총 파이프라인                ~27ms  (~37fps) yolov8x
-                                 ~20ms  (~50fps) yolov8s
+  [ RTX 2050 (4GB VRAM, CUDA 12.4) 기준 — YOLOv8n ]
+    GPU+PyTorch(yolov8n)      ~8ms/frame
+    TensorRT FP16(yolov8n)    ~4ms/frame  (엔진 빌드 최초 1회 ~3분)
+    OcSort (low tier)         CPU 처리, GPU 부하 없음
+    YOLO_DETECT_INTERVAL=3    GPU 점유 ~1/3 절감
 
-  TensorRT FP16 전환 효과
-    CPU(yolov8x)         ~500ms/frame
-    GPU+PyTorch(yolov8x) ~33ms/frame
-    TensorRT FP16(yolov8x) ~9.6ms/frame
-    정확도 변화 없음 (FP16 오차 < 1%)
+  [ RTX 4070 Laptop 기준 — YOLOv8x ]
+    TensorRT FP16(yolov8x)    ~9.6ms/frame
+    GPU+PyTorch(yolov8x)      ~33ms/frame
+    CPU(yolov8x)              ~500ms/frame
+    총 파이프라인             ~27ms (~37fps)
 
-  YOLO_DETECT_INTERVAL=3 효과 (live_loop 기준)
-    매 프레임 YOLO          ~9.6ms × 30fps = 288ms/초 GPU 점유
-    3프레임 중 1회 YOLO     ~9.6ms × 10fps = 96ms/초 GPU 점유
-    나머지 2프레임은 tracker Kalman 예측만 (~0.5ms) → GPU 여유 증가
+  TensorRT .engine 주의사항:
+    - 실행 GPU에서 직접 변환해야 함 (다른 GPU 파일 사용 불가)
+    - 최초 변환 시 model_setup GUI에서 자동 처리
+    - YOLO_AUTO_EXPORT_ENGINE=true (기본값) → .pt 존재 시 자동 변환 시도
 
-  model.predict(half=True) 효과 (CUDA 환경)
-    FP32 → FP16 전환: ~30~50% 추론 속도 향상 (.pt 모델 한정)
-    TensorRT .engine은 이미 FP16이므로 변화 없음
+  model.predict(half=True) 효과 (CUDA 환경, .pt 한정)
+    FP32 → FP16: ~30~50% 속도 향상 / TensorRT .engine은 이미 FP16
 
   inFlight 제어 (maxInFlight=2)
     동시 전송 2프레임 제한 → 처리량 최대화 + 순서 보장
@@ -615,6 +681,30 @@ DigitalTwin/
          — 단발 오차 희석 + 낮은 속도값 잔류 시간 단축
       3. 캘리브레이션 포인트를 가까운 2점 + 먼 2점으로 배치하면
          호모그래피가 depth range를 더 잘 커버하여 오차 감소
+
+  [OcSort + YOLO_DETECT_INTERVAL 충돌]
+    OcSort 기본 min_hits=3: 동일 차량을 3연속 프레임에서 탐지해야 트랙 확정.
+    YOLO_DETECT_INTERVAL=3이면 2프레임은 빈 배열 전달 → 트랙이 확정 전 계속 삭제.
+    해결: OcSort(min_hits=1, max_age=BYTE_TRACK_BUFFER)로 초기화.
+    ByteTrack도 동일 문제 → _patched_activate로 is_activated 즉시 True 설정.
+
+  [도로 방향 우선순위]
+    카메라 FOV 방향 및 GPS 투영 축:
+      1순위 name_bearing: CCTV 이름 내 방위 키워드 (남측/북측/(북)/동방향 등)
+      2순위 road_bearing: nodelink DB F_NODE→T_NODE 방향
+      3순위 없음: 투영 미적용 (차량 GPS 원본 그대로 지도 표시)
+
+  [GPS 도로축 투영]
+    _project_to_road_axis(): 차량 GPS를 road_bearing 방향 단위벡터에 투영.
+    기준점으로 현재 프레임 차량들의 평균 위치를 사용 (카메라-도로 오프셋 흡수).
+    횡방향 성분 제거 → 지도에서 차량이 도로 중심선 위에 정렬됨.
+    In/Out 방향 판정은 투영 전 LineZone 교차 이벤트 기반이므로 영향 없음.
+
+  [CCTV 이름 기반 도로 매칭]
+    옆 도로 링크가 더 가깝게 조회되는 문제를 해결하기 위해
+    "[국도 1호선]" 형태의 이름을 파싱해 nodelink 매칭에 활용.
+    숫자(호선 번호) + 도로 종류 키워드 비교로 공백·표기 차이 허용.
+    일치 링크 없으면 거리 기준 폴백.
 
   [Tkinter forward reference]
     model_setup.py의 _on_cuda_toggle은 fps_labels를 참조하는데,

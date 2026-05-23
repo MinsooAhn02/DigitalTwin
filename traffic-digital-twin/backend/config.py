@@ -33,7 +33,8 @@ RUNTIME_PROFILE = _read_runtime_profile()
 
 # ITS OpenAPI
 ITS_API_KEY: str = os.getenv("ITS_API_KEY", "YOUR_API_KEY_HERE")
-ITS_BASE_URL: str = "https://openapi.its.go.kr:9443/cctvInfo"
+ITS_BASE_URL: str    = "https://openapi.its.go.kr:9443/cctvInfo"
+ITS_TRAFFIC_URL: str = "https://openapi.its.go.kr:9443/trafficInfo"
 
 ITS_CCTV_IDS: list[str] = [
     "C010101",
@@ -117,10 +118,10 @@ BOTTLENECK_DWELL_FRAMES: int = int(os.getenv("BOTTLENECK_DWELL_FRAMES", "150"))
 SPEED_JITTER_THRESHOLD_M: float = 0.5
 SPEED_SMOOTHING_ALPHA: float = 0.15
 MAX_REASONABLE_KPH: float = 120.0
-GC_GRACE_FRAMES: int = 30
+GC_GRACE_FRAMES: int = 90
 
 # 슬라이딩 윈도우 속도 계산에 사용할 이력 프레임 수
-SPEED_WINDOW_FRAMES: int = 8
+SPEED_WINDOW_FRAMES: int = 18
 
 PARKED_FRAMES_THRESHOLD: int = 300
 PARKED_POSITION_RADIUS_PX: float = 30.0

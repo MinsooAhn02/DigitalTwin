@@ -42,7 +42,9 @@ export default function App() {
   const [switching, setSwitching]         = useState(false);
   const [guideVisible, setGuideVisible]   = useState(true);
   const [calMode, setCalMode]             = useState(null);
+  const [isCalibrated, setIsCalibrated]   = useState(false);
   const [pendingGps, setPendingGps]       = useState(null);
+  const [snapNodes, setSnapNodes]         = useState([]);
   const [calibTabActive, setCalibTabActive] = useState(false);
   const [mapMode, setMapMode]             = useState("dark");
   const switchDebounceRef                 = useRef(null);
@@ -54,6 +56,15 @@ export default function App() {
       if (switchTimeoutRef.current) clearTimeout(switchTimeoutRef.current);
     }
   }, [cameraReady]);
+
+  // 카메라 선택 시 주변 노드링크 노드 fetch (캘리브레이션 GPS 스냅용)
+  useEffect(() => {
+    if (!selectedCctv?.lat || !selectedCctv?.lon) { setSnapNodes([]); return; }
+    fetch(`http://localhost:8000/nodelink/nodes?lat=${selectedCctv.lat}&lon=${selectedCctv.lon}&radius_km=0.3`)
+      .then((r) => r.json())
+      .then(({ nodes }) => setSnapNodes(nodes ?? []))
+      .catch(() => setSnapNodes([]));
+  }, [selectedCctv?.lat, selectedCctv?.lon]);
 
   // calibTabActive 켜질 때 zoom > 16이면 위성사진 없음 → 16으로 축소 + pitch 0
   useEffect(() => {
@@ -71,6 +82,15 @@ export default function App() {
   }, [calibTabActive]);
 
   useEffect(() => {
+    if (!cameraReadyInfo) return;
+    setIsCalibrated(cameraReadyInfo.calibrated ?? false);
+    const bearing = cameraReadyInfo.name_bearing ?? cameraReadyInfo.road_bearing ?? null;
+    if (bearing != null) {
+      setSelectedCctv((prev) => prev ? { ...prev, heading: bearing } : prev);
+    }
+  }, [cameraReadyInfo]);
+
+  useEffect(() => {
     if (!cameraReadyInfo?.camera_key || !selectedCctv) return;
     fetch(`http://localhost:8000/calibration/${cameraReadyInfo.camera_key}`)
       .then((r) => r.json())
@@ -85,12 +105,18 @@ export default function App() {
       .catch(() => {});
   }, [cameraReadyInfo]);
 
-  const activeData  = selectedCctv ? frameData : null;
-  const vehicles    = activeData?.vehicles      ?? [];
-  const inCount     = activeData?.in_count      ?? 0;
-  const outCount    = activeData?.out_count     ?? 0;
-  const vehicleCnt  = activeData?.vehicle_count ?? 0;
-  const classCounts = activeData?.class_counts ?? {};
+  const activeData   = selectedCctv ? frameData : null;
+  const vehicles     = activeData?.vehicles       ?? [];
+  const inCount      = activeData?.in_count       ?? 0;
+  const outCount     = activeData?.out_count      ?? 0;
+  const vehicleCnt   = activeData?.vehicle_count  ?? 0;
+  const classCounts  = activeData?.class_counts   ?? {};
+  const avgSpeed     = activeData?.avg_speed_kph  ?? 0;
+  const itsSpeed     = activeData?.its_speed_kph  ?? null;
+  const speedErrPct  = activeData?.speed_error_pct ?? null;
+  const roadName     = cameraReadyInfo?.road_name  ?? null;
+  const roadLanes    = cameraReadyInfo?.road_lanes  ?? null;
+  const roadMaxSpd   = cameraReadyInfo?.road_max_spd ?? null;
 
   useEffect(() => {
     if (activeData) dispatchTrail(vehicles);
@@ -117,7 +143,14 @@ export default function App() {
   const trailLayer = useTrailLayer(trailMap, vehicles);
 
   const handleMapClick = useCallback((info) => {
-    if (calMode !== "awaiting" || !info.coordinate) return;
+    if (calMode !== "awaiting") return;
+    // 스냅 노드 클릭 시 DB의 정확한 GPS 사용
+    if (info.object?.node_id) {
+      setPendingGps({ lat: info.object.lat, lon: info.object.lon });
+      setCalMode(null);
+      return;
+    }
+    if (!info.coordinate) return;
     const [lon, lat] = info.coordinate;
     setPendingGps({ lat, lon });
     setCalMode(null);
@@ -169,6 +202,7 @@ export default function App() {
           onViewStateChange={setViewState}
           onCctvClick={handleCctvClick}
           calibrationMode={calMode === "awaiting"}
+          snapNodes={calMode === "awaiting" ? snapNodes : []}
           onMapClick={handleMapClick}
           mapMode={calibTabActive && mapMode !== "satellite" ? "satellite" : mapMode}
           onMapModeChange={setMapMode}
@@ -225,6 +259,9 @@ export default function App() {
             {t("app.switching")}
           </div>
         )}
+
+        {/* CCTV 검색 */}
+        <CctvSearch cctvList={cctvList} onSelect={handleCctvClick} viewState={viewState} />
 
         {/* CCTV 새로고침 버튼 */}
         <div style={{ position: "absolute", bottom: 56, right: 16, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -314,12 +351,59 @@ export default function App() {
 
         <CounterPanel inCount={inCount} outCount={outCount} vehicleCount={vehicleCnt} />
 
+        {roadName && (
+          <Card label="도로 정보">
+            <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+              <div style={{ fontWeight: 600, color: "#e2e8f0", marginBottom: 4 }}>{roadName}</div>
+              <div style={{ display: "flex", gap: 16, color: "#94a3b8" }}>
+                {roadLanes != null && roadLanes > 0 && (
+                  <span>차로 <b style={{ color: "#e2e8f0" }}>{roadLanes}</b>개</span>
+                )}
+                {roadMaxSpd != null && roadMaxSpd > 0 && (
+                  <span>제한속도 <b style={{ color: "#fbbf24" }}>{roadMaxSpd}</b> km/h</span>
+                )}
+              </div>
+            </div>
+          </Card>
+        )}
+
+        {itsSpeed !== null && (
+          <Card label="ITS 구간속도 비교">
+            <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center", fontSize: 12 }}>
+              <div style={{ textAlign: "center" }}>
+                <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>측정 평균</div>
+                <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>
+                  {avgSpeed > 0 ? avgSpeed.toFixed(1) : "—"}
+                </div>
+                {avgSpeed > 0 && <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>}
+              </div>
+              <div style={{ color: "#374151", fontSize: 18 }}>vs</div>
+              <div style={{ textAlign: "center" }}>
+                <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>ITS 구간속도</div>
+                <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{itsSpeed.toFixed(1)}</div>
+                <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>
+              </div>
+              {speedErrPct !== null && avgSpeed > 0 && (
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>오차</div>
+                  <div style={{
+                    fontWeight: 700, fontSize: 16,
+                    color: Math.abs(speedErrPct) < 10 ? "#34d399" : Math.abs(speedErrPct) < 20 ? "#fbbf24" : "#f87171",
+                  }}>
+                    {speedErrPct > 0 ? "+" : ""}{speedErrPct.toFixed(1)}%
+                  </div>
+                </div>
+              )}
+            </div>
+          </Card>
+        )}
+
         <Card label={t("app.classDist")}>
           <ClassBarChart classCounts={classCounts} />
         </Card>
 
         <Card label={t("app.vehicleList")}>
-          <VehicleTable vehicles={vehicles} />
+          <VehicleTable vehicles={vehicles} calibrated={isCalibrated} />
         </Card>
       </aside>
     </div>
@@ -331,6 +415,108 @@ function Card({ children, label }) {
     <div style={{ background: "#1f2937", borderRadius: 12, padding: 16 }}>
       {label && <p style={{ margin: "0 0 8px", fontSize: 12, color: "#9ca3af" }}>{label}</p>}
       {children}
+    </div>
+  );
+}
+
+function CctvSearch({ cctvList, onSelect, viewState }) {
+  const [query,   setQuery]   = useState("");
+  const [open,    setOpen]    = useState(false);
+  const [sortBy,  setSortBy]  = useState("name"); // "name" | "dist"
+  const ref = useRef(null);
+
+  const distKm = (c) => {
+    if (!viewState || c.lat == null || c.lon == null) return Infinity;
+    const dlat = (c.lat - viewState.latitude) * 110.574;
+    const dlon = (c.lon - viewState.longitude) * 111.320 * Math.cos((viewState.latitude * Math.PI) / 180);
+    return Math.hypot(dlat, dlon);
+  };
+
+  const results = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const filtered = q
+      ? cctvList.filter((c) => (c.name || c.id).toLowerCase().includes(q))
+      : [...cctvList];
+    if (sortBy === "dist") return filtered.sort((a, b) => distKm(a) - distKm(b));
+    return filtered.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id, "ko"));
+  }, [query, cctvList, sortBy, viewState]);
+
+  useEffect(() => {
+    const close = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
+
+  const handleSelect = (c) => {
+    onSelect(c);
+    setQuery(c.name || c.id);
+    setOpen(false);
+  };
+
+  const btnStyle = (active) => ({
+    padding: "3px 8px", fontSize: 11, border: "none", borderRadius: 4, cursor: "pointer",
+    background: active ? "#3b82f6" : "#1f2937",
+    color: active ? "#fff" : "#9ca3af",
+  });
+
+  return (
+    <div ref={ref} style={{ position: "absolute", top: 12, right: 16, zIndex: 20, width: 260 }}>
+      <div style={{ position: "relative" }}>
+        <input
+          value={query}
+          onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={(e) => { if (e.key === "Escape") setOpen(false); }}
+          placeholder="CCTV 검색…"
+          style={{
+            width: "100%", boxSizing: "border-box",
+            background: "rgba(17,24,39,0.90)", border: "1px solid #374151",
+            borderRadius: 8, padding: "7px 34px 7px 12px",
+            fontSize: 13, color: "#f9fafb", backdropFilter: "blur(4px)", outline: "none",
+          }}
+        />
+        <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: "#6b7280", pointerEvents: "none" }}>🔍</span>
+      </div>
+
+      {open && results.length > 0 && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0,
+          background: "rgba(17,24,39,0.97)", border: "1px solid #374151",
+          borderRadius: 8, overflow: "hidden", backdropFilter: "blur(8px)",
+          boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+        }}>
+          <div style={{ display: "flex", gap: 4, padding: "6px 10px", borderBottom: "1px solid #1f2937", alignItems: "center" }}>
+            <span style={{ fontSize: 10, color: "#6b7280", marginRight: 4 }}>정렬</span>
+            <button style={btnStyle(sortBy === "name")} onClick={() => setSortBy("name")}>이름순</button>
+            <button style={btnStyle(sortBy === "dist")} onClick={() => setSortBy("dist")}>거리순</button>
+            <span style={{ marginLeft: "auto", fontSize: 10, color: "#4b5563" }}>{results.length}개</span>
+          </div>
+          <div style={{ maxHeight: 340, overflowY: "auto" }}>
+            {results.map((c) => {
+              const km = distKm(c);
+              const distLabel = km < Infinity ? (km < 1 ? `${(km * 1000).toFixed(0)}m` : `${km.toFixed(1)}km`) : null;
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => handleSelect(c)}
+                  style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    width: "100%", textAlign: "left",
+                    padding: "9px 14px", fontSize: 12, background: "none",
+                    border: "none", borderBottom: "1px solid #1f2937",
+                    color: "#f9fafb", cursor: "pointer",
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "#1f2937")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                >
+                  <span><span style={{ color: "#fbbf24", marginRight: 6 }}>📷</span>{c.name || c.id}</span>
+                  {distLabel && <span style={{ color: "#4b5563", fontSize: 10, flexShrink: 0, marginLeft: 6 }}>{distLabel}</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

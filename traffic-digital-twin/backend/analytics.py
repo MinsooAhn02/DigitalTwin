@@ -17,7 +17,6 @@ from config import (
     BOTTLENECK_DWELL_FRAMES,
     LOS_THRESHOLDS,
     SPEED_JITTER_THRESHOLD_M,
-    SPEED_SMOOTHING_ALPHA,
     MAX_REASONABLE_KPH,
     GC_GRACE_FRAMES,
     PARKED_FRAMES_THRESHOLD,
@@ -79,29 +78,31 @@ class TrafficAnalytics:
 
     def __init__(self):
         self._lock = threading.Lock()
+        self.speed_limit_kph: float = SPEED_LIMIT_KPH
+        self.road_bearing_deg: float | None = None  # 도로 진행 방향 (0=북, 시계방향)
+        self.cam_lat: float | None = None
+        self.cam_lon: float | None = None
         # track_id → (lat, lon, x_m, y_m, timestamp_s)
         self._prev: dict[int, tuple[float, float, float, float, float]] = {}
         self._dwell: dict[int, int] = defaultdict(int)
-        self._speed_ema: dict[int, float] = {}
         # GC grace period: 미감지 프레임 수 (GC_GRACE_FRAMES 이후 실제 삭제)
         self._lost_frames: dict[int, int] = {}
         # 주차 확정된 픽셀 위치 목록 — track_id 변경에도 유지
         self._parked_positions: list[tuple[float, float]] = []
-        # B: bbox 센터 EMA (픽셀) — 지터 완충
-        self._center_ema: dict[int, tuple[float, float]] = {}
         # C: 슬라이딩 윈도우 — (x_m, y_m, timestamp_s) 이력
         self._pos_window: dict[int, deque] = {}
+        # LineZone 교차 기반 per-vehicle direction
+        self._vehicle_direction: dict[int, str] = {}
 
     def reset(self) -> None:
         """카메라 전환 시 상태 초기화."""
         with self._lock:
             self._prev.clear()
             self._dwell.clear()
-            self._speed_ema.clear()
             self._lost_frames.clear()
             self._parked_positions.clear()
-            self._center_ema.clear()
             self._pos_window.clear()
+            self._vehicle_direction.clear()
 
     def update(
         self,
@@ -110,9 +111,14 @@ class TrafficAnalytics:
         vehicles: list[VehicleState],
         in_count: int,
         out_count: int,
+        crossed_in_ids: set[int] | None = None,
+        crossed_out_ids: set[int] | None = None,
     ) -> FrameAnalytics:
         with self._lock:
-            return self._update_locked(frame_id, timestamp_ms, vehicles, in_count, out_count)
+            return self._update_locked(
+                frame_id, timestamp_ms, vehicles, in_count, out_count,
+                crossed_in_ids or set(), crossed_out_ids or set(),
+            )
 
     def _update_locked(
         self,
@@ -121,9 +127,17 @@ class TrafficAnalytics:
         vehicles: list[VehicleState],
         in_count: int,
         out_count: int,
+        crossed_in_ids: set[int] = set(),
+        crossed_out_ids: set[int] = set(),
     ) -> FrameAnalytics:
         active = {v.track_id for v in vehicles}
         self._gc(active)
+
+        # LineZone 교차 이벤트로 direction 갱신 (교차 순간에만 업데이트)
+        for tid in crossed_in_ids:
+            self._vehicle_direction[tid] = "In"
+        for tid in crossed_out_ids:
+            self._vehicle_direction[tid] = "Out"
 
         current_ts = timestamp_ms / 1000.0
 
@@ -133,6 +147,12 @@ class TrafficAnalytics:
                 self._dwell[v.track_id] = PARKED_FRAMES_THRESHOLD
             self._speed(v, current_ts)
             self._dwell_update(v)
+            # 교차 기록이 있으면 direction 적용
+            if v.track_id in self._vehicle_direction:
+                v.direction = self._vehicle_direction[v.track_id]
+
+        # GPS 좌표를 도로 bearing 축에 투영 (지도 표시용)
+        self._project_to_road_axis(vehicles)
 
         # 통계·경보는 주차 차량 제외
         active_vehicles = [v for v in vehicles if not v.is_parked]
@@ -162,23 +182,31 @@ class TrafficAnalytics:
             for px, py in self._parked_positions
         )
 
+    @staticmethod
+    def _estimate_speed_kph(window: deque) -> float:
+        """최근 위치들의 선형 회귀 기울기로 지터에 덜 민감한 속도를 추정한다."""
+        t0 = window[0][2]
+        n = len(window)
+        sum_t = sum_x = sum_y = sum_t2 = sum_tx = sum_ty = 0.0
+        for x, y, ts in window:
+            t = ts - t0
+            sum_t += t; sum_x += x; sum_y += y
+            sum_t2 += t * t; sum_tx += t * x; sum_ty += t * y
+        mean_t = sum_t / n
+        denom = sum_t2 - n * mean_t * mean_t
+        if denom <= 1e-9:
+            return 0.0
+        vx = (sum_tx - n * mean_t * (sum_x / n)) / denom
+        vy = (sum_ty - n * mean_t * (sum_y / n)) / denom
+        return math.hypot(vx, vy) * 3.6
+
     def _speed(self, v: VehicleState, current_ts: float) -> None:
         if v.is_parked:
             return
 
         tid = v.track_id
 
-        # B: bbox 센터 EMA — 픽셀 지터를 스무딩한 뒤 x_m/y_m 재계산에 활용
-        cx, cy = v.center_px
-        if tid in self._center_ema:
-            ecx, ecy = self._center_ema[tid]
-            ecx = SPEED_SMOOTHING_ALPHA * cx + (1.0 - SPEED_SMOOTHING_ALPHA) * ecx
-            ecy = SPEED_SMOOTHING_ALPHA * cy + (1.0 - SPEED_SMOOTHING_ALPHA) * ecy
-        else:
-            ecx, ecy = cx, cy
-        self._center_ema[tid] = (ecx, ecy)
-
-        # C: 슬라이딩 윈도우에 현재 스무딩된 위치 추가
+        # C: 슬라이딩 윈도우에 현재 위치 추가
         if tid not in self._pos_window:
             self._pos_window[tid] = deque(maxlen=SPEED_WINDOW_FRAMES)
         self._pos_window[tid].append((v.x_m, v.y_m, current_ts))
@@ -187,7 +215,7 @@ class TrafficAnalytics:
         if len(window) < 2:
             return
 
-        # 윈도우 전체 구간 이동거리 / 시간으로 평균 속도 계산
+        # 윈도우 전체 변위가 너무 작으면 지터로 간주한다.
         oldest_x, oldest_y, oldest_ts = window[0]
         newest_x, newest_y, newest_ts = window[-1]
         dt = newest_ts - oldest_ts
@@ -197,26 +225,38 @@ class TrafficAnalytics:
         dist_m = math.hypot(newest_x - oldest_x, newest_y - oldest_y)
 
         if dist_m < SPEED_JITTER_THRESHOLD_M:
-            self._speed_ema[tid] = 0.0
             v.speed_kph = 0.0
             v.is_speeding = False
             return
 
-        raw_kph = dist_m / dt * 3.6
+        kph = self._estimate_speed_kph(window)
 
-        # 물리적으로 불가능한 속도는 노이즈 — 이번 프레임 스킵 (EMA 유지)
-        if raw_kph > MAX_REASONABLE_KPH:
-            prev_ema = self._speed_ema.get(tid, 0.0)
-            v.speed_kph = round(prev_ema, 1)
-            v.is_speeding = v.speed_kph > SPEED_LIMIT_KPH
+        # 물리적으로 불가능한 속도는 노이즈 — 이번 프레임 스킵
+        if kph > MAX_REASONABLE_KPH:
             return
 
-        prev_ema = self._speed_ema.get(tid, raw_kph)
-        smoothed = SPEED_SMOOTHING_ALPHA * raw_kph + (1.0 - SPEED_SMOOTHING_ALPHA) * prev_ema
-        self._speed_ema[tid] = smoothed
+        v.speed_kph = round(kph, 1)
+        v.is_speeding = v.speed_kph > self.speed_limit_kph
 
-        v.speed_kph = round(smoothed, 1)
-        v.is_speeding = v.speed_kph > SPEED_LIMIT_KPH
+    def _project_to_road_axis(self, vehicles: list[VehicleState]) -> None:
+        """차량 GPS를 도로 bearing 축에 투영 → 횡방향 흔들림 제거."""
+        if self.road_bearing_deg is None or not vehicles:
+            return
+        b = math.radians(self.road_bearing_deg)
+        sin_b, cos_b = math.sin(b), math.cos(b)
+
+        # 현재 프레임 차량 위치의 중심을 도로축 기준점으로 사용
+        ref_lat = sum(v.lat for v in vehicles) / len(vehicles)
+        ref_lon = sum(v.lon for v in vehicles) / len(vehicles)
+        R_lat = 110574.0
+        R_lon = 111320.0 * math.cos(math.radians(ref_lat))
+
+        for v in vehicles:
+            dx = (v.lon - ref_lon) * R_lon  # 동(East) 오프셋 (m)
+            dy = (v.lat - ref_lat) * R_lat  # 북(North) 오프셋 (m)
+            along = dx * sin_b + dy * cos_b  # 도로 방향 성분
+            v.lon = ref_lon + (along * sin_b) / R_lon
+            v.lat = ref_lat + (along * cos_b) / R_lat
 
     def _dwell_update(self, v: VehicleState) -> None:
         if v.is_parked:
@@ -263,9 +303,7 @@ class TrafficAnalytics:
             if self._lost_frames[tid] > GC_GRACE_FRAMES:
                 self._prev.pop(tid, None)
                 self._dwell.pop(tid, None)
-                self._speed_ema.pop(tid, None)
                 self._lost_frames.pop(tid, None)
-                self._center_ema.pop(tid, None)
                 self._pos_window.pop(tid, None)
         # 재등장한 track의 grace counter 초기화
         for tid in active:

@@ -6,6 +6,7 @@
 # ── Deep Learning / Vision ──────────────────────────────────────────
 ultralytics>=8.4.0          # YOLOv8 detection (8.4.41 검증)
 supervision>=0.27.0         # ByteTrack + annotators (0.27.0.post2 검증)
+boxmot==12.0.2              # ByteTrack / OcSort / BotSort / DeepOcSort trackers
 
 # ── Web Framework ────────────────────────────────────────────────────
 fastapi>=0.111.0            # (0.136.1 검증)
@@ -22,3 +23,4 @@ aiofiles>=23.2.1            # (25.1.0 검증)
 # ── Utilities ─────────────────────────────────────────────────────────
 python-dotenv>=1.0.0        # (1.2.2 검증)
 pydantic>=2.7.0             # (2.12.5 검증)
+cachetools>=5.0.0           # (7.1.4 검증)

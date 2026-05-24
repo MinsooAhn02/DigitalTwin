@@ -146,28 +146,59 @@ class PerspectiveTransformer:
             pixel_pts, gps_pts,
         )
 
-    def update_gps_center(self, center_lat: float, center_lon: float) -> None:
-        """카메라 GPS 중심점으로 GPS 단응행렬 재계산 (근사 캘리브레이션).
-        카메라 뷰가 약 ±0.0006° lat × ±0.0004° lon(약 130m × 70m) 범위 커버 가정.
+    def update_gps_center(self, center_lat: float, center_lon: float, bearing_deg: float = 0.0) -> None:
+        """카메라 GPS + bearing으로 근사 GPS 그리드 재계산.
+
+        보정 데이터 없을 때 fallback으로 사용.
+        bearing_deg 방향으로 그리드를 회전시켜 차량이 카메라 시야 방향에 맞게 배치됨.
+          near=15m ~ far=80m (along bearing), width=±25m (lateral)
         """
-        dlat, dlon = 0.0006, 0.0004
-        new_gps = np.float32([
-            [center_lat + dlat, center_lon - dlon],
-            [center_lat + dlat, center_lon + dlon],
-            [center_lat - dlat, center_lon + dlon],
-            [center_lat - dlat, center_lon - dlon],
+        R_lat = 110574.0
+        R_lon = 111320.0 * math.cos(math.radians(center_lat))
+        b = math.radians(bearing_deg)
+        sin_b, cos_b = math.sin(b), math.cos(b)
+
+        near_m, far_m, half_w = 15.0, 80.0, 25.0
+
+        # PIXEL_POINTS 순서: TL, TR, BR, BL
+        # top of frame = far (카메라에서 먼 쪽), bearing 방향
+        offsets = [
+            (-half_w, far_m),   # TL: left-far
+            ( half_w, far_m),   # TR: right-far
+            ( half_w, near_m),  # BR: right-near
+            (-half_w, near_m),  # BL: left-near
+        ]
+        new_gps = []
+        for lateral, along in offsets:
+            dlat = (along * cos_b - lateral * sin_b) / R_lat
+            dlon = (along * sin_b + lateral * cos_b) / R_lon
+            new_gps.append([center_lat + dlat, center_lon + dlon])
+
+        new_gps_arr = np.float32(new_gps)
+
+        # 사각형 PIXEL_POINTS → 사다리꼴로 교체: 원근 투영 보정 활성화
+        # 사각형-대-사각형 Homography는 선형 스케일로 퇴화하여 근거리 과속/원거리 저속 오차 발생.
+        # 사다리꼴(상단 좁음/하단 넓음)을 쓰면 findHomography가 투시 변환을 계산한다.
+        _pp = np.float32(PIXEL_POINTS)
+        w = float(_pp[:, 0].max())
+        h = float(_pp[:, 1].max())
+        # 상단(원거리): 프레임 폭의 50%  /  하단(근거리): 100%
+        fallback_src = np.float32([
+            [w * 0.25, 0.0],  # TL far-left
+            [w * 0.75, 0.0],  # TR far-right
+            [w,        h  ],  # BR near-right
+            [0.0,      h  ],  # BL near-left
         ])
-        src = np.float32(PIXEL_POINTS)
-        self._H_gps, _ = cv2.findHomography(src, new_gps)
-        dst_meter = self._gps_pts_to_local_meters(new_gps)
-        H_m, _ = cv2.findHomography(src, dst_meter)
+        self._H_gps, _ = cv2.findHomography(fallback_src, new_gps_arr)
+        dst_meter = self._gps_pts_to_local_meters(new_gps_arr)
+        H_m, _ = cv2.findHomography(fallback_src, dst_meter)
         if H_m is not None:
             self._H_meter = H_m
-        self._bearing_rad = math.radians(CAMERA_BEARING_DEG)
-        self._gps_center_lat = float(np.mean(new_gps[:, 0]))
-        self._gps_center_lon = float(np.mean(new_gps[:, 1]))
+        self._bearing_rad = 0.0  # 회전을 그리드에 반영했으므로 pixel_to_gps 내 추가 회전 불필요
+        self._gps_center_lat = center_lat
+        self._gps_center_lon = center_lon
         self._is_calibrated = False
-        logger.info("GPS 캘리브레이션 갱신: 중심 (%.4f, %.4f)", center_lat, center_lon)
+        logger.info("GPS 근사 캘리브레이션: 중심 (%.4f, %.4f) bearing=%.1f°", center_lat, center_lon, bearing_deg)
 
     def batch_pixel_to_meter(
         self, points: list[tuple[float, float]]

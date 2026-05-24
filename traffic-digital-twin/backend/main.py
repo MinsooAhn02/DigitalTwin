@@ -24,6 +24,7 @@ import math
 import re
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import cv2
 import httpx
@@ -38,6 +39,41 @@ from pydantic import BaseModel
 from analytics import TrafficAnalytics, VehicleState
 from transform import PerspectiveTransformer, CALIBRATION_PATH
 import roi_manager
+
+SPEED_SCALE_PATH = Path(__file__).resolve().parent / "speed_scale.json"
+
+
+def _load_speed_scale(cam_key: str) -> float:
+    """카메라별 저장된 속도 보정 계수 로드. 없으면 1.0."""
+    try:
+        if SPEED_SCALE_PATH.exists():
+            data = json.loads(SPEED_SCALE_PATH.read_text(encoding="utf-8"))
+            return float(data.get(cam_key, {}).get("speed_scale", 1.0))
+    except Exception:
+        pass
+    return 1.0
+
+
+def _save_speed_scale(cam_key: str, scale: float, converged: bool) -> None:
+    """속도 보정 계수를 camera_key별로 JSON에 저장."""
+    try:
+        data: dict = {}
+        if SPEED_SCALE_PATH.exists():
+            try:
+                data = json.loads(SPEED_SCALE_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        from datetime import datetime, timezone
+        data[cam_key] = {
+            "speed_scale": scale,
+            "converged": converged,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        SPEED_SCALE_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:
+        logger.warning("speed_scale 저장 실패: %s", exc)
 from nodelink import get_road_info
 from config import (
     CAPTURE_INTERVAL_MS,
@@ -108,11 +144,17 @@ _placeholder_jpeg: bytes = _make_placeholder()
 
 def _parse_traffic_items(resp_json: dict) -> list[dict]:
     """ITS 교통소통정보 API 응답에서 링크 목록 추출.
-    구조: response.body.items.item (cctvInfo의 response.data와 다름)"""
-    raw = resp_json.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-    if isinstance(raw, dict):
-        return [raw]
-    return raw if isinstance(raw, list) else []
+    JSON: {body: {items: [...]}}  — response 래퍼 없고 items가 직접 리스트
+    XML→JSON 변환본: {response: {body: {items: {item: [...]}}}} 도 호환 처리"""
+    body = resp_json.get("body") or resp_json.get("response", {}).get("body", {})
+    items = body.get("items", [])
+    if isinstance(items, list):
+        return items
+    # XML 스타일: items = {"item": [...]}
+    if isinstance(items, dict):
+        raw = items.get("item", [])
+        return [raw] if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+    return []
 
 
 async def _fetch_its_section_speed(lat: float, lon: float) -> float | None:
@@ -130,7 +172,9 @@ async def _fetch_its_section_speed(lat: float, lon: float) -> float | None:
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(ITS_TRAFFIC_URL, params=params)
             resp.raise_for_status()
-            items = _parse_traffic_items(resp.json())
+            raw_json = resp.json()
+        items = _parse_traffic_items(raw_json)
+        logger.debug("ITS trafficInfo items=%d  sample=%s", len(items), items[:2] if items else raw_json)
         speeds = [float(it["speed"]) for it in items
                   if it.get("speed") and float(it["speed"]) > 5]
         return round(sum(speeds) / len(speeds), 1) if speeds else None
@@ -147,6 +191,13 @@ async def _update_its_speed() -> None:
     if result is not None:
         _its_speed_kph = result
         logger.info("ITS 구간속도 갱신: %.1f kph", result)
+        new_scale = analytics.calibrate_from_its(result)
+        if new_scale is not None:
+            converged = analytics.speed_scale_converged
+            logger.info("속도 보정 계수 갱신: %.4f (수렴: %s, ITS %.1f kph)", new_scale, converged, result)
+            if _current_cam:
+                cam_key = roi_manager.camera_key(_current_cam.get("cctvurl", ""))
+                _save_speed_scale(cam_key, new_scale, converged)
 
 
 _NAME_BEARING: dict[str, float] = {
@@ -366,8 +417,10 @@ async def switch_camera(body: CameraSwitch):
         "name": body.name, "cctvurl": body.cctvurl,
     }
     _cam_version += 1
-    _transformer.update_gps_center(body.lat, body.lon)
     analytics.reset()
+    cam_key = roi_manager.camera_key(body.cctvurl)
+    analytics.speed_scale = _load_speed_scale(cam_key)
+    logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
 
     # live_loop 스트림 전환 큐잉
     if body.cctvurl:
@@ -394,11 +447,13 @@ async def switch_camera(body: CameraSwitch):
     # FOV 삼각형과 동일한 우선순위: name_bearing → road_bearing
     road_bearing = road["bearing_deg"] if road else None
     name_bearing = _parse_name_bearing(body.name, road_bearing)
-    analytics.road_bearing_deg = name_bearing if name_bearing is not None else road_bearing
+    effective_bearing = name_bearing if name_bearing is not None else road_bearing
+    analytics.road_bearing_deg = effective_bearing
     analytics.cam_lat = body.lat
     analytics.cam_lon = body.lon
+    _transformer.update_gps_center(body.lat, body.lon, bearing_deg=effective_bearing or 0.0)
 
-    logger.info("카메라 전환: %s (%.4f, %.4f)", body.name, body.lat, body.lon)
+    logger.info("카메라 전환: %s (%.4f, %.4f) bearing=%.1f°", body.name, body.lat, body.lon, effective_bearing or 0.0)
     return {"ok": True, "road": road}
 
 
@@ -720,7 +775,7 @@ async def delete_calibration(camera_key: str):
             pass
     # 현재 카메라면 GPS center 근사값으로 롤백
     if _current_cam and roi_manager.camera_key(_current_cam.get("cctvurl", "")) == camera_key:
-        _transformer.update_gps_center(_current_cam["lat"], _current_cam["lon"])
+        _transformer.update_gps_center(_current_cam["lat"], _current_cam["lon"], bearing_deg=analytics.road_bearing_deg or 0.0)
     return {"ok": True}
 
 
@@ -840,7 +895,9 @@ async def runtime_config():
 
 # ── ITS 속도 비교 주입 ────────────────────────────────────────────────
 def _inject_its_speed(payload: dict) -> dict:
-    """FrameAnalytics dict에 ITS 구간속도 및 오차율 추가."""
+    """FrameAnalytics dict에 ITS 구간속도 및 오차율, 보정 계수 추가."""
+    payload["speed_scale"] = round(analytics.speed_scale, 4)
+    payload["speed_scale_converged"] = analytics.speed_scale_converged
     if _its_speed_kph is None:
         return payload
     payload["its_speed_kph"] = _its_speed_kph
@@ -889,7 +946,7 @@ async def live_loop(detector, stream) -> None:
                 cam = _camera_queue.get_nowait()
             try:
                 await asyncio.to_thread(stream.switch_to, cam["url"])
-                _transformer.update_gps_center(cam["lat"], cam["lon"])
+                _transformer.update_gps_center(cam["lat"], cam["lon"], bearing_deg=analytics.road_bearing_deg or 0.0)
                 tracker = VehicleTracker()
                 analytics.reset()
                 skip_budget = 0
@@ -901,8 +958,12 @@ async def live_loop(detector, stream) -> None:
                 if det is not None:
                     det.set_roi(saved_roi)  # None이면 전체 프레임 탐지
 
-                # 저장된 calibration 자동 적용
+                # 저장된 speed_scale 복원
                 cam_key = roi_manager.camera_key(cam_url)
+                analytics.speed_scale = _load_speed_scale(cam_key)
+                logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
+
+                # 저장된 calibration 자동 적용
                 if CALIBRATION_PATH.exists():
                     try:
                         cal_data = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))

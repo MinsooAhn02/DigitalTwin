@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, asdict
 from collections import defaultdict, Counter, deque
 import math
 import threading
+import time
 
 from config import (
     SPEED_LIMIT_KPH,
@@ -93,6 +94,10 @@ class TrafficAnalytics:
         self._pos_window: dict[int, deque] = {}
         # LineZone 교차 기반 per-vehicle direction
         self._vehicle_direction: dict[int, str] = {}
+        # ITS 구간속도 비교 자동 보정
+        self.speed_scale: float = 1.0          # 보정 계수 (1.0 = 보정 없음)
+        self._speed_samples: deque = deque(maxlen=600)  # (avg_kph, monotonic_time), 5분 분량
+        self._stable_count: int = 0            # 연속 안정 갱신 횟수 (>= 3 이면 수렴 간주)
 
     def reset(self) -> None:
         """카메라 전환 시 상태 초기화."""
@@ -103,6 +108,9 @@ class TrafficAnalytics:
             self._parked_positions.clear()
             self._pos_window.clear()
             self._vehicle_direction.clear()
+            self._speed_samples.clear()
+            self._stable_count = 0
+            # speed_scale은 reset하지 않음 — main.py에서 저장된 값을 복원함
 
     def update(
         self,
@@ -172,6 +180,10 @@ class TrafficAnalytics:
         for v in vehicles:
             self._prev[v.track_id] = (v.lat, v.lon, v.x_m, v.y_m, current_ts)
 
+        # ITS 보정용 속도 샘플 수집 (이동 차량만, 보정 계수 적용된 값)
+        if result.avg_speed_kph > 0:
+            self._speed_samples.append((result.avg_speed_kph, time.monotonic()))
+
         return result
 
     # ──────────────────────────────────────────────────────────────────
@@ -206,10 +218,30 @@ class TrafficAnalytics:
 
         tid = v.track_id
 
-        # C: 슬라이딩 윈도우에 현재 위치 추가
         if tid not in self._pos_window:
             self._pos_window[tid] = deque(maxlen=SPEED_WINDOW_FRAMES)
-        self._pos_window[tid].append((v.x_m, v.y_m, current_ts))
+        win = self._pos_window[tid]
+
+        # Physics-based jump detection:
+        # If the vehicle appears to have teleported (position moved faster than MAX_REASONABLE_KPH
+        # allows, or the last entry is > 2 s old), the window is corrupted — flush it.
+        # Causes: wrong _find_lost match, OcSort Kalman divergence, YOLO bbox spike.
+        # Without this, a single bad entry anywhere in the 18-point OLS window inflates speed.
+        if win:
+            last_x, last_y, last_ts = win[-1]
+            dt = current_ts - last_ts
+            if dt > 2.0:
+                win.clear()
+            elif dt > 0:
+                dist_m = math.hypot(v.x_m - last_x, v.y_m - last_y)
+                # 점프 임계값은 raw 미터 기준 → speed_scale로 나눠 실제 m/s 한계로 변환
+                raw_max_mps = (MAX_REASONABLE_KPH / 3.6) / max(self.speed_scale, 0.1)
+                if dist_m > raw_max_mps * dt * 1.5:
+                    win.clear()
+
+        # 비탐지 프레임의 중복 위치는 추가 생략 — 속도 과소추정 방지
+        if not (win and abs(v.x_m - win[-1][0]) < 1e-6 and abs(v.y_m - win[-1][1]) < 1e-6):
+            win.append((v.x_m, v.y_m, current_ts))
 
         window = self._pos_window[tid]
         if len(window) < 2:
@@ -231,11 +263,11 @@ class TrafficAnalytics:
 
         kph = self._estimate_speed_kph(window)
 
-        # 물리적으로 불가능한 속도는 노이즈 — 이번 프레임 스킵
-        if kph > MAX_REASONABLE_KPH:
+        # 보정 계수 적용 후 물리적으로 불가능한 속도는 노이즈 — 이번 프레임 스킵
+        if kph * self.speed_scale > MAX_REASONABLE_KPH:
             return
 
-        v.speed_kph = round(kph, 1)
+        v.speed_kph = round(kph * self.speed_scale, 1)
         v.is_speeding = v.speed_kph > self.speed_limit_kph
 
     def _project_to_road_axis(self, vehicles: list[VehicleState]) -> None:
@@ -294,6 +326,48 @@ class TrafficAnalytics:
     @staticmethod
     def _class_counts(vehicles: list[VehicleState]) -> dict[str, int]:
         return dict(Counter(v.class_name for v in vehicles))
+
+    @property
+    def speed_scale_converged(self) -> bool:
+        """True이면 보정 계수가 수렴해 학습률이 크게 낮아진 상태."""
+        return self._stable_count >= 3
+
+    def calibrate_from_its(self, its_speed_kph: float, window_s: float = 300.0) -> float | None:
+        """ITS 구간속도(its_speed_kph)와 같은 윈도우 내 측정 평균을 비교해 speed_scale 자동 보정.
+
+        반환: 갱신된 speed_scale (샘플 부족 시 None)
+
+        동작 원리:
+          _speed_samples에는 보정 계수가 이미 적용된 avg_speed_kph가 담겨 있다.
+          our_avg = 최근 window_s 초 샘플 평균  (= raw_avg × 현재 speed_scale)
+          new_scale = speed_scale × (ITS / our_avg) = ITS / raw_avg
+          미수렴 시 α=0.7(빠른 학습), 수렴 후 α=0.95(거의 고정).
+        """
+        with self._lock:
+            now = time.monotonic()
+            recent = [s for s, t in self._speed_samples if now - t <= window_s]
+            if len(recent) < 30:
+                return None
+            our_avg = sum(recent) / len(recent)
+            if our_avg < 3.0:
+                return None
+
+            old_scale = self.speed_scale
+            target = old_scale * its_speed_kph / our_avg
+            target = max(0.3, min(5.0, target))
+
+            # 수렴 여부에 따라 학습률 조정
+            alpha = 0.95 if self.speed_scale_converged else 0.7
+            self.speed_scale = round(old_scale * alpha + target * (1 - alpha), 4)
+
+            # 변화율 1% 미만 → 안정, 그 이상 → 안정 카운트 리셋
+            change_ratio = abs(self.speed_scale - old_scale) / max(old_scale, 0.01)
+            if change_ratio < 0.01:
+                self._stable_count += 1
+            else:
+                self._stable_count = 0
+
+            return self.speed_scale
 
     def _gc(self, active: set[int]) -> None:
         # 재등장 시 연속성 유지: grace period 동안 _prev/_speed_ema 보존

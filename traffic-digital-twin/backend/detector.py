@@ -52,6 +52,10 @@ logger = logging.getLogger(__name__)
 BACKEND_DIR = Path(__file__).resolve().parent
 VARIANT_PRIORITY = ("x", "l", "m", "s", "n")
 
+# YOLO가 연속으로 빈 결과를 반환할 때 이전 트랙을 유지하는 최대 detect 프레임 수
+# detect 2회 연속 miss = 최대 6프레임(~0.2초) 공백 방지
+_YOLO_MISS_GRACE: int = 2
+
 # ── Tracker tier config ────────────────────────────────────────────────────
 _TRACKER_CONFIGS: dict[str, dict] = {
     "cpu":    {"name": "ByteTrack",  "cls": "ByteTrack",   "reid": None},
@@ -371,24 +375,45 @@ class IDStabilizer:
             for i in range(len(dets))
         ]
 
-        stable_ids: list[int] = []
-        used_lost: set[int] = set()
+        stable_ids: list[int | None] = [None] * len(raw_ids)
+        # used_stable tracks all stable_ids assigned this frame (across both passes)
+        used_stable: set[int] = set()
 
-        for raw_id, (cx, cy) in zip(raw_ids, centers):
+        # Pass 1: existing remap tracks claim their stable_ids first.
+        # This prevents new tracks from stealing a stable_id via _find_lost
+        # before the owner track has a chance to reclaim it.
+        for i, (raw_id, _) in enumerate(zip(raw_ids, centers)):
             if raw_id in self._remap:
                 stable = self._remap[raw_id]
-                self._lost.pop(stable, None)  # 재등장 → lost에서 제거
-            else:
-                stable = self._find_lost(cx, cy, used_lost)
-                if stable is not None:
-                    used_lost.add(stable)
+                if stable not in used_stable:
                     self._lost.pop(stable, None)
-                    self._remap[raw_id] = stable
+                    stable_ids[i] = stable
+                    used_stable.add(stable)
                 else:
-                    self._remap[raw_id] = raw_id
-                    stable = raw_id
-                    self._lost.pop(stable, None)
-            stable_ids.append(stable)
+                    # Two raw_ids point to the same stable_id — stale mapping.
+                    # Remove it so Pass 2 can re-assign cleanly.
+                    del self._remap[raw_id]
+
+        # Pass 2: new tracks (and tracks whose Pass 1 mapping was stale/duplicate)
+        for i, (raw_id, (cx, cy)) in enumerate(zip(raw_ids, centers)):
+            if stable_ids[i] is not None:
+                continue
+            stable = self._find_lost(cx, cy, used_stable)
+            if stable is not None:
+                used_stable.add(stable)
+                self._lost.pop(stable, None)
+                # Purge all stale remap entries pointing to this stable_id.
+                # Without this, _remap accumulates dozens of old raw_id→stable_id
+                # mappings across frames; when the tracker reuses those raw_ids
+                # simultaneously, all map to the same display_id → 30+ duplicate rows.
+                self._remap = {r: s for r, s in self._remap.items() if s != stable}
+                self._remap[raw_id] = stable
+            else:
+                self._remap[raw_id] = raw_id
+                stable = raw_id
+                self._lost.pop(stable, None)
+                used_stable.add(stable)
+            stable_ids[i] = stable
 
         self._age_lost()
         self._prev_centers = dict(zip(stable_ids, centers))
@@ -483,6 +508,9 @@ class VehicleDetector:
             max_dist_px=80.0,
         )
 
+        # YOLO 연속 빈-탐지 카운터 (detect 프레임 기준)
+        self._yolo_miss_streak: int = 0
+
         logger.info(
             "YOLO: %s  backend=%s  device=%s | Tracker: %s (tier=%s)",
             selection.path.name, selection.backend, self._inference_device,
@@ -543,12 +571,22 @@ class VehicleDetector:
             logger.debug("YOLO raw: %d dets, backend=%s", len(dets), self._backend)
             dets = self._apply_roi(dets, frame)
             logger.debug("After ROI: %d dets", len(dets))
+            if len(dets) == 0:
+                self._yolo_miss_streak += 1
+                # Grace 기간: tracker.update() 자체를 건너뜀.
+                # update(empty)를 호출하면 ByteTrack/OcSort가 기존 트랙을 'lost' 처리하고
+                # 다음 real detect 때 새 raw ID를 부여 → IDStabilizer 오매칭 → 중복 ID 발생.
+                # tracker state를 보존해야 real detect 때 동일 raw ID로 재매칭 가능.
+                if self._yolo_miss_streak <= _YOLO_MISS_GRACE and len(self._last_tracks) > 0:
+                    return self._last_tracks
+            else:
+                self._yolo_miss_streak = 0
             self._last_dets_np = _sv_to_boxmot(dets)
             tracker_input = self._last_dets_np
             if len(tracker_input) > 0:
                 logger.debug("Tracker input[0]: %s", tracker_input[0])
 
-        # 2. boxmot tracker update (항상 실행 — Kalman 예측 유지)
+        # 2. boxmot tracker update
         try:
             tracks = self._tracker.update(tracker_input, frame)
             logger.debug(
@@ -562,7 +600,7 @@ class VehicleDetector:
 
         result = _boxmot_to_sv(tracks)
 
-        # boxmot 12.x: 비탐지 프레임에서 (0,) 반환 시 마지막 결과 유지
+        # 비탐지 프레임에서 tracker가 빈 결과 반환 시 마지막 결과 유지
         if len(result) == 0 and not should_detect:
             return self._last_tracks
 
@@ -578,6 +616,7 @@ class VehicleDetector:
         self._last_tracks = sv.Detections.empty()
         self._last_dets_np = np.empty((0, 6))
         self._track_frame_count = 0
+        self._yolo_miss_streak = 0
         self._id_stabilizer.reset()
         try:
             self._tracker.reset()

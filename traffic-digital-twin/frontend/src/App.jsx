@@ -114,6 +114,8 @@ export default function App() {
   const avgSpeed     = activeData?.avg_speed_kph  ?? 0;
   const itsSpeed     = activeData?.its_speed_kph  ?? null;
   const speedErrPct  = activeData?.speed_error_pct ?? null;
+  const speedScale     = activeData?.speed_scale           ?? 1.0;
+  const scaleConverged = activeData?.speed_scale_converged ?? false;
   const roadName     = cameraReadyInfo?.road_name  ?? null;
   const roadLanes    = cameraReadyInfo?.road_lanes  ?? null;
   const roadMaxSpd   = cameraReadyInfo?.road_max_spd ?? null;
@@ -395,6 +397,20 @@ export default function App() {
                 </div>
               )}
             </div>
+            <div style={{ marginTop: 6, textAlign: "center", fontSize: 10, color: "#4b5563" }}>
+              보정 계수&nbsp;
+              <span style={{
+                color: scaleConverged ? "#34d399" : Math.abs(speedScale - 1) < 0.05 ? "#94a3b8" : "#fbbf24",
+                fontWeight: 700,
+              }}>
+                ×{speedScale.toFixed(3)}
+              </span>
+              &nbsp;
+              {scaleConverged
+                ? <span style={{ color: "#34d399" }}>✓ 수렴 (저장됨)</span>
+                : <span style={{ color: "#6b7280" }}>학습 중…</span>
+              }
+            </div>
           </Card>
         )}
 
@@ -460,7 +476,7 @@ function CctvSearch({ cctvList, onSelect, viewState }) {
   });
 
   return (
-    <div ref={ref} style={{ position: "absolute", top: 12, right: 16, zIndex: 20, width: 260 }}>
+    <div ref={ref} style={{ position: "absolute", top: 12, right: 60, zIndex: 20, width: 260 }}>
       <div style={{ position: "relative" }}>
         <input
           value={query}

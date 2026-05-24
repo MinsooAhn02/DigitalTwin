@@ -1,6 +1,6 @@
 ================================================================
   Traffic Digital Twin — 시스템 설명서
-  최종 업데이트: 2026-05-24
+  최종 업데이트: 2026-05-24 (IDStabilizer 수정, 속도 자동보정 추가)
 ================================================================
 
 이 문서는 프로젝트를 처음 접하는 사람도 전체 구조와 동작 방식을
@@ -133,6 +133,7 @@ DigitalTwin/
     │   ├── .runtime_profile.json  선택된 성능 프로파일 캐시
     │   ├── roi_config.json      카메라별 ROI 폴리곤 저장소
     │   ├── calibration_data.json  카메라 보정 데이터 저장소
+    │   ├── speed_scale.json       카메라별 속도 보정 계수 저장소 (자동생성)
     │   └── yolov8n.pt / .engine   YOLO 모델
     └── frontend/
         ├── vite.config.js
@@ -210,11 +211,31 @@ DigitalTwin/
     BoxMOT이 잠깐 놓친 차량에 새 ID를 부여할 때 이전 ID로 복원.
     동작 원리:
       - 매 프레임 이전 활성 트랙을 _lost 딕셔너리로 이동 (매칭 루프 전)
-      - 새 raw_id 등장 시 _lost 중 중심 거리 150px 이내 트랙 탐색
+      - 새 raw_id 등장 시 _lost 중 중심 거리 80px 이내 트랙 탐색
       - 찾으면: remap[raw_id] = old_stable_id → 이전 ID 복원
       - 90프레임(3초) 이상 미등장 시 lost 항목 삭제
-    핵심 설계: prev_centers를 루프 전에 lost로 이동해야
-    같은 프레임에서 사라진 트랙을 즉시 매칭 가능 (루프 후 이동 시 타이밍 버그)
+
+    2-패스 처리 (중복 ID 방지):
+      Pass 1: _remap에 이미 등재된 기존 트랙이 먼저 stable_id를 확보
+      Pass 2: 신규 트랙만 _find_lost()로 매칭 시도
+      → 새 raw_id가 먼저 처리되어 기존 트랙의 stable_id를 선점하는
+        순서 의존 버그(30+ 중복 행) 원천 차단
+
+    stale remap 정리:
+      _find_lost() 성공 시 동일 stable_id를 가리키는 _remap 내
+      모든 기존 항목을 즉시 제거. 이를 생략하면 트래커가 반복
+      ID 재탄생할 때마다 _remap에 동일 stable_id 가리키는 항목이
+      누적되어, 해당 프레임에 여러 raw_id가 동시 반환될 때
+      30+ 중복 display_id 발생.
+
+    YOLO grace period (YOLO 탐지 누락 시 tracker.update() 건너뜀):
+      YOLO_DETECT_INTERVAL=3 환경에서 탐지 결과가 빈 배열일 때
+      tracker.update(empty)를 호출하면 ByteTrack/OcSort가 모든 트랙을
+      'lost' 처리 → 다음 실제 탐지 시 새 raw_id 부여 → IDStabilizer
+      오매칭 → 중복 ID 폭발.
+      대응: 연속 2회(_YOLO_MISS_GRACE) 이내 빈 탐지 시 tracker.update
+            자체를 건너뛰고 _last_tracks 반환 → tracker 내부 상태 보존
+            → 재탐지 시 동일 raw_id 유지 가능.
 
   VideoStream
     - switch_to(url): OpenCV(FFmpeg 백엔드)로 HLS 스트림 전환
@@ -257,22 +278,26 @@ DigitalTwin/
     speed_limit_kph   과속 기준 — nodelink DB max_spd 우선, 없으면 config 기본값
     road_bearing_deg  도로 진행 방향 (name_bearing ?? road_bearing)
     cam_lat / cam_lon 카메라 GPS
+    speed_scale       ITS 비교 자동 보정 계수 (1.0 = 보정 없음, 카메라별 저장)
 
   처리 순서:
     1. _gc(active): 미감지 트랙 정리 (90프레임 grace period 후 삭제)
     2. LineZone 교차 이벤트(crossed_in_ids, crossed_out_ids)로 direction 갱신
     3. _is_near_parked(): 등록된 주차 위치 30px 이내 → 즉시 is_parked
-    4. _speed(): 선형 회귀 기반 속도 계산
-       - 슬라이딩 윈도우(maxlen=18): (x_m, y_m, timestamp) 이력 유지
-       - 윈도우 전체 변위 < 0.5m → speed=0 (지터 제거)
-       - 선형 회귀(OLS)로 vx·vy 추정 → sqrt(vx²+vy²)×3.6 = kph
-       - kph > MAX_REASONABLE_KPH → 이상치 스킵
-       - is_speeding = speed_kph > self.speed_limit_kph (도로 제한속도 기준)
+    4. _speed(): 선형 회귀 기반 속도 계산 (아래 상세 참조)
     5. _dwell_update(): 정지 프레임 누적 → 병목/주차 판정
     6. _project_to_road_axis(): 차량 GPS를 도로 bearing 축에 투영
        - 현재 프레임 차량들의 평균 위치를 기준점으로 사용
        - 횡방향(도로 수직) 흔들림 제거 → 지도 위 차량이 도로선 위에 정렬
     7. 주차 차량 제외 후 통계 집계 (avg_speed, LOS, class_counts)
+    8. avg_speed_kph > 0이면 _speed_samples에 기록 (ITS 비교용 5분 이력)
+
+  calibrate_from_its(its_speed_kph):
+    ITS 구간속도와 최근 5분 측정 평균을 비교해 speed_scale을 자동 갱신.
+      our_avg = 최근 300초 _speed_samples 평균
+      target  = speed_scale × (ITS / our_avg) = ITS / raw_avg
+      EMA 갱신: 미수렴 시 α=0.7(빠른 학습), 수렴 후 α=0.95(거의 고정)
+      수렴 판정: 연속 3회 변화율 < 1% → speed_scale_converged = True
 
   * 과속 기준: 카메라 전환 시 nodelink DB에서 해당 도로 max_spd 자동 적용.
     DB 없거나 정보 없으면 config.SPEED_LIMIT_KPH(기본 120) 사용.
@@ -347,6 +372,7 @@ DigitalTwin/
                             → analytics.speed_limit_kph = 도로 max_spd (또는 기본값)
                             → analytics.road_bearing_deg = name_bearing ?? road_bearing
                             → detector.reset_tracker(), analytics.reset()
+                            → speed_scale.json에서 카메라별 보정 계수 복원
                             → "camera_ready" WS 신호 발송
                               (road_name, road_lanes, road_max_spd, road_bearing,
                                name_bearing 포함)
@@ -369,8 +395,17 @@ DigitalTwin/
     WS /ws/detect   JPEG 수신 → 추론 → 어노테이션 JPEG 반환
 
   백그라운드:
-    live_loop       OpenCV로 HLS 스트림 읽기 → 탐지 → 브로드캐스트
+    live_loop         OpenCV로 HLS 스트림 읽기 → 탐지 → 브로드캐스트
+                      카메라 전환 시 speed_scale.json에서 보정 계수 자동 복원
     hls_refresh_loop  30분마다 ITS API 재호출 → URL 갱신
+    _its_speed_poll_loop  5분마다 ITS 구간속도 조회 → analytics.calibrate_from_its()
+                          보정 계수 갱신 후 speed_scale.json 자동 저장
+
+  WS 브로드캐스트 페이로드 추가 필드:
+    speed_scale           현재 보정 계수 (1.0 = 미보정)
+    speed_scale_converged 수렴 여부 (True = 학습 거의 완료, 저장됨)
+    its_speed_kph         최근 ITS 구간속도 (없으면 생략)
+    speed_error_pct       측정 평균 대비 ITS 오차율 (%)
 
 
 ================================================================
@@ -562,36 +597,47 @@ DigitalTwin/
 
 
 [ 속도 계산 로직 ]
-  속도 불안정의 3가지 원인을 각각 차단하는 구조로 설계됨.
+  4단계 방어 구조로 순간 속도 폭등(스파이크)을 차단.
 
-  원인 1 — Track ID 재탄생:
-    YOLO 탐지 누락·가림 시 BoxMOT이 새 track_id를 부여 → 위치 이력 없음
-    → 재탄생 직후 프레임에서 dt가 매우 짧거나 이전 위치 오차가 커 속도 폭등.
-    대응: GC_GRACE_FRAMES=30 (약 1초) 동안 미감지 track_id의 이력·EMA 보존.
-          차량이 잠깐 가려져도 동일 ID로 복귀 가능성 대폭 증가.
+  ─── 단계 1: 중복 위치 스킵 ───
+    YOLO_DETECT_INTERVAL=3으로 매 3프레임 중 1회만 YOLO 실행.
+    비탐지 프레임은 _last_tracks(직전 결과)를 그대로 반환 → 같은 x_m, y_m.
+    동일 위치는 _pos_window에 추가하지 않음 (Fix A).
+    효과: 윈도우에는 YOLO 실제 탐지 시점 데이터만 누적 (~10fps).
+          비탐지 프레임이 동일 좌표를 18번 채워 속도를 0으로 만드는 문제 방지.
 
-  원인 2 — YOLO bbox 픽셀 지터:
-    동일 차량이라도 bbox 중심이 매 프레임 10~20px씩 불규칙 이동.
-    640px = 20m 스케일에서 0.3~0.6m/frame → 30fps 기준 40~70 km/h 유령 속도.
-    대응: center_px를 EMA(α=0.15)로 먼저 스무딩 (bbox 센터 EMA).
+  ─── 단계 2: 물리 기반 점프 감지 ───
+    새 위치를 _pos_window에 추가하기 전, 직전 항목과의 변위를 검사.
+      dt > 2.0초     → 이력이 너무 오래됨, 윈도우 초기화
+      dist_m > (MAX_REASONABLE_KPH/3.6/speed_scale) × dt × 1.5
+                     → 텔레포트(잘못된 ID 매칭, OcSort Kalman 이탈), 윈도우 초기화
+    초기화 후 속도=0, 다음 2프레임 동안 윈도우 재구축.
+    효과: IDStabilizer 오매칭, bbox 바닥 좌표 큰 변동 등으로 발생하는
+          100 km/h 스파이크를 윈도우에 들어오기 전에 차단.
 
-  원인 3 — 1프레임 차이 속도 계산:
-    N→N+1 프레임 이동거리만으로 속도 계산 시 순간 bbox 튐이 그대로 반영.
-    대응: 슬라이딩 윈도우(8프레임) — 가장 오래된 위치~현재 위치 총 이동거리 /
-          총 경과 시간으로 평균 속도 산출. 단발 튐이 8배 희석됨.
+  ─── 단계 3: OLS 회귀 속도 추정 ───
+    슬라이딩 윈도우(maxlen=18): (x_m, y_m, timestamp) 이력 유지.
+    윈도우 전체 변위 < SPEED_JITTER_THRESHOLD_M(0.5m) → speed=0 (지터 제거).
+    x(t), y(t) 각각에 대해 최소제곱법(OLS)으로 기울기(속도 성분) 추정.
+      vx = d(x)/dt,  vy = d(y)/dt  (m/s)
+      kph = sqrt(vx² + vy²) × 3.6
+    kph × speed_scale > MAX_REASONABLE_KPH(120) → 이상치 스킵 (이번 프레임 유지).
+    OLS 회귀는 단순 (newest - oldest)/dt 대비 내부 이상값에 강인함.
 
-  계산 순서:
-    1. main.py에서 bbox 바닥 중심(gx=cx, gy=xyxy[3])으로 호모그래피 변환
-       → (x_m, y_m) 획득 (도로 평면 기준 정확한 실세계 좌표)
-    2. center_px EMA 스무딩 (α=0.15) — bbox 픽셀 지터 흡수
-    3. (x_m, y_m, timestamp) 을 슬라이딩 윈도우(maxlen=8)에 push
-    4. 윈도우[0] → 윈도우[-1] 누적 dist_m / dt → raw_kph
-    5. dist_m < 0.5m → speed=0 (지터 제거)
-    6. raw_kph > 120 → 이상치 스킵, 이전 EMA 유지
-    7. EMA: speed = 0.15 × raw + 0.85 × prev_ema (최종 평활화)
+  ─── 단계 4: ITS 구간속도 자동 보정 (speed_scale) ───
+    보정 후에도 호모그래피 스케일 오차로 ±50% 오차가 남을 수 있음.
+    ITS API 5분 구간속도와 같은 기간 측정 평균을 비교해 speed_scale 학습.
+      target = speed_scale × (ITS속도 / 측정평균)
+      수렴 전: EMA α=0.7 (빠른 학습), 수렴 후: α=0.95 (거의 고정)
+      수렴 판정: 연속 3회 변화율 < 1%
+    수렴된 계수는 speed_scale.json에 카메라별 저장 → 재시작 후 즉시 복원.
 
-  GC grace period: track_id가 30프레임 이상 미감지 시에만 삭제
-  → 1초 이내 재감지 시 이전 위치/속도/윈도우 이력 연속성 유지
+  ─── 최종 출력 ───
+    v.speed_kph = round(kph × speed_scale, 1)
+    v.is_speeding = v.speed_kph > speed_limit_kph
+
+  GC grace period: track_id가 GC_GRACE_FRAMES(90) 이상 미감지 시에만 삭제.
+  3초 이내 재감지 시 이전 _pos_window 이력 연속성 유지.
 
 
 [ 주차 차량 감지 ]
@@ -673,20 +719,57 @@ DigitalTwin/
     4점 호모그래피는 캘리브레이션 사각형 내부에서만 정확.
     프레임 상단(카메라에서 먼 차량)은 외삽(extrapolation) 구간으로
     GPS 좌표 오차가 누적되어 속도가 실제보다 낮게 측정되는 경향이 있음.
+    캘리브레이션 후에도 체계적 ±50% 오차가 남을 수 있음.
 
     완화 전략:
       1. update_from_calibration()이 _H_gps와 _H_meter를 함께 갱신
          (두 행렬 일관성 확보, GPS 기반 haversine 거리 정확도 향상)
-      2. 슬라이딩 윈도우(8프레임) 평균 속도 + EMA(α=0.15) 이중 평활화
-         — 단발 오차 희석 + 낮은 속도값 잔류 시간 단축
-      3. 캘리브레이션 포인트를 가까운 2점 + 먼 2점으로 배치하면
+      2. 캘리브레이션 미수행 fallback: 사다리꼴 소스(상단 50% 폭 / 하단 100% 폭)로
+         findHomography 입력 → 원근 변환 효과 부여 (Fix B)
+         직사각형→직사각형은 선형 스케일로 퇴화해 근거리 과속/원거리 저속 발생
+      3. OLS 회귀(18프레임) — 단발 오차 희석
+      4. ITS 구간속도 자동 보정(speed_scale) — 체계적 스케일 오차 장기 보정
+         5분마다 ITS와 비교, 수렴 후 카메라별 JSON 저장 → 재시작 후 즉시 복원
+      5. 캘리브레이션 포인트를 가까운 2점 + 먼 2점으로 배치하면
          호모그래피가 depth range를 더 잘 커버하여 오차 감소
+
+  [중복 차량 ID 문제 — IDStabilizer _remap 누적]
+    OcSort/ByteTrack이 탐지 공백 후 동일 차량에 새 raw_id를 부여할 때,
+    IDStabilizer._find_lost()가 매칭에 성공해 _remap[new_raw_id] = stable_id를
+    추가하면서 기존 _remap[old_raw_id] = stable_id를 제거하지 않으면,
+    _remap에 같은 stable_id를 가리키는 항목이 프레임마다 축적됨.
+    이후 트래커가 해당 raw_id들을 동시에 반환하는 순간 동일 display_id를 가진
+    30+ 행이 한꺼번에 출력됨.
+    해결: _find_lost() 성공 시 `_remap = {r:s for r,s in _remap.items() if s != stable}`
+    로 stale 항목 일괄 제거 + 2-패스(기존 트랙 우선) 처리.
+
+  [속도 스파이크 — OLS 창 내 이상값]
+    OLS 회귀는 18개 샘플 중 1개만 이상값(텔레포트)이어도 기울기가 크게 왜곡.
+    MAX_REASONABLE_KPH(120) 필터는 결과값 > 120만 차단해 100 km/h 허위값 통과.
+    해결: _pos_window에 추가 전 물리 한계 검사.
+          dist_m > (MAX_REASONABLE_KPH/3.6/speed_scale) × dt × 1.5 이면 창 초기화.
+          IDStabilizer 오매칭, Kalman 이탈 등 모든 원인의 텔레포트를 일괄 차단.
 
   [OcSort + YOLO_DETECT_INTERVAL 충돌]
     OcSort 기본 min_hits=3: 동일 차량을 3연속 프레임에서 탐지해야 트랙 확정.
     YOLO_DETECT_INTERVAL=3이면 2프레임은 빈 배열 전달 → 트랙이 확정 전 계속 삭제.
     해결: OcSort(min_hits=1, max_age=BYTE_TRACK_BUFFER)로 초기화.
     ByteTrack도 동일 문제 → _patched_activate로 is_activated 즉시 True 설정.
+
+    추가 문제: 빈 배열을 tracker.update()에 전달하면 트래커가 모든 트랙을
+    'lost' 처리 → 다음 실제 탐지 시 새 raw_id 부여 → IDStabilizer 오매칭.
+    해결: 연속 _YOLO_MISS_GRACE(=2)회 이내 빈 탐지 시 tracker.update()
+    자체를 건너뛰고 _last_tracks 반환 → tracker 내부 상태 보존.
+
+  [ITS 구간속도 자동 보정 설계]
+    ITS API 응답 구조: JSON 형식은 {body: {items: [...]}} (직접 리스트).
+    XML에서 변환된 형식은 {response: {body: {items: {item: [...]}}}}이므로
+    _parse_traffic_items()에서 두 구조를 모두 처리.
+    속도 필드명은 "speed" (avgSpd 아님).
+
+    보정 계수 범위 클램핑: 0.3 ~ 5.0 (측정 불가 극단값 방지).
+    최소 샘플 수 30개 이상, 측정 평균 3 km/h 이상 시에만 갱신
+    (정차 상태에서 0÷0 오류 방지).
 
   [도로 방향 우선순위]
     카메라 FOV 방향 및 GPS 투영 축:

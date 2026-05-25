@@ -19,10 +19,10 @@ PY      = $(VENV)/Scripts/python
 UVICORN = $(VENV)/Scripts/uvicorn
 ENGINE  = backend/yolov8s.engine
 
-.PHONY: dev _check-python _setup-venv _setup-torch _setup-pip _setup-engine _setup-npm
+.PHONY: dev _check-python _setup-venv _setup-torch _setup-pip _setup-nodelink _setup-engine _setup-npm
 
 # ── 메인 진입점 ──────────────────────────────────────────────────────
-dev: _check-python _setup-venv _setup-torch _setup-pip _setup-engine _setup-npm
+dev: _check-python _setup-venv _setup-torch _setup-pip _setup-nodelink _setup-engine _setup-npm
 	@echo ""
 	@echo "모든 설치 완료. 서버를 시작합니다..."
 	@echo ""
@@ -59,14 +59,29 @@ _setup-pip:
 	@$(PIP) install -r backend/requirements.txt -q
 	@$(PIP) install tensorrt -q 2>nul || echo "  TensorRT 설치 생략 (GPU 없는 환경)"
 
-# ── TensorRT 엔진 (없을 때만 변환, 3~5분) ───────────────────────────
-_setup-engine:
-	@if [ ! -f "$(ENGINE)" ]; then \
-		echo "[4/5] TensorRT 엔진 생성 중 (최초 1회 ~7분 소요)..." && \
-		$(PY) -c "from ultralytics import YOLO; import shutil,os; m=YOLO('yolov8s.pt'); m.export(format='engine',half=True,device=0,imgsz=640); shutil.move('yolov8s.engine','backend/yolov8s.engine') if os.path.exists('yolov8s.engine') else None; print('엔진 생성 완료')" \
-		|| echo "  TensorRT 엔진 생성 실패"; \
+# ── 노드링크 SQLite DB (없을 때만 변환, 최초 1회) ───────────────────
+_setup-nodelink:
+	@if [ ! -f "../node-link-data/nodelink.sqlite" ]; then \
+		if [ -f "../node-link-data/MOCT_NODE.shp" ] && [ -f "../node-link-data/MOCT_LINK.shp" ]; then \
+			echo "[3.5/5] 노드링크 DB 생성 중 (최초 1회 ~2분 소요)..." && \
+			$(PIP) install pyshp pyproj -q && \
+			$(PY) ../scripts/build_nodelink_db.py; \
+		else \
+			echo "[3.5/5] 노드링크 shapefile 없음 — 도로 정보 기능 비활성화 (node-link-data/ 에 MOCT_NODE.shp, MOCT_LINK.shp 추가 후 재실행)"; \
+		fi \
 	else \
-		echo "[4/5] TensorRT 엔진 확인 완료"; \
+		echo "[3.5/5] 노드링크 DB 확인 완료"; \
+	fi
+
+# ── YOLO 모델 설정 (없을 때만, 최초 1회) ────────────────────────────
+# model_setup.py: 하드웨어 자동 감지 → 모델 선택 → 다운로드 → TensorRT 변환(가능 시)
+# 결과: backend/.yolo_model, backend/.runtime_profile.json 생성
+_setup-engine:
+	@if [ ! -f "backend/.yolo_model" ]; then \
+		echo "[4/5] YOLO 모델 설정 중 (최초 1회)..." && \
+		$(PY) backend/model_setup.py; \
+	else \
+		echo "[4/5] YOLO 모델 확인 완료 ($$(cat backend/.yolo_model | tr -d '\n'))"; \
 	fi
 
 # ── 프론트엔드 패키지 ────────────────────────────────────────────────

@@ -44,6 +44,7 @@ const MAP_MODE_NEXT  = { dark: "light", light: "satellite", satellite: "dark" };
 
 const VEHICLE_MIN_ZOOM = 15;
 
+// 기본 FOV 사다리꼴 (캘리브 없을 때)
 function computeFovPolygon(lat, lon, headingDeg = 0, fovDeg = 70, distM = 90, nearM = 15) {
   const R = 6371000;
   const dLatPerM = (1 / R) * (180 / Math.PI);
@@ -69,6 +70,27 @@ function computeFovPolygon(lat, lon, headingDeg = 0, fovDeg = 70, distM = 90, ne
     [farLeftLon, farLeftLat],
     [nearLeftLon, nearLeftLat],
   ];
+}
+
+// 자동 캘리브레이션 후 — transform.py의 GPS 코너와 동일한 방식으로 계산
+// near/far 모두 road_width_m 고정 폭의 직사각형 (호모그래피 실제 사용 영역)
+function computeCalibPolygon(lat, lon, headingDeg, nearM, farM, halfWidthM) {
+  const R_lat = 110574;
+  const R_lon = 111320 * Math.cos((lat * Math.PI) / 180);
+  const b = (headingDeg * Math.PI) / 180;
+  const sinB = Math.sin(b), cosB = Math.cos(b);
+
+  return [
+    [-halfWidthM, nearM],
+    [ halfWidthM, nearM],
+    [ halfWidthM, farM ],
+    [-halfWidthM, farM ],
+    [-halfWidthM, nearM],
+  ].map(([lateral, along]) => {
+    const dlat = (along * cosB - lateral * sinB) / R_lat;
+    const dlon = (along * sinB + lateral * cosB) / R_lon;
+    return [lon + dlon, lat + dlat];
+  });
 }
 
 export default function MapView({
@@ -142,20 +164,24 @@ export default function MapView({
 
   const fovLayer = useMemo(() => {
     if (!selectedCctv) return null;
-    // 자동 캘리브레이션 추정값이 있으면 실제 near/far/폭 반영, 없으면 고정 기본값
-    const nearM = fovNearM ?? 15;
-    const farM  = fovFarM  ?? 90;
-    const fovDeg = fovRoadWidthM != null
-      ? Math.min(120, 2 * Math.atan2(fovRoadWidthM / 2, nearM) * 180 / Math.PI * 1.4)
-      : 70;
-    const ring = selectedCctv.calibGpsRing ?? computeFovPolygon(
-      selectedCctv.lat,
-      selectedCctv.lon,
-      selectedCctv.heading ?? 0,
-      fovDeg,
-      farM,
-      nearM,
-    );
+    let ring;
+    if (selectedCctv.calibGpsRing) {
+      // 수동 4점 보정: 실제 클릭한 GPS 코너 사용
+      ring = selectedCctv.calibGpsRing;
+    } else if (fovNearM != null && fovFarM != null && fovRoadWidthM != null) {
+      // 자동 캘리브레이션: transform.py와 동일한 직사각형 GPS 코너
+      ring = computeCalibPolygon(
+        selectedCctv.lat, selectedCctv.lon,
+        selectedCctv.heading ?? 0,
+        fovNearM, fovFarM, fovRoadWidthM / 2,
+      );
+    } else {
+      // 미보정: FOV 각도 기반 기본 사다리꼴
+      ring = computeFovPolygon(
+        selectedCctv.lat, selectedCctv.lon,
+        selectedCctv.heading ?? 0,
+      );
+    }
     return new PolygonLayer({
       id:             "cctv-fov",
       data:           [{ ring }],

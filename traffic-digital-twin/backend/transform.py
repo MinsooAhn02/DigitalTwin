@@ -163,11 +163,13 @@ class PerspectiveTransformer:
         frame: np.ndarray,
         bearing_deg: float = 0.0,
         road_width_m: float = 7.0,
-    ) -> bool:
+    ) -> tuple[bool, float]:
         """차선 감지(Hough)로 원근 파라미터 자동 추정.
 
         road_width_m: 노드링크 lanes × 차선폭(m) — 수평 스케일 기준값.
-        반환: True = 성공(homography 갱신), False = 실패(기존 상태 유지).
+        반환: (성공여부, 실제사용된bearing_deg)
+          - 소실점이 프레임 오른쪽으로 치우치면 도로가 카메라 오른쪽에 있는 것으로 판단해
+            bearing을 180° 반전 후 사용 (한국 도로 우측 설치 CCTV 기준 휴리스틱).
         """
         h, w = frame.shape[:2]
         fy = h * 1.2  # 대략적 초점거리 (픽셀) — 66° 수직 화각 기준
@@ -193,7 +195,7 @@ class PerspectiveTransformer:
             minLineLength=int(h * 0.08), maxLineGap=int(h * 0.06),
         )
         if lines is None or len(lines) < 3:
-            return False
+            return False, bearing_deg
 
         # 차선 방향 직선만 필터: 수직에서 60° 이내 (사선 차선마킹)
         diag: list[tuple] = []
@@ -206,7 +208,7 @@ class PerspectiveTransformer:
                 diag.append((x1, y1, x2, y2))
 
         if len(diag) < 2:
-            return False
+            return False, bearing_deg
 
         # ── 3. 소실점 추정 ───────────────────────────────────────────
         vp_cands: list[tuple[float, float]] = []
@@ -218,8 +220,18 @@ class PerspectiveTransformer:
                     if -w * 0.5 < px < w * 1.5 and -h * 0.2 < py < h * 0.6:
                         vp_cands.append((px, py))
 
+        vp_x = float(np.median([p[0] for p in vp_cands])) if len(vp_cands) >= 2 else w / 2.0
         vp_y = float(np.median([p[1] for p in vp_cands])) if len(vp_cands) >= 2 else 0.0
         vp_y = min(vp_y, h * 0.55)
+
+        # ── 3b. 소실점 수평 오프셋으로 카메라 방향 판별 ──────────────
+        # 도로 우측 설치 CCTV 기준: 도로가 카메라 왼쪽에 있어야 정방향
+        #   → VP가 프레임 왼쪽 치우침 (vp_x < w/2) = bearing 정방향
+        #   → VP가 프레임 오른쪽 치우침 (vp_x > w*0.55) = bearing 반전
+        # 임계값 5%: 중앙부 노이즈·정면 정렬 카메라는 플립하지 않음
+        if vp_x > w * 0.55:
+            bearing_deg = (bearing_deg + 180.0) % 360.0
+            logger.info("VP 우측 치우침 (%.0f/%.0f) → bearing %.1f°로 반전", vp_x, w, bearing_deg)
 
         # ── 4. 카메라 틸트 각도 추정 ─────────────────────────────────
         pitch_deg = math.degrees(math.atan2(h / 2 - vp_y, fy))
@@ -236,13 +248,13 @@ class PerspectiveTransformer:
                 xs_bot.append(xb)
 
         if len(xs_bot) < 2:
-            return False
+            return False, bearing_deg
 
         road_left  = float(np.percentile(xs_bot, 10))
         road_right = float(np.percentile(xs_bot, 90))
         road_px_w  = road_right - road_left
         if road_px_w < w * 0.08:
-            return False
+            return False, bearing_deg
 
         # ── 6. 카메라 높이 역산 → near_m / far_m ─────────────────────
         # Pinhole 공식: road_width_m = road_px_w × d_near / fy
@@ -298,7 +310,7 @@ class PerspectiveTransformer:
         dst_gps = np.float32(gps_pts)
         H_gps, _ = cv2.findHomography(src_pts, dst_gps)
         if H_gps is None:
-            return False
+            return False, bearing_deg
 
         self._H_gps = H_gps
         dst_meter = self._gps_pts_to_local_meters(dst_gps)
@@ -309,10 +321,10 @@ class PerspectiveTransformer:
         self._is_calibrated = False  # 자동 추정 = 수동 캘리브레이션 아님
 
         logger.info(
-            "차선 감지 자동 캘리브레이션: pitch=%.1f° cam_h=%.1fm near=%.1fm far=%.1fm half_w=%.1fm",
-            pitch_deg, cam_h, near_m, far_m, half_w,
+            "차선 감지 자동 캘리브레이션: pitch=%.1f° cam_h=%.1fm near=%.1fm far=%.1fm half_w=%.1fm bearing=%.1f°",
+            pitch_deg, cam_h, near_m, far_m, half_w, bearing_deg,
         )
-        return True
+        return True, bearing_deg
 
     def update_gps_center(self, center_lat: float, center_lon: float, bearing_deg: float = 0.0) -> None:
         """카메라 GPS + bearing으로 근사 GPS 그리드 재계산.

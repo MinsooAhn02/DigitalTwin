@@ -378,6 +378,31 @@ class TrafficAnalytics:
 
             return self.speed_scale
 
+    def estimate_travel_bearing(self, min_vehicles: int = 2, min_disp_m: float = 3.0) -> float | None:
+        """차량 이동 방향을 추정해 bearing 검증에 활용.
+
+        _pos_window의 각 트랙에서 첫·끝 위치 벡터를 구해 평균 방위각 반환.
+        min_vehicles 이상 충분히 이동한 차량이 없으면 None.
+        반환값: 북기준 시계방향 방위각 [0, 360), meter 좌표계 기준 (x=east, y=north).
+        """
+        dx_list, dy_list = [], []
+        with self._lock:
+            for win in self._pos_window.values():
+                pts = list(win)
+                if len(pts) < 6:
+                    continue
+                x0, y0 = pts[0][0], pts[0][1]
+                x1, y1 = pts[-1][0], pts[-1][1]
+                if math.hypot(x1 - x0, y1 - y0) < min_disp_m:
+                    continue
+                dx_list.append(x1 - x0)
+                dy_list.append(y1 - y0)
+        if len(dx_list) < min_vehicles:
+            return None
+        avg_dx = sum(dx_list) / len(dx_list)
+        avg_dy = sum(dy_list) / len(dy_list)
+        return math.degrees(math.atan2(avg_dx, avg_dy)) % 360
+
     def _gc(self, active: set[int]) -> None:
         # 재등장 시 연속성 유지: grace period 동안 _prev/_speed_ema 보존
         lost = set(self._prev) - active

@@ -115,6 +115,7 @@ _label_ann = sv.LabelAnnotator(text_scale=0.4, text_thickness=1, text_padding=3)
 # 차선 감지 자동 캘리브레이션 상태
 _auto_calib_attempts: int  = 0    # 남은 시도 횟수 (0 = 비활성)
 _auto_calib_road_width_m: float = 7.0  # lanes × lane_width_m
+_bearing_check_pending: bool = False   # 자동 캘리브 후 차량 이동으로 bearing 방향 검증 대기
 
 # ITS API 응답 캐시 (TTL 5분, 최대 50개 bbox 조합)
 _cctv_cache: TTLCache = TTLCache(maxsize=50, ttl=300)
@@ -997,8 +998,11 @@ async def live_loop(detector, stream) -> None:
                     get_road_info, cam["lat"], cam["lon"], _parse_road_name_hint(cam.get("name", ""))
                 )
 
+                # 카메라 전환 시 bearing 검증 상태 초기화
+                global _auto_calib_attempts, _auto_calib_road_width_m, _bearing_check_pending
+                _bearing_check_pending = False
+
                 # 수동 캘리브레이션 없으면 차선 감지 자동 보정 예약
-                global _auto_calib_attempts, _auto_calib_road_width_m
                 if not _manual_cal_loaded:
                     lanes = road_info["lanes"] if road_info and road_info.get("lanes") else 2
                     rank  = str(road_info.get("road_rank", "")) if road_info else ""
@@ -1047,6 +1051,8 @@ async def live_loop(detector, stream) -> None:
             if ok:
                 logger.info("차선 감지 자동 캘리브레이션 완료")
                 _auto_calib_attempts = 0
+                global _bearing_check_pending
+                _bearing_check_pending = True
                 await _broadcast({"type": "auto_calibrated"})
             elif _auto_calib_attempts == 0:
                 logger.info("차선 감지 실패 — GPS 근사 캘리브레이션 유지 (road_width=%.1fm)",
@@ -1073,6 +1079,30 @@ async def live_loop(detector, stream) -> None:
         )
         if payload:
             await _broadcast(payload)
+
+        # 자동 캘리브레이션 후 차량 이동 방향으로 bearing 검증 (데이터 충분 시 1회 실행)
+        if _bearing_check_pending:
+            est = analytics.estimate_travel_bearing()
+            if est is not None:
+                _bearing_check_pending = False
+                road_b = analytics.road_bearing_deg or 0.0
+                diff = (est - road_b + 180) % 360 - 180
+                if abs(diff) > 90:
+                    flipped = (road_b + 180) % 360
+                    logger.info(
+                        "카메라 방향 반전 감지 (차량이동=%.1f° vs 도로=%.1f°) → %.1f°로 플립",
+                        est, road_b, flipped,
+                    )
+                    analytics.road_bearing_deg = flipped
+                    ok2 = await asyncio.to_thread(
+                        _transformer.auto_calibrate_from_frame,
+                        frame, flipped, _auto_calib_road_width_m,
+                    )
+                    analytics.reset()
+                    if ok2:
+                        await _broadcast({"type": "auto_calibrated", "heading": flipped})
+                else:
+                    logger.info("bearing 검증 완료: 방향 정상 (차량이동=%.1f° vs 도로=%.1f°)", est, road_b)
 
         elapsed = time.perf_counter() - t0
         if elapsed > target_interval:

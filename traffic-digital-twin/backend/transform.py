@@ -167,7 +167,8 @@ class PerspectiveTransformer:
         """차선 감지(Hough)로 원근 파라미터 자동 추정.
 
         road_width_m: 노드링크 lanes × 차선폭(m) — 수평 스케일 기준값.
-        반환: (성공여부, 실제사용된bearing_deg)
+        반환: (성공여부, 실제사용된bearing_deg, calib_info_dict | None)
+          calib_info: {cam_h_m, near_m, far_m, road_width_m, pitch_deg}
           - 소실점이 프레임 오른쪽으로 치우치면 도로가 카메라 오른쪽에 있는 것으로 판단해
             bearing을 180° 반전 후 사용 (한국 도로 우측 설치 CCTV 기준 휴리스틱).
         """
@@ -195,7 +196,7 @@ class PerspectiveTransformer:
             minLineLength=int(h * 0.08), maxLineGap=int(h * 0.06),
         )
         if lines is None or len(lines) < 3:
-            return False, bearing_deg
+            return False, bearing_deg, None
 
         # 차선 방향 직선만 필터: 수직에서 60° 이내 (사선 차선마킹)
         diag: list[tuple] = []
@@ -208,7 +209,7 @@ class PerspectiveTransformer:
                 diag.append((x1, y1, x2, y2))
 
         if len(diag) < 2:
-            return False, bearing_deg
+            return False, bearing_deg, None
 
         # ── 3. 소실점 추정 ───────────────────────────────────────────
         vp_cands: list[tuple[float, float]] = []
@@ -248,13 +249,13 @@ class PerspectiveTransformer:
                 xs_bot.append(xb)
 
         if len(xs_bot) < 2:
-            return False, bearing_deg
+            return False, bearing_deg, None
 
         road_left  = float(np.percentile(xs_bot, 10))
         road_right = float(np.percentile(xs_bot, 90))
         road_px_w  = road_right - road_left
         if road_px_w < w * 0.08:
-            return False, bearing_deg
+            return False, bearing_deg, None
 
         # ── 6. 카메라 높이 역산 → near_m / far_m ─────────────────────
         # Pinhole 공식: road_width_m = road_px_w × d_near / fy
@@ -310,7 +311,7 @@ class PerspectiveTransformer:
         dst_gps = np.float32(gps_pts)
         H_gps, _ = cv2.findHomography(src_pts, dst_gps)
         if H_gps is None:
-            return False, bearing_deg
+            return False, bearing_deg, None
 
         self._H_gps = H_gps
         dst_meter = self._gps_pts_to_local_meters(dst_gps)
@@ -324,7 +325,14 @@ class PerspectiveTransformer:
             "차선 감지 자동 캘리브레이션: pitch=%.1f° cam_h=%.1fm near=%.1fm far=%.1fm half_w=%.1fm bearing=%.1f°",
             pitch_deg, cam_h, near_m, far_m, half_w, bearing_deg,
         )
-        return True, bearing_deg
+        calib_info = {
+            "cam_h_m":      round(cam_h, 1),
+            "near_m":       round(near_m, 1),
+            "far_m":        round(far_m, 1),
+            "road_width_m": round(road_width_m, 1),
+            "pitch_deg":    round(pitch_deg, 1),
+        }
+        return True, bearing_deg, calib_info
 
     def update_gps_center(self, center_lat: float, center_lon: float, bearing_deg: float = 0.0) -> None:
         """카메라 GPS + bearing으로 근사 GPS 그리드 재계산.

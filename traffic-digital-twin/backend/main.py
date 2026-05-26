@@ -1040,7 +1040,7 @@ async def live_loop(detector, stream) -> None:
         if _auto_calib_attempts > 0 and frame is not None:
             _auto_calib_attempts -= 1
             bearing = analytics.road_bearing_deg or 0.0
-            ok, used_bearing = await asyncio.to_thread(
+            ok, used_bearing, calib_info = await asyncio.to_thread(
                 _transformer.auto_calibrate_from_frame,
                 frame, bearing, _auto_calib_road_width_m,
             )
@@ -1049,7 +1049,11 @@ async def live_loop(detector, stream) -> None:
                 _auto_calib_attempts = 0
                 if abs((used_bearing - bearing + 180) % 360 - 180) > 90:
                     analytics.road_bearing_deg = used_bearing
-                await _broadcast({"type": "auto_calibrated", "heading": used_bearing})
+                await _broadcast({
+                    "type": "auto_calibrated",
+                    "heading": used_bearing,
+                    **(calib_info or {}),
+                })
             elif _auto_calib_attempts == 0:
                 logger.info("차선 감지 실패 — GPS 근사 캘리브레이션 유지 (road_width=%.1fm)",
                             _auto_calib_road_width_m)

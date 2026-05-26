@@ -20,6 +20,7 @@ export function useWebSocket() {
   const [error,           setError]           = useState(null);
   const [cameraReady,     setCameraReady]     = useState(0);
   const [cameraReadyInfo, setCameraReadyInfo] = useState(null);
+  const [autoCalibInfo,   setAutoCalibInfo]   = useState(null); // 자동 캘리브 추정값
 
   const wsRef      = useRef(null);
   const retryTimer = useRef(null);
@@ -49,10 +50,16 @@ export function useWebSocket() {
           setCameraReadyInfo((prev) => {
             const base = prev ?? {};
             const update = { ...base, calibrated: true };
-            if (data.heading != null) {
-              update.name_bearing = data.heading; // heading 변경 시 FOV도 갱신
-            }
+            if (data.heading != null) update.name_bearing = data.heading;
             return update;
+          });
+          setAutoCalibInfo({
+            cam_h_m:      data.cam_h_m      ?? null,
+            near_m:       data.near_m       ?? null,
+            far_m:        data.far_m        ?? null,
+            road_width_m: data.road_width_m ?? null,
+            pitch_deg:    data.pitch_deg    ?? null,
+            heading:      data.heading      ?? null,
           });
         } else {
           // 일반 frame analytics 데이터
@@ -80,5 +87,5 @@ export function useWebSocket() {
     };
   }, [connect]);
 
-  return { frameData, isConnected, error, cameraReady, cameraReadyInfo };
+  return { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo };
 }

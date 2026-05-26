@@ -4,6 +4,7 @@ transform.py — Perspective Transform (픽셀 → 실세계 좌표)
   · pixel_to_gps()  : 픽셀 (u, v) → (lat, lon)
   · pixel_to_meter(): 픽셀 (u, v) → (x_m, y_m)  속도 계산용
   · update_from_calibration(): 사용자 4-point 캘리브레이션으로 행렬 재계산
+  · auto_calibrate_from_frame(): 차선 감지(Hough) 기반 자동 원근 보정
 """
 
 import json
@@ -18,6 +19,17 @@ from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIG
 CALIBRATION_PATH = Path(__file__).parent / "calibration_data.json"
 
 logger = logging.getLogger(__name__)
+
+
+def _line_intersection(l1: tuple, l2: tuple) -> tuple[float, float] | None:
+    """두 직선(x1,y1,x2,y2)의 교점. 평행하면 None."""
+    x1, y1, x2, y2 = l1
+    x3, y3, x4, y4 = l2
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-6:
+        return None
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+    return x1 + t * (x2 - x1), y1 + t * (y2 - y1)
 
 
 class PerspectiveTransformer:
@@ -145,6 +157,155 @@ class PerspectiveTransformer:
             "캘리브레이션 적용 완료: pixel=%s gps=%s",
             pixel_pts, gps_pts,
         )
+
+    def auto_calibrate_from_frame(
+        self,
+        frame: np.ndarray,
+        bearing_deg: float = 0.0,
+        road_width_m: float = 7.0,
+    ) -> bool:
+        """차선 감지(Hough)로 원근 파라미터 자동 추정.
+
+        road_width_m: 노드링크 lanes × 차선폭(m) — 수평 스케일 기준값.
+        반환: True = 성공(homography 갱신), False = 실패(기존 상태 유지).
+        """
+        h, w = frame.shape[:2]
+        fy = h * 1.2  # 대략적 초점거리 (픽셀) — 66° 수직 화각 기준
+
+        # ── 1. Edge detection ────────────────────────────────────────
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blur, 50, 150)
+
+        # ROI: 하단 55% (하늘/원거리 영역 제외)
+        roi_top = int(h * 0.45)
+        roi_mask = np.zeros_like(edges)
+        cv2.fillPoly(
+            roi_mask,
+            [np.array([[0, roi_top], [w, roi_top], [w, h], [0, h]], dtype=np.int32)],
+            255,
+        )
+        edges = cv2.bitwise_and(edges, roi_mask)
+
+        # ── 2. Hough 직선 검출 ───────────────────────────────────────
+        lines = cv2.HoughLinesP(
+            edges, 1, np.pi / 180, threshold=35,
+            minLineLength=int(h * 0.08), maxLineGap=int(h * 0.06),
+        )
+        if lines is None or len(lines) < 3:
+            return False
+
+        # 차선 방향 직선만 필터: 수직에서 60° 이내 (사선 차선마킹)
+        diag: list[tuple] = []
+        for l in lines:
+            x1, y1, x2, y2 = l[0]
+            if abs(y2 - y1) < 5:
+                continue
+            from_vert = math.degrees(math.atan2(abs(x2 - x1), abs(y2 - y1)))
+            if from_vert < 60:
+                diag.append((x1, y1, x2, y2))
+
+        if len(diag) < 2:
+            return False
+
+        # ── 3. 소실점 추정 ───────────────────────────────────────────
+        vp_cands: list[tuple[float, float]] = []
+        for i in range(len(diag)):
+            for j in range(i + 1, min(i + 8, len(diag))):
+                pt = _line_intersection(diag[i], diag[j])
+                if pt is not None:
+                    px, py = pt
+                    if -w * 0.5 < px < w * 1.5 and -h * 0.2 < py < h * 0.6:
+                        vp_cands.append((px, py))
+
+        vp_y = float(np.median([p[1] for p in vp_cands])) if len(vp_cands) >= 2 else 0.0
+        vp_y = min(vp_y, h * 0.55)
+
+        # ── 4. 카메라 틸트 → 근거리/원거리 추정 ─────────────────────
+        # pitch_deg = atan2(중심에서 VP까지 픽셀 수, 초점거리)
+        pitch_deg = math.degrees(math.atan2(h / 2 - vp_y, fy))
+        pitch_deg = max(3.0, min(50.0, pitch_deg))
+        vfov_half = math.degrees(math.atan2(h / 2, fy))  # ≈22.6° for fy=1.2h
+
+        cam_h = 6.0  # 도로 CCTV 평균 설치 높이(m)
+        near_angle = math.radians(pitch_deg + vfov_half)
+        near_m = cam_h / math.tan(near_angle) if near_angle > 0 else 10.0
+        near_m = max(4.0, min(20.0, near_m))
+
+        far_angle = math.radians(pitch_deg - vfov_half)
+        if far_angle > math.radians(1.0):
+            far_m = min(200.0, cam_h / math.tan(far_angle))
+        else:
+            far_m = near_m + road_width_m * 8.0
+        far_m = max(near_m + 10.0, far_m)
+
+        # ── 5. 하단 도로 경계 검출 ───────────────────────────────────
+        xs_bot: list[float] = []
+        for x1, y1, x2, y2 in diag:
+            if y2 == y1:
+                continue
+            xb = x1 + (h - y1) * (x2 - x1) / (y2 - y1)
+            if -w * 0.1 <= xb <= w * 1.1:
+                xs_bot.append(xb)
+
+        if len(xs_bot) < 2:
+            return False
+
+        road_left  = float(np.percentile(xs_bot, 10))
+        road_right = float(np.percentile(xs_bot, 90))
+        road_px_w  = road_right - road_left
+        if road_px_w < w * 0.08:
+            return False
+
+        # ── 6. 원근 사다리꼴 픽셀 좌표 ──────────────────────────────
+        half_w  = road_width_m / 2.0
+        road_cx = (road_left + road_right) / 2.0
+
+        if vp_y < h:
+            far_y       = max(roi_top, int(vp_y + (h - vp_y) * 0.08))
+            far_px_half = (road_px_w / 2) * max(0.04, (far_y - vp_y) / max(1.0, h - vp_y))
+        else:
+            far_y       = roi_top
+            far_px_half = road_px_w * 0.12
+
+        src_pts = np.float32([
+            [road_cx - far_px_half, far_y],   # TL far-left
+            [road_cx + far_px_half, far_y],   # TR far-right
+            [road_right,            h      ],  # BR near-right
+            [road_left,             h      ],  # BL near-left
+        ])
+
+        # ── 7. GPS 코너 계산 ─────────────────────────────────────────
+        R_lat = 110574.0
+        R_lon = 111320.0 * math.cos(math.radians(self._gps_center_lat))
+        b = math.radians(bearing_deg)
+        sin_b, cos_b = math.sin(b), math.cos(b)
+
+        gps_pts: list[list[float]] = []
+        for lateral, along in [(-half_w, far_m), (half_w, far_m),
+                                 (half_w, near_m), (-half_w, near_m)]:
+            dlat = (along * cos_b - lateral * sin_b) / R_lat
+            dlon = (along * sin_b + lateral * cos_b) / R_lon
+            gps_pts.append([self._gps_center_lat + dlat, self._gps_center_lon + dlon])
+
+        dst_gps = np.float32(gps_pts)
+        H_gps, _ = cv2.findHomography(src_pts, dst_gps)
+        if H_gps is None:
+            return False
+
+        self._H_gps = H_gps
+        dst_meter = self._gps_pts_to_local_meters(dst_gps)
+        H_m, _ = cv2.findHomography(src_pts, dst_meter)
+        if H_m is not None:
+            self._H_meter = H_m
+        self._bearing_rad = 0.0
+        self._is_calibrated = False  # 자동 추정 = 수동 캘리브레이션 아님
+
+        logger.info(
+            "차선 감지 자동 캘리브레이션: pitch=%.1f° near=%.1fm far=%.1fm half_w=%.1fm",
+            pitch_deg, near_m, far_m, half_w,
+        )
+        return True
 
     def update_gps_center(self, center_lat: float, center_lon: float, bearing_deg: float = 0.0) -> None:
         """카메라 GPS + bearing으로 근사 GPS 그리드 재계산.

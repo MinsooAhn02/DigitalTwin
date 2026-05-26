@@ -112,6 +112,10 @@ _latest_annotated_jpeg: bytes | None = None   # YOLO 어노테이션 프레임
 _box_ann   = sv.BoxAnnotator(thickness=2)
 _label_ann = sv.LabelAnnotator(text_scale=0.4, text_thickness=1, text_padding=3)
 
+# 차선 감지 자동 캘리브레이션 상태
+_auto_calib_attempts: int  = 0    # 남은 시도 횟수 (0 = 비활성)
+_auto_calib_road_width_m: float = 7.0  # lanes × lane_width_m
+
 # ITS API 응답 캐시 (TTL 5분, 최대 50개 bbox 조합)
 _cctv_cache: TTLCache = TTLCache(maxsize=50, ttl=300)
 
@@ -964,6 +968,7 @@ async def live_loop(detector, stream) -> None:
                 logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
 
                 # 저장된 calibration 자동 적용
+                _manual_cal_loaded = False
                 if CALIBRATION_PATH.exists():
                     try:
                         cal_data = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
@@ -973,6 +978,7 @@ async def live_loop(detector, stream) -> None:
                                 cal["pixel_pts"], cal["gps_pts"]
                             )
                             logger.info("저장된 캘리브레이션 적용: %s", cam_key)
+                            _manual_cal_loaded = True
                     except Exception as exc:
                         logger.warning("캘리브레이션 로드 실패: %s", exc)
 
@@ -980,6 +986,17 @@ async def live_loop(detector, stream) -> None:
                 road_info = await asyncio.to_thread(
                     get_road_info, cam["lat"], cam["lon"], _parse_road_name_hint(cam.get("name", ""))
                 )
+
+                # 수동 캘리브레이션 없으면 차선 감지 자동 보정 예약
+                global _auto_calib_attempts, _auto_calib_road_width_m
+                if not _manual_cal_loaded:
+                    lanes = road_info["lanes"] if road_info and road_info.get("lanes") else 2
+                    rank  = str(road_info.get("road_rank", "")) if road_info else ""
+                    lane_w = 3.5 if rank in ("101", "102") else (3.25 if rank == "103" else 3.0)
+                    _auto_calib_road_width_m = max(1, lanes) * lane_w
+                    _auto_calib_attempts = 5  # 최대 5프레임 시도
+                    logger.info("차선 감지 자동 캘리브레이션 예약: %.1fm (lanes=%d, rank=%s)",
+                                _auto_calib_road_width_m, lanes, rank)
                 await _broadcast({
                     "type": "camera_ready",
                     "name": cam.get("name", ""),
@@ -1008,6 +1025,21 @@ async def live_loop(detector, stream) -> None:
         if frame is None:
             await stream.reconnect()
             continue
+
+        # 차선 감지 자동 캘리브레이션 (수동 캘리브 없을 때, 최초 N프레임 시도)
+        if _auto_calib_attempts > 0 and frame is not None:
+            _auto_calib_attempts -= 1
+            bearing = analytics.road_bearing_deg or 0.0
+            ok = await asyncio.to_thread(
+                _transformer.auto_calibrate_from_frame,
+                frame, bearing, _auto_calib_road_width_m,
+            )
+            if ok:
+                logger.info("차선 감지 자동 캘리브레이션 완료")
+                _auto_calib_attempts = 0
+            elif _auto_calib_attempts == 0:
+                logger.info("차선 감지 실패 — GPS 근사 캘리브레이션 유지 (road_width=%.1fm)",
+                            _auto_calib_road_width_m)
 
         # MJPEG 스트림용 버퍼 업데이트 (모든 프레임, 탐지 여부 무관)
         global _latest_frame_jpeg

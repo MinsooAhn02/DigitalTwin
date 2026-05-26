@@ -45,6 +45,8 @@ export function useWebSocket() {
         } else if (data.type === "camera_error") {
           setError(`카메라 전환 실패: ${data.message ?? ""}`);
           setCameraReady((n) => n + 1); // 에러여도 로딩 상태 해제
+        } else if (data.type === "auto_calibrated") {
+          setCameraReadyInfo((prev) => prev ? { ...prev, calibrated: true } : { calibrated: true });
         } else {
           // 일반 frame analytics 데이터
           setFrameData(data);

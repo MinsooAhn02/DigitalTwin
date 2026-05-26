@@ -110,6 +110,8 @@ export default function MapView({
   fovFarM = null,
   fovRoadWidthM = null,
   fovHeadingDeg = null,
+  fovSnapLat = null,
+  fovSnapLon = null,
 }) {
   const { t } = useLang();
   const showVehicles = viewState.zoom >= VEHICLE_MIN_ZOOM;
@@ -167,23 +169,18 @@ export default function MapView({
     if (!selectedCctv) return null;
     // 폴리곤 heading 우선순위: fovHeadingDeg (노드링크/이름 방위) > selectedCctv.heading > 0
     const heading = fovHeadingDeg ?? selectedCctv.heading ?? 0;
+    const originLat = fovSnapLat ?? selectedCctv.lat;
+    const originLon = fovSnapLon ?? selectedCctv.lon;
     let ring;
     if (selectedCctv.calibGpsRing) {
       // 수동 4점 보정: 실제 클릭한 GPS 코너 사용
       ring = selectedCctv.calibGpsRing;
     } else if (fovNearM != null && fovFarM != null && fovRoadWidthM != null) {
       // 자동 캘리브레이션: transform.py와 동일한 직사각형 GPS 코너
-      ring = computeCalibPolygon(
-        selectedCctv.lat, selectedCctv.lon,
-        heading,
-        fovNearM, fovFarM, fovRoadWidthM / 2,
-      );
+      ring = computeCalibPolygon(originLat, originLon, heading, fovNearM, fovFarM, fovRoadWidthM / 2);
     } else {
       // 미보정: FOV 각도 기반 기본 사다리꼴
-      ring = computeFovPolygon(
-        selectedCctv.lat, selectedCctv.lon,
-        heading,
-      );
+      ring = computeFovPolygon(originLat, originLon, heading);
     }
     return new PolygonLayer({
       id:             "cctv-fov",
@@ -195,7 +192,7 @@ export default function MapView({
       stroked:        true,
       filled:         true,
     });
-  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM, fovHeadingDeg]);
+  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM, fovHeadingDeg, fovSnapLat, fovSnapLon]);
 
   const nodeStroked = mapMode !== "dark";
   const nodeOutline = mapMode === "satellite" ? [0, 0, 0, 230] : [80, 80, 80, 180];
@@ -205,14 +202,14 @@ export default function MapView({
     id:           "vehicles",
     data:         sorted,
     getPosition:  (d) => [d.lon, d.lat],
-    getRadius:    3,
+    getRadius:    2,
     getFillColor: (d) => d.is_parked ? parkedColor : getVehicleColor(d.direction, mapMode !== "dark"),
     getLineColor:    nodeOutline,
     lineWidthMinPixels: nodeStroked ? 1.5 : 0,
     stroked:      nodeStroked,
     pickable:     true,
     radiusUnits:  "meters",
-    radiusMinPixels: 5,
+    radiusMinPixels: 3,
     updateTriggers: { getFillColor: [vehicles, mapMode], getLineColor: mapMode },
   });
 

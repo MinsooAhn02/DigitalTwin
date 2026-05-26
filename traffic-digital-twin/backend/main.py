@@ -1047,6 +1047,7 @@ async def live_loop(detector, stream) -> None:
             if ok:
                 logger.info("차선 감지 자동 캘리브레이션 완료")
                 _auto_calib_attempts = 0
+                await _broadcast({"type": "auto_calibrated"})
             elif _auto_calib_attempts == 0:
                 logger.info("차선 감지 실패 — GPS 근사 캘리브레이션 유지 (road_width=%.1fm)",
                             _auto_calib_road_width_m)

@@ -96,7 +96,9 @@ class TrafficAnalytics:
         self._vehicle_direction: dict[int, str] = {}
         # ITS 구간속도 비교 자동 보정
         self.speed_scale: float = 1.0          # 보정 계수 (1.0 = 보정 없음)
-        self._speed_samples: deque = deque(maxlen=600)  # (avg_kph, monotonic_time), 5분 분량
+        # 10분 분량 버퍼: ITS 5분 창 타이밍 불일치 흡수를 위해 2배 확보
+        # analytics.update()가 ~10fps로 호출 → 6000샘플 ≈ 10분
+        self._speed_samples: deque = deque(maxlen=6000)
         self._stable_count: int = 0            # 연속 안정 갱신 횟수 (>= 3 이면 수렴 간주)
 
     def reset(self) -> None:
@@ -332,24 +334,31 @@ class TrafficAnalytics:
         """True이면 보정 계수가 수렴해 학습률이 크게 낮아진 상태."""
         return self._stable_count >= 3
 
-    def calibrate_from_its(self, its_speed_kph: float, window_s: float = 300.0) -> float | None:
-        """ITS 구간속도(its_speed_kph)와 같은 윈도우 내 측정 평균을 비교해 speed_scale 자동 보정.
+    def calibrate_from_its(self, its_speed_kph: float, window_s: float = 600.0) -> float | None:
+        """ITS 구간속도(its_speed_kph)와 측정 평균을 비교해 speed_scale 자동 보정.
 
-        반환: 갱신된 speed_scale (샘플 부족 시 None)
+        반환: 갱신된 speed_scale (샘플 부족·분산 과다 시 None)
 
-        동작 원리:
-          _speed_samples에는 보정 계수가 이미 적용된 avg_speed_kph가 담겨 있다.
-          our_avg = 최근 window_s 초 샘플 평균  (= raw_avg × 현재 speed_scale)
-          new_scale = speed_scale × (ITS / our_avg) = ITS / raw_avg
-          미수렴 시 α=0.7(빠른 학습), 수렴 후 α=0.95(거의 고정).
+        window_s=600(10분): ITS 5분 집계 창이 우리 창에 포함되도록 2배 확보.
+        ITS API 업데이트 주기(5분)와 우리 폴링 타이밍이 맞지 않아도
+        10분 창 안에 ITS 집계 구간이 반드시 겹침.
+
+        속도 분산이 30% 초과(교통량 급변)이면 보정 스킵 — 과도기 데이터로
+        잘못된 방향으로 보정되는 것을 막기 위해.
         """
         with self._lock:
             now = time.monotonic()
             recent = [s for s, t in self._speed_samples if now - t <= window_s]
-            if len(recent) < 30:
+            if len(recent) < 50:  # 10분 창 기준 최소 샘플 수 상향
                 return None
             our_avg = sum(recent) / len(recent)
             if our_avg < 3.0:
+                return None
+
+            # 교통량 급변 구간은 보정 스킵 (ITS 창과 우리 창이 같은 상황을 반영하지 않음)
+            variance = sum((s - our_avg) ** 2 for s in recent) / len(recent)
+            cv = math.sqrt(variance) / our_avg  # 변동계수
+            if cv > 0.4:  # 40% 이상 분산 → 불안정 구간
                 return None
 
             old_scale = self.speed_scale

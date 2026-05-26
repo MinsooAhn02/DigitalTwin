@@ -902,12 +902,22 @@ def _inject_its_speed(payload: dict) -> dict:
     """FrameAnalytics dict에 ITS 구간속도 및 오차율, 보정 계수 추가."""
     payload["speed_scale"] = round(analytics.speed_scale, 4)
     payload["speed_scale_converged"] = analytics.speed_scale_converged
+
+    # 화면 비교용: 10분 rolling average (calibrate_from_its와 동일 창)
+    # avg_speed_kph(순간값)이 아니라 같은 시간축의 평균끼리 비교해야 의미 있음
+    with analytics._lock:
+        now = time.monotonic()
+        recent = [s for s, t in analytics._speed_samples if now - t <= 600.0]
+    our_rolling_avg = round(sum(recent) / len(recent), 1) if len(recent) >= 5 else 0.0
+    payload["our_avg_kph"] = our_rolling_avg
+
     if _its_speed_kph is None:
         return payload
     payload["its_speed_kph"] = _its_speed_kph
-    avg = payload.get("avg_speed_kph", 0.0)
-    if avg > 0 and _its_speed_kph > 0:
-        payload["speed_error_pct"] = round((avg - _its_speed_kph) / _its_speed_kph * 100, 1)
+    if our_rolling_avg > 0 and _its_speed_kph > 0:
+        payload["speed_error_pct"] = round(
+            (our_rolling_avg - _its_speed_kph) / _its_speed_kph * 100, 1
+        )
     return payload
 
 

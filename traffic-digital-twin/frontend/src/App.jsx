@@ -32,7 +32,7 @@ function trailReducer(state, vehicles) {
 }
 
 export default function App() {
-  const { frameData, isConnected, error, cameraReady, cameraReadyInfo } = useWebSocket();
+  const { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo } = useWebSocket();
   const { t, lang, setLang } = useLang();
   const [trailMap, dispatchTrail]         = useReducer(trailReducer, new Map());
   const [cctvList, setCctvList]           = useState([]);
@@ -209,6 +209,9 @@ export default function App() {
           onMapClick={handleMapClick}
           mapMode={calibTabActive && mapMode !== "satellite" ? "satellite" : mapMode}
           onMapModeChange={setMapMode}
+          fovNearM={autoCalibInfo?.near_m ?? null}
+          fovFarM={autoCalibInfo?.far_m ?? null}
+          fovRoadWidthM={autoCalibInfo?.road_width_m ?? null}
         />
 
         {/* 연결 상태 칩 */}
@@ -366,6 +369,23 @@ export default function App() {
                   <span>제한속도 <b style={{ color: "#fbbf24" }}>{roadMaxSpd}</b> km/h</span>
                 )}
               </div>
+            </div>
+          </Card>
+        )}
+
+        {autoCalibInfo?.cam_h_m != null && (
+          <Card label="자동 캘리브레이션 추정값">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 12, color: "#94a3b8" }}>
+              <span>카메라 높이</span>
+              <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.cam_h_m} m</b>
+              <span>도로 폭</span>
+              <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_width_m} m</b>
+              <span>근거리</span>
+              <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.near_m} m</b>
+              <span>원거리</span>
+              <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.far_m} m</b>
+              <span>카메라 틸트</span>
+              <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.pitch_deg}°</b>
             </div>
           </Card>
         )}

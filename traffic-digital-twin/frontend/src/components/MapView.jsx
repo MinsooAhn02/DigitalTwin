@@ -84,6 +84,9 @@ export default function MapView({
   onMapClick,
   mapMode = "dark",
   onMapModeChange,
+  fovNearM = null,
+  fovFarM = null,
+  fovRoadWidthM = null,
 }) {
   const { t } = useLang();
   const showVehicles = viewState.zoom >= VEHICLE_MIN_ZOOM;
@@ -139,10 +142,19 @@ export default function MapView({
 
   const fovLayer = useMemo(() => {
     if (!selectedCctv) return null;
+    // 자동 캘리브레이션 추정값이 있으면 실제 near/far/폭 반영, 없으면 고정 기본값
+    const nearM = fovNearM ?? 15;
+    const farM  = fovFarM  ?? 90;
+    const fovDeg = fovRoadWidthM != null
+      ? Math.min(120, 2 * Math.atan2(fovRoadWidthM / 2, nearM) * 180 / Math.PI * 1.4)
+      : 70;
     const ring = selectedCctv.calibGpsRing ?? computeFovPolygon(
       selectedCctv.lat,
       selectedCctv.lon,
       selectedCctv.heading ?? 0,
+      fovDeg,
+      farM,
+      nearM,
     );
     return new PolygonLayer({
       id:             "cctv-fov",
@@ -154,7 +166,7 @@ export default function MapView({
       stroked:        true,
       filled:         true,
     });
-  }, [selectedCctv]);
+  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM]);
 
   const nodeStroked = mapMode !== "dark";
   const nodeOutline = mapMode === "satellite" ? [0, 0, 0, 230] : [80, 80, 80, 180];

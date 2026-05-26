@@ -12,7 +12,7 @@ import { useLang }   from "./i18n/index.jsx";
 const INITIAL_VIEW = {
   longitude: 127.0386,
   latitude:  37.4626,
-  zoom:      14,
+  zoom:      12,
   pitch:     0,
   bearing:   0,
 };

@@ -1047,7 +1047,11 @@ async def live_loop(detector, stream) -> None:
             if ok:
                 logger.info("차선 감지 자동 캘리브레이션 완료 (bearing=%.1f°)", used_bearing)
                 _auto_calib_attempts = 0
-                if abs((used_bearing - bearing + 180) % 360 - 180) > 90:
+                if analytics.road_bearing_deg is None:
+                    # 노드링크 bearing 없음 → 자동 캘리브 bearing 사용
+                    analytics.road_bearing_deg = used_bearing
+                elif abs((used_bearing - bearing + 180) % 360 - 180) > 90:
+                    # VP 반전 감지 → 갱신
                     analytics.road_bearing_deg = used_bearing
                 await _broadcast({
                     "type": "auto_calibrated",

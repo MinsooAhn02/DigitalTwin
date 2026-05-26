@@ -273,15 +273,22 @@ class TrafficAnalytics:
         v.is_speeding = v.speed_kph > self.speed_limit_kph
 
     def _project_to_road_axis(self, vehicles: list[VehicleState]) -> None:
-        """차량 GPS를 도로 bearing 축에 투영 → 횡방향 흔들림 제거."""
+        """차량 GPS를 도로 bearing 축에 투영 → 횡방향 흔들림 제거.
+
+        카메라 GPS를 고정 기준점으로 사용해 차량 수 변동에 따른 기준점 흔들림 방지.
+        """
         if self.road_bearing_deg is None or not vehicles:
             return
         b = math.radians(self.road_bearing_deg)
         sin_b, cos_b = math.sin(b), math.cos(b)
 
-        # 현재 프레임 차량 위치의 중심을 도로축 기준점으로 사용
-        ref_lat = sum(v.lat for v in vehicles) / len(vehicles)
-        ref_lon = sum(v.lon for v in vehicles) / len(vehicles)
+        # 카메라 GPS를 고정 기준점으로 사용 (cam_lat/lon 없으면 차량 centroid 대체)
+        if self.cam_lat is not None and self.cam_lon is not None:
+            ref_lat = self.cam_lat
+            ref_lon = self.cam_lon
+        else:
+            ref_lat = sum(v.lat for v in vehicles) / len(vehicles)
+            ref_lon = sum(v.lon for v in vehicles) / len(vehicles)
         R_lat = 110574.0
         R_lon = 111320.0 * math.cos(math.radians(ref_lat))
 

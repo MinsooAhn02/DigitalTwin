@@ -74,7 +74,7 @@ def _save_speed_scale(cam_key: str, scale: float, converged: bool) -> None:
         )
     except Exception as exc:
         logger.warning("speed_scale 저장 실패: %s", exc)
-from nodelink import get_road_info
+from nodelink import get_road_info, get_road_snap
 from config import (
     CAPTURE_INTERVAL_MS,
     CAPTURE_QUALITY,
@@ -416,19 +416,11 @@ class CameraSwitch(BaseModel):
 async def switch_camera(body: CameraSwitch):
     """클릭한 CCTV 정보 저장 + transformer 재보정 + BoT-SORT 리셋 + live_loop 스트림 전환."""
     global _current_cam, _cam_version
-    _current_cam = {
-        "lat": body.lat, "lon": body.lon,
-        "name": body.name, "cctvurl": body.cctvurl,
-    }
     _cam_version += 1
     analytics.reset()
     cam_key = roi_manager.camera_key(body.cctvurl)
     analytics.speed_scale = _load_speed_scale(cam_key)
     logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
-
-    # live_loop 스트림 전환 큐잉
-    if body.cctvurl:
-        await _camera_queue.put({"url": body.cctvurl, "lat": body.lat, "lon": body.lon})
 
     # BoT-SORT 내부 상태 리셋
     det = getattr(app.state, "detector", None)
@@ -442,6 +434,7 @@ async def switch_camera(body: CameraSwitch):
 
     # 노드링크 DB에서 가장 가까운 도로의 제한속도 자동 적용
     road = await asyncio.to_thread(get_road_info, body.lat, body.lon, _parse_road_name_hint(body.name))
+    road_snap = await asyncio.to_thread(get_road_snap, body.lat, body.lon, _parse_road_name_hint(body.name))
     if road and road["max_spd"] > 0:
         analytics.speed_limit_kph = float(road["max_spd"])
         logger.info("노드링크 제한속도 적용: %d kph (%s)", road["max_spd"], road.get("road_name", ""))
@@ -453,11 +446,26 @@ async def switch_camera(body: CameraSwitch):
     name_bearing = _parse_name_bearing(body.name, road_bearing)
     effective_bearing = name_bearing if name_bearing is not None else road_bearing
     analytics.road_bearing_deg = effective_bearing
-    analytics.cam_lat = body.lat
-    analytics.cam_lon = body.lon
-    _transformer.update_gps_center(body.lat, body.lon, bearing_deg=effective_bearing or 0.0)
 
-    logger.info("카메라 전환: %s (%.4f, %.4f) bearing=%.1f°", body.name, body.lat, body.lon, effective_bearing or 0.0)
+    _current_cam = {
+        "lat": body.lat, "lon": body.lon,
+        "name": body.name, "cctvurl": body.cctvurl,
+        "snap_lat": road_snap["snap_lat"] if road_snap else body.lat,
+        "snap_lon": road_snap["snap_lon"] if road_snap else body.lon,
+    }
+
+    # live_loop 스트림 전환 큐잉
+    if body.cctvurl:
+        await _camera_queue.put({"url": body.cctvurl, "lat": body.lat, "lon": body.lon,
+                                  "snap_lat": _current_cam["snap_lat"], "snap_lon": _current_cam["snap_lon"]})
+
+    analytics.cam_lat = _current_cam["snap_lat"]
+    analytics.cam_lon = _current_cam["snap_lon"]
+    _transformer.update_gps_center(_current_cam["snap_lat"], _current_cam["snap_lon"], bearing_deg=effective_bearing or 0.0)
+
+    logger.info("카메라 전환: %s (%.4f, %.4f) snap=(%.4f, %.4f) bearing=%.1f°",
+                body.name, body.lat, body.lon,
+                _current_cam["snap_lat"], _current_cam["snap_lon"], effective_bearing or 0.0)
     return {"ok": True, "road": road}
 
 
@@ -960,7 +968,11 @@ async def live_loop(detector, stream) -> None:
                 cam = _camera_queue.get_nowait()
             try:
                 await asyncio.to_thread(stream.switch_to, cam["url"])
-                _transformer.update_gps_center(cam["lat"], cam["lon"], bearing_deg=analytics.road_bearing_deg or 0.0)
+                snap_lat = cam.get("snap_lat", cam["lat"])
+                snap_lon = cam.get("snap_lon", cam["lon"])
+                _transformer.update_gps_center(snap_lat, snap_lon, bearing_deg=analytics.road_bearing_deg or 0.0)
+                analytics.cam_lat = snap_lat
+                analytics.cam_lon = snap_lon
                 tracker = VehicleTracker()
                 analytics.reset()
                 skip_budget = 0
@@ -1021,6 +1033,8 @@ async def live_loop(detector, stream) -> None:
                         cam.get("name", ""),
                         road_info["bearing_deg"] if road_info else None,
                     ),
+                    "snap_lat": snap_lat,
+                    "snap_lon": snap_lon,
                 })
                 logger.info("카메라 전환 완료, camera_ready 신호 전송")
             except RuntimeError as e:

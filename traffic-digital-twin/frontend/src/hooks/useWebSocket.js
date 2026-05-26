@@ -41,7 +41,7 @@ export function useWebSocket() {
         const data = JSON.parse(evt.data);
         // 메시지 타입 분기
         if (data.type === "camera_ready") {
-          setCameraReadyInfo({ camera_key: data.camera_key, roi: data.roi, name: data.name, calibrated: data.calibrated ?? false, road_name: data.road_name ?? null, road_lanes: data.road_lanes ?? null, road_max_spd: data.road_max_spd ?? null, road_bearing: data.road_bearing ?? null, name_bearing: data.name_bearing ?? null });
+          setCameraReadyInfo({ camera_key: data.camera_key, roi: data.roi, name: data.name, calibrated: data.calibrated ?? false, road_name: data.road_name ?? null, road_lanes: data.road_lanes ?? null, road_max_spd: data.road_max_spd ?? null, road_bearing: data.road_bearing ?? null, name_bearing: data.name_bearing ?? null, snap_lat: data.snap_lat ?? null, snap_lon: data.snap_lon ?? null });
           setCameraReady((n) => n + 1);
         } else if (data.type === "camera_error") {
           setError(`카메라 전환 실패: ${data.message ?? ""}`);

@@ -218,6 +218,8 @@ export default function App() {
             ?? autoCalibInfo?.heading
             ?? null
           }
+          fovSnapLat={cameraReadyInfo?.snap_lat ?? selectedCctv?.lat ?? null}
+          fovSnapLon={cameraReadyInfo?.snap_lon ?? selectedCctv?.lon ?? null}
         />
 
         {/* 연결 상태 칩 */}

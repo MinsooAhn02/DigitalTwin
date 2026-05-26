@@ -45,6 +45,10 @@ class LinkInfo(TypedDict):
     cx_lon: float
     dist_m: float
     bearing_deg: float | None  # F_NODE → T_NODE 방향 (0=북, 시계방향)
+    f_lat: float | None
+    f_lon: float | None
+    t_lat: float | None
+    t_lon: float | None
 
 
 def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -156,6 +160,10 @@ def get_links_near(lat: float, lon: float, radius_km: float = 0.3) -> list[LinkI
                 cx_lon=row["cx_lon"],
                 dist_m=round(d, 1),
                 bearing_deg=round(bearing, 1) if bearing is not None else None,
+                f_lat=float(row["f_lat"]) if row["f_lat"] is not None else None,
+                f_lon=float(row["f_lon"]) if row["f_lon"] is not None else None,
+                t_lat=float(row["t_lat"]) if row["t_lat"] is not None else None,
+                t_lon=float(row["t_lon"]) if row["t_lon"] is not None else None,
             ))
     result.sort(key=lambda x: x["dist_m"])
     return result
@@ -179,6 +187,78 @@ def _road_name_matches(link_road_name: str, hint: str) -> bool:
 
     # 키워드 없이 숫자(호선 번호)만 비교
     return digits(ln) == digits(hn) and bool(digits(hn))
+
+
+def _project_to_segment(
+    px_m: float, py_m: float,
+    bx_m: float, by_m: float,
+) -> tuple[float, float]:
+    """Clamp-project point (px,py) onto segment (0,0)→(bx,by), metres relative to F_NODE."""
+    seg_sq = bx_m * bx_m + by_m * by_m
+    if seg_sq < 1e-6:
+        return 0.0, 0.0
+    t = max(0.0, min(1.0, (px_m * bx_m + py_m * by_m) / seg_sq))
+    return t * bx_m, t * by_m
+
+
+def get_road_snap(
+    lat: float, lon: float, road_name_hint: str | None = None
+) -> dict | None:
+    """Return selected road link's info + camera GPS projected onto road centerline.
+
+    Returns dict:
+      snap_lat, snap_lon  – nearest point on road segment (use as polygon/transformer origin)
+      bearing_deg         – F→T bearing
+      road_name, lanes, max_spd, road_rank, road_width_m
+      cam_dist_m          – distance from camera GPS to snapped point
+    or None if DB unavailable / no link found.
+    """
+    try:
+        links = get_links_near(lat, lon, radius_km=0.5)
+    except FileNotFoundError:
+        return None
+    if not links:
+        return None
+
+    # Same selection logic as get_road_info
+    link = links[0]
+    if road_name_hint:
+        matched = [l for l in links if _road_name_matches(l["road_name"], road_name_hint)]
+        if matched:
+            link = matched[0]
+
+    f_lat, f_lon = link["f_lat"], link["f_lon"]
+    t_lat, t_lon = link["t_lat"], link["t_lon"]
+
+    # Default snap = link centre-point
+    snap_lat, snap_lon = link["cx_lat"], link["cx_lon"]
+
+    if None not in (f_lat, f_lon, t_lat, t_lon):
+        R_lat_m = 110574.0
+        R_lon_m = 111320.0 * math.cos(math.radians(lat))
+        px_m = (lon - f_lon) * R_lon_m
+        py_m = (lat - f_lat) * R_lat_m
+        bx_m = (t_lon - f_lon) * R_lon_m
+        by_m = (t_lat - f_lat) * R_lat_m
+        sx_m, sy_m = _project_to_segment(px_m, py_m, bx_m, by_m)
+        snap_lat = f_lat + sy_m / R_lat_m
+        snap_lon = f_lon + sx_m / R_lon_m
+
+    rank = link.get("road_rank", "")
+    lane_w = 3.5 if rank in ("101", "102") else (3.25 if rank == "103" else 3.0)
+    road_width_m = max(1, link["lanes"] or 2) * lane_w
+
+    return {
+        "snap_lat":    round(snap_lat, 7),
+        "snap_lon":    round(snap_lon, 7),
+        "bearing_deg": link["bearing_deg"],
+        "road_name":   link["road_name"],
+        "lanes":       link["lanes"],
+        "max_spd":     link["max_spd"],
+        "road_rank":   link["road_rank"],
+        "road_width_m": round(road_width_m, 1),
+        "cam_dist_m":  round(_dist_m(lat, lon, snap_lat, snap_lon), 1),
+    }
 
 
 def get_road_info(lat: float, lon: float, road_name_hint: str | None = None) -> LinkInfo | None:

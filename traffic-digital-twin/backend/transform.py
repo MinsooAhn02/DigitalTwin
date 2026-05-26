@@ -221,23 +221,10 @@ class PerspectiveTransformer:
         vp_y = float(np.median([p[1] for p in vp_cands])) if len(vp_cands) >= 2 else 0.0
         vp_y = min(vp_y, h * 0.55)
 
-        # ── 4. 카메라 틸트 → 근거리/원거리 추정 ─────────────────────
-        # pitch_deg = atan2(중심에서 VP까지 픽셀 수, 초점거리)
+        # ── 4. 카메라 틸트 각도 추정 ─────────────────────────────────
         pitch_deg = math.degrees(math.atan2(h / 2 - vp_y, fy))
         pitch_deg = max(3.0, min(50.0, pitch_deg))
         vfov_half = math.degrees(math.atan2(h / 2, fy))  # ≈22.6° for fy=1.2h
-
-        cam_h = 6.0  # 도로 CCTV 평균 설치 높이(m)
-        near_angle = math.radians(pitch_deg + vfov_half)
-        near_m = cam_h / math.tan(near_angle) if near_angle > 0 else 10.0
-        near_m = max(4.0, min(20.0, near_m))
-
-        far_angle = math.radians(pitch_deg - vfov_half)
-        if far_angle > math.radians(1.0):
-            far_m = min(200.0, cam_h / math.tan(far_angle))
-        else:
-            far_m = near_m + road_width_m * 8.0
-        far_m = max(near_m + 10.0, far_m)
 
         # ── 5. 하단 도로 경계 검출 ───────────────────────────────────
         xs_bot: list[float] = []
@@ -257,7 +244,27 @@ class PerspectiveTransformer:
         if road_px_w < w * 0.08:
             return False
 
-        # ── 6. 원근 사다리꼴 픽셀 좌표 ──────────────────────────────
+        # ── 6. 카메라 높이 역산 → near_m / far_m ─────────────────────
+        # Pinhole 공식: road_width_m = road_px_w × d_near / fy
+        # → d_near(하단 도로면까지 거리) = road_width_m × fy / road_px_w
+        # → cam_h(설치 높이) = d_near × tan(pitch + vfov_half)
+        d_near = road_width_m * fy / road_px_w
+        beta_near = math.radians(pitch_deg + vfov_half)
+        cam_h = d_near * math.tan(beta_near)
+        cam_h = max(3.0, min(40.0, cam_h))   # 현실 범위 클램프 (3-40m)
+
+        near_m = d_near  # 하단 = 최근거리
+        near_m = max(3.0, min(30.0, near_m))
+
+        far_angle = pitch_deg - vfov_half
+        if far_angle > 1.0:  # 지평선 위 → 유한한 원거리
+            far_m = cam_h / math.tan(math.radians(far_angle))
+            far_m = min(300.0, far_m)
+        else:                # 지평선 근처 → 사실상 무한 (도로가 수평에 가깝게 보임)
+            far_m = near_m + road_width_m * 8.0
+        far_m = max(near_m + 10.0, far_m)
+
+        # ── 7. 원근 사다리꼴 픽셀 좌표 ──────────────────────────────
         half_w  = road_width_m / 2.0
         road_cx = (road_left + road_right) / 2.0
 
@@ -275,7 +282,7 @@ class PerspectiveTransformer:
             [road_left,             h      ],  # BL near-left
         ])
 
-        # ── 7. GPS 코너 계산 ─────────────────────────────────────────
+        # ── 8. GPS 코너 계산 ─────────────────────────────────────────
         R_lat = 110574.0
         R_lon = 111320.0 * math.cos(math.radians(self._gps_center_lat))
         b = math.radians(bearing_deg)
@@ -302,8 +309,8 @@ class PerspectiveTransformer:
         self._is_calibrated = False  # 자동 추정 = 수동 캘리브레이션 아님
 
         logger.info(
-            "차선 감지 자동 캘리브레이션: pitch=%.1f° near=%.1fm far=%.1fm half_w=%.1fm",
-            pitch_deg, near_m, far_m, half_w,
+            "차선 감지 자동 캘리브레이션: pitch=%.1f° cam_h=%.1fm near=%.1fm far=%.1fm half_w=%.1fm",
+            pitch_deg, cam_h, near_m, far_m, half_w,
         )
         return True
 

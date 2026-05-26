@@ -112,6 +112,7 @@ export default function App() {
   const vehicleCnt   = activeData?.vehicle_count  ?? 0;
   const classCounts  = activeData?.class_counts   ?? {};
   const avgSpeed     = activeData?.avg_speed_kph  ?? 0;
+  const ourAvgKph    = activeData?.our_avg_kph    ?? 0;   // 10분 rolling avg (ITS 비교용)
   const itsSpeed     = activeData?.its_speed_kph  ?? null;
   const speedErrPct  = activeData?.speed_error_pct ?? null;
   const speedScale     = activeData?.speed_scale           ?? 1.0;
@@ -373,11 +374,11 @@ export default function App() {
           <Card label="ITS 구간속도 비교">
             <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center", fontSize: 12 }}>
               <div style={{ textAlign: "center" }}>
-                <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>측정 평균</div>
+                <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>측정 평균 (10분)</div>
                 <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>
-                  {avgSpeed > 0 ? avgSpeed.toFixed(1) : "—"}
+                  {ourAvgKph > 0 ? ourAvgKph.toFixed(1) : "—"}
                 </div>
-                {avgSpeed > 0 && <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>}
+                {ourAvgKph > 0 && <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>}
               </div>
               <div style={{ color: "#374151", fontSize: 18 }}>vs</div>
               <div style={{ textAlign: "center" }}>
@@ -385,7 +386,7 @@ export default function App() {
                 <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{itsSpeed.toFixed(1)}</div>
                 <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>
               </div>
-              {speedErrPct !== null && avgSpeed > 0 && (
+              {speedErrPct !== null && ourAvgKph > 0 && (
                 <div style={{ textAlign: "center" }}>
                   <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>오차</div>
                   <div style={{

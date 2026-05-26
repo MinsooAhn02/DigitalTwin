@@ -49,9 +49,8 @@ export function useWebSocket() {
         } else if (data.type === "auto_calibrated") {
           setCameraReadyInfo((prev) => {
             const base = prev ?? {};
-            const update = { ...base, calibrated: true };
-            if (data.heading != null) update.name_bearing = data.heading;
-            return update;
+            // calibrated 플래그만 업데이트. name_bearing(노드링크 방위)은 덮어쓰지 않음.
+            return { ...base, calibrated: true };
           });
           setAutoCalibInfo({
             cam_h_m:      data.cam_h_m      ?? null,

@@ -212,6 +212,12 @@ export default function App() {
           fovNearM={autoCalibInfo?.near_m ?? null}
           fovFarM={autoCalibInfo?.far_m ?? null}
           fovRoadWidthM={autoCalibInfo?.road_width_m ?? null}
+          fovHeadingDeg={
+            cameraReadyInfo?.name_bearing
+            ?? cameraReadyInfo?.road_bearing
+            ?? autoCalibInfo?.heading
+            ?? null
+          }
         />
 
         {/* 연결 상태 칩 */}

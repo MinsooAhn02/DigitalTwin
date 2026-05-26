@@ -109,6 +109,7 @@ export default function MapView({
   fovNearM = null,
   fovFarM = null,
   fovRoadWidthM = null,
+  fovHeadingDeg = null,
 }) {
   const { t } = useLang();
   const showVehicles = viewState.zoom >= VEHICLE_MIN_ZOOM;
@@ -164,6 +165,8 @@ export default function MapView({
 
   const fovLayer = useMemo(() => {
     if (!selectedCctv) return null;
+    // 폴리곤 heading 우선순위: fovHeadingDeg (노드링크/이름 방위) > selectedCctv.heading > 0
+    const heading = fovHeadingDeg ?? selectedCctv.heading ?? 0;
     let ring;
     if (selectedCctv.calibGpsRing) {
       // 수동 4점 보정: 실제 클릭한 GPS 코너 사용
@@ -172,27 +175,27 @@ export default function MapView({
       // 자동 캘리브레이션: transform.py와 동일한 직사각형 GPS 코너
       ring = computeCalibPolygon(
         selectedCctv.lat, selectedCctv.lon,
-        selectedCctv.heading ?? 0,
+        heading,
         fovNearM, fovFarM, fovRoadWidthM / 2,
       );
     } else {
       // 미보정: FOV 각도 기반 기본 사다리꼴
       ring = computeFovPolygon(
         selectedCctv.lat, selectedCctv.lon,
-        selectedCctv.heading ?? 0,
+        heading,
       );
     }
     return new PolygonLayer({
       id:             "cctv-fov",
       data:           [{ ring }],
       getPolygon:     (d) => d.ring,
-      getFillColor:   [34, 211, 238, 30],
-      getLineColor:   [34, 211, 238, 160],
-      lineWidthMinPixels: 1.5,
+      getFillColor:   [34, 211, 238, 25],
+      getLineColor:   [34, 211, 238, 140],
+      lineWidthMinPixels: 1,
       stroked:        true,
       filled:         true,
     });
-  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM]);
+  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM, fovHeadingDeg]);
 
   const nodeStroked = mapMode !== "dark";
   const nodeOutline = mapMode === "satellite" ? [0, 0, 0, 230] : [80, 80, 80, 180];

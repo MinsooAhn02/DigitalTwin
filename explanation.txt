@@ -1,6 +1,6 @@
 ================================================================
   Traffic Digital Twin — 시스템 설명서
-  최종 업데이트: 2026-05-24 (IDStabilizer 수정, 속도 자동보정 추가)
+  최종 업데이트: 2026-05-26 (자동 GPS 캘리브레이션, ITS 비교 창 정렬 수정)
 ================================================================
 
 이 문서는 프로젝트를 처음 접하는 사람도 전체 구조와 동작 방식을
@@ -293,11 +293,16 @@ DigitalTwin/
     8. avg_speed_kph > 0이면 _speed_samples에 기록 (ITS 비교용 5분 이력)
 
   calibrate_from_its(its_speed_kph):
-    ITS 구간속도와 최근 5분 측정 평균을 비교해 speed_scale을 자동 갱신.
-      our_avg = 최근 300초 _speed_samples 평균
+    ITS 구간속도와 최근 10분 측정 평균을 비교해 speed_scale을 자동 갱신.
+      our_avg = 최근 600초 _speed_samples 평균 (window_s=600)
       target  = speed_scale × (ITS / our_avg) = ITS / raw_avg
       EMA 갱신: 미수렴 시 α=0.7(빠른 학습), 수렴 후 α=0.95(거의 고정)
       수렴 판정: 연속 3회 변화율 < 1% → speed_scale_converged = True
+      변동성 가드: 표준편차/평균(CV) > 0.4 → 불안정 구간으로 갱신 스킵
+
+  _speed_samples: maxlen=6000 (10분 @ 10fps)
+    avg_speed_kph > 0인 프레임마다 (속도, 단조 시각) 튜플 추가.
+    calibrate_from_its()와 _inject_its_speed()의 our_avg_kph 계산에 공통 사용.
 
   * 과속 기준: 카메라 전환 시 nodelink DB에서 해당 도로 max_spd 자동 적용.
     DB 없거나 정보 없으면 config.SPEED_LIMIT_KPH(기본 120) 사용.
@@ -329,6 +334,7 @@ DigitalTwin/
   is_calibrated (property)
     - update_from_calibration() 호출 후 True
     - update_gps_center() (근사) 호출 후 False
+    - auto_calibrate_from_frame() 성공 후에도 False 유지 (수동 4점 보정만 True)
     - camera_ready WS 메시지에 포함 → 프론트엔드 미보정 표시에 활용
   update_from_calibration(data): 보정 데이터 적용 + 행렬 재계산
     - _H_gps: 픽셀→GPS 호모그래피 재계산
@@ -336,6 +342,36 @@ DigitalTwin/
                 → 픽셀→미터 호모그래피도 함께 재계산 (두 행렬 일관성 보장)
     * 보정 전: _H_meter는 config.py 기본 격자값 사용 → 속도 오차 큼
     * 보정 후: 실측 GPS 기반 미터 좌표로 _H_meter 갱신 → 거리 계산 정확도 향상
+
+  auto_calibrate_from_frame(frame, bearing_deg, road_width_m) → bool
+    수동 보정 없이도 차선 감지로 호모그래피를 자동 추정.
+    성공 시 True 반환(+로그), 차선 미감지 시 False(기존 행렬 유지).
+
+    처리 단계:
+      1. Canny 엣지 검출
+      2. HoughLinesP로 직선 세그먼트 추출
+      3. 각도 필터링: 15°~75° (도로 사선) 만 통과, 수평·수직 제거
+      4. 소실점(VP) 추정: 필터링된 직선 쌍의 교점 중위수
+         - _line_intersection(l1, l2): 행렬식으로 교점 계산
+         - VP 유효 범위: 프레임 상단 절반 이내
+      5. 카메라 피치 역산:
+           fy = 프레임 높이 × 1.2  (35mm 등가 환산 추정)
+           pitch_deg = atan2(h/2 − vp_y, fy)  (단위: 도)
+      6. 도로 경계 검출: 세그먼트 끝점 중 VP보다 아래인 점들로
+         좌/우 경계 X 좌표 추정 → road_px_w 계산
+      7. 핀홀 카메라 모델로 카메라 높이 역산:
+           vfov_half = atan2(h/2, fy)  (수직 화각 절반)
+           d_near = road_width_m × fy / road_px_w   (근거리 도로까지 거리)
+           cam_h  = d_near × tan(pitch_deg + vfov_half)
+           cam_h 클램핑: 3.0 m ~ 40.0 m
+      8. near_m / far_m 계산 (카메라로부터 도로 영역 전·후 거리):
+           near_m = d_near (클램핑: 3 ~ 30 m)
+           far_m  = cam_h / tan(pitch_deg − vfov_half)  (클램핑: ≤300 m)
+      9. 픽셀 좌표 사다리꼴 구성:
+           하단(근거리): 전체 폭 하단 1/3
+           상단(원거리): VP 근방 좁은 영역
+      10. bearing_deg + near_m/far_m/road_width_m/2 로 GPS 코너 4점 계산
+      11. findHomography() → _H_gps, _H_meter 동시 갱신
 
 
 [ roi_manager.py ]
@@ -373,6 +409,8 @@ DigitalTwin/
                             → analytics.road_bearing_deg = name_bearing ?? road_bearing
                             → detector.reset_tracker(), analytics.reset()
                             → speed_scale.json에서 카메라별 보정 계수 복원
+                            → 수동 보정 없는 카메라: 노드링크 차선 수로 도로 폭 계산
+                              → _auto_calib_road_width_m 설정, _auto_calib_attempts=5
                             → "camera_ready" WS 신호 발송
                               (road_name, road_lanes, road_max_spd, road_bearing,
                                name_bearing 포함)
@@ -397,15 +435,23 @@ DigitalTwin/
   백그라운드:
     live_loop         OpenCV로 HLS 스트림 읽기 → 탐지 → 브로드캐스트
                       카메라 전환 시 speed_scale.json에서 보정 계수 자동 복원
+                      _auto_calib_attempts > 0이면 각 프레임마다
+                        auto_calibrate_from_frame() 시도 (최대 5회), 성공 시 중단
     hls_refresh_loop  30분마다 ITS API 재호출 → URL 갱신
     _its_speed_poll_loop  5분마다 ITS 구간속도 조회 → analytics.calibrate_from_its()
                           보정 계수 갱신 후 speed_scale.json 자동 저장
+
+  자동 캘리브레이션 관련 글로벌:
+    _auto_calib_attempts     남은 자동 캘리브레이션 시도 횟수 (0이면 비활성)
+    _auto_calib_road_width_m 노드링크 차선 수 기반 도로 폭 (m)
+                             차선 폭: rank 101/102 → 3.5m, 103 → 3.25m, 기타 → 3.0m
 
   WS 브로드캐스트 페이로드 추가 필드:
     speed_scale           현재 보정 계수 (1.0 = 미보정)
     speed_scale_converged 수렴 여부 (True = 학습 거의 완료, 저장됨)
     its_speed_kph         최근 ITS 구간속도 (없으면 생략)
-    speed_error_pct       측정 평균 대비 ITS 오차율 (%)
+    our_avg_kph           최근 10분 측정 평균 속도 (ITS 비교 기준, 샘플 5개 미만이면 0)
+    speed_error_pct       our_avg_kph 대비 ITS 오차율 (%) — 둘 다 0보다 클 때만 포함
 
 
 ================================================================
@@ -624,9 +670,15 @@ DigitalTwin/
     kph × speed_scale > MAX_REASONABLE_KPH(120) → 이상치 스킵 (이번 프레임 유지).
     OLS 회귀는 단순 (newest - oldest)/dt 대비 내부 이상값에 강인함.
 
-  ─── 단계 4: ITS 구간속도 자동 보정 (speed_scale) ───
+  ─── 단계 4: 자동 GPS 캘리브레이션 (auto_calibrate_from_frame) ───
+    수동 4점 보정 없이 차선 감지만으로 호모그래피를 근사 추정.
+    카메라 전환 직후 최대 5프레임 동안 시도 → 성공 시 중단.
+    노드링크 차선 수로 도로 폭(m) 계산 → 핀홀 모델로 카메라 높이 역산.
+    실패 시 기존 행렬(기본 격자) 유지 → 이후 ITS 보정으로 스케일 보완.
+
+  ─── 단계 5: ITS 구간속도 자동 보정 (speed_scale) ───
     보정 후에도 호모그래피 스케일 오차로 ±50% 오차가 남을 수 있음.
-    ITS API 5분 구간속도와 같은 기간 측정 평균을 비교해 speed_scale 학습.
+    ITS API 5분 구간속도와 최근 10분 측정 평균을 비교해 speed_scale 학습.
       target = speed_scale × (ITS속도 / 측정평균)
       수렴 전: EMA α=0.7 (빠른 학습), 수렴 후: α=0.95 (거의 고정)
       수렴 판정: 연속 3회 변화율 < 1%
@@ -728,9 +780,11 @@ DigitalTwin/
          findHomography 입력 → 원근 변환 효과 부여 (Fix B)
          직사각형→직사각형은 선형 스케일로 퇴화해 근거리 과속/원거리 저속 발생
       3. OLS 회귀(18프레임) — 단발 오차 희석
-      4. ITS 구간속도 자동 보정(speed_scale) — 체계적 스케일 오차 장기 보정
+      4. 자동 GPS 캘리브레이션(auto_calibrate_from_frame) — 차선 감지 기반 초기 근사
+         수동 보정 없을 때 카메라 전환 직후 최대 5프레임 자동 시도
+      5. ITS 구간속도 자동 보정(speed_scale) — 체계적 스케일 오차 장기 보정
          5분마다 ITS와 비교, 수렴 후 카메라별 JSON 저장 → 재시작 후 즉시 복원
-      5. 캘리브레이션 포인트를 가까운 2점 + 먼 2점으로 배치하면
+      6. 캘리브레이션 포인트를 가까운 2점 + 먼 2점으로 배치하면
          호모그래피가 depth range를 더 잘 커버하여 오차 감소
 
   [중복 차량 ID 문제 — IDStabilizer _remap 누적]
@@ -794,3 +848,32 @@ DigitalTwin/
     fps_labels가 그 이후 줄에서 채워짐. Python 클로저는 호출 시점에
     변수를 조회(late binding)하므로, UI 렌더링 완료 후에만 callback이
     실행되어 안전함.
+
+  [ITS 10분 창 vs 5분 집계 — 타이밍 정렬 문제]
+    ITS API는 고정 벽시계 간격(:00, :05, :10…)으로 5분 구간속도를 생성.
+    서버 부팅 시각은 임의이므로 _its_speed_poll_loop 폴링 주기(:00)와
+    ITS 갱신 경계(:05) 사이에 최대 5분 오프셋이 발생.
+    5분 창을 쓰면 ITS 집계 구간과 우리 측정 창이 전혀 겹치지 않을 수 있음.
+    10분 창(window_s=600)을 쓰면 어떤 오프셋이어도 5분짜리 ITS 창이
+    반드시 우리 창 내부에 완전히 포함됨 → 항상 유효한 비교 보장.
+    대가: 속도 변화가 심한 도로에서는 10분 평균이 순간 ITS 값과 더 많이 다를 수 있음.
+    완화: CV > 0.4(표준편차/평균 40%) 조건으로 불안정 구간은 갱신 자체를 스킵.
+
+  [ITS 비교 표시 — our_avg_kph vs avg_speed_kph]
+    기존 UI는 avg_speed_kph(프레임 스냅샷 평균)를 ITS 5분 집계와 비교했으나,
+    두 값의 시간 단위가 달라 의미 없는 비교였음.
+    수정: _inject_its_speed()에서 _speed_samples를 직접 읽어 10분 롤링 평균
+    (our_avg_kph)를 계산해 페이로드에 포함.
+    calibrate_from_its()와 동일한 데이터 소스·창 크기를 사용하므로
+    UI 표시와 내부 보정 계수 학습이 동일한 기준으로 정렬됨.
+
+  [자동 GPS 캘리브레이션 설계 결정]
+    목표: 수동 4점 보정 없이도 합리적인 초기 호모그래피 제공.
+    선택: 차선 마킹 Hough 검출 + 소실점 추정 + 핀홀 카메라 모델.
+    한계:
+      - fy = h×1.2 가정 (실제 초점거리 미지): 스케일 오차 ±20~30% 가능
+      - 야간·눈·비·차량 밀집 등으로 차선 미감지 시 fallback으로 기본 격자 유지
+      - is_calibrated = False 유지 → 프론트엔드 미보정 표시, 수동 보정 유도
+    보완: 남은 스케일 오차는 ITS speed_scale 보정이 장기적으로 흡수.
+    차선 폭 결정: nodelink road_rank → 101/102=3.5m, 103=3.25m, 기타=3.0m.
+    MOCT 데이터는 단방향 기준 차선 수를 제공하므로 lanes×lane_w = 편도 도로 폭.

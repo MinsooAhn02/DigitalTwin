@@ -83,5 +83,10 @@
     "speed_scale": 0.8837,
     "converged": false,
     "updated_at": "2026-05-27T13:51:13.943317+00:00"
+  },
+  "382568ff4309": {
+    "speed_scale": 0.6867,
+    "converged": false,
+    "updated_at": "2026-05-27T20:52:32.512480+00:00"
   }
 }

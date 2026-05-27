@@ -72,6 +72,103 @@ function computeFovPolygon(lat, lon, headingDeg = 0, fovDeg = 70, distM = 90, ne
   ];
 }
 
+// 도로 중심선(road_pts) 따라 곡선 polygon 생성
+// road_pts: [[lat, lon], ...] F→T 순서
+// snapAlongM: road_pts[0]에서 snap까지의 거리(m)
+// headingDeg: 카메라 방향 (도로 중심선과 비교해 F→T / T→F 판별)
+// nearM, farM: snap 기준 앞/뒤 거리
+// halfWidthM: 도로 폭의 절반
+function computeRoadCorridorPolygon(roadPts, snapAlongM, headingDeg, nearM, farM, halfWidthM) {
+  const R_lat = 110574;
+  if (!roadPts || roadPts.length < 2) return null;
+
+  // 누적 거리 계산
+  const cumDist = [0];
+  for (let i = 1; i < roadPts.length; i++) {
+    const R_lon = 111320 * Math.cos(roadPts[i - 1][0] * Math.PI / 180);
+    cumDist.push(
+      cumDist[i - 1] +
+      Math.hypot(
+        (roadPts[i][0] - roadPts[i - 1][0]) * R_lat,
+        (roadPts[i][1] - roadPts[i - 1][1]) * R_lon,
+      ),
+    );
+  }
+  const totalLen = cumDist[cumDist.length - 1];
+
+  // snap에 가장 가까운 인덱스 찾기
+  const snapIdx = cumDist.reduce(
+    (best, d, i) => Math.abs(d - snapAlongM) < Math.abs(cumDist[best] - snapAlongM) ? i : best, 0
+  );
+  const i0 = Math.min(snapIdx, roadPts.length - 2);
+  const p0 = roadPts[i0], p1 = roadPts[i0 + 1];
+  const R_lon0 = 111320 * Math.cos(p0[0] * Math.PI / 180);
+  const roadBearFT = (Math.atan2(
+    (p1[1] - p0[1]) * R_lon0,
+    (p1[0] - p0[0]) * R_lat,
+  ) * 180 / Math.PI + 360) % 360;
+
+  // 카메라가 F→T 방향을 보는지 T→F 방향을 보는지 판단
+  const bearDiff = ((headingDeg - roadBearFT + 180) % 360) - 180;
+  const fwdIsFT = Math.abs(bearDiff) < 90;
+
+  // snap 기준 near/far 거리를 F→T 누적 거리계로 변환
+  // fwdIsFT=true: 카메라가 F→T 방향을 봄 → near/far 모두 snap보다 앞(cumDist 증가 방향)
+  // fwdIsFT=false: 카메라가 T→F 방향을 봄 → near/far 모두 snap보다 뒤(cumDist 감소 방향)
+  const nearDist = fwdIsFT ? snapAlongM + nearM : snapAlongM - nearM;
+  const farDist  = fwdIsFT ? snapAlongM + farM  : snapAlongM - farM;
+  const startD   = Math.max(0, Math.min(nearDist, farDist));
+  const endD     = Math.min(totalLen, Math.max(nearDist, farDist));
+  if (endD <= startD) return null;
+
+  // 누적 거리 d에 해당하는 보간 점 반환
+  function interp(d) {
+    for (let i = 0; i < roadPts.length - 1; i++) {
+      if (cumDist[i] <= d && d <= cumDist[i + 1]) {
+        const frac = (d - cumDist[i]) / Math.max(1e-9, cumDist[i + 1] - cumDist[i]);
+        return [
+          roadPts[i][0] + frac * (roadPts[i + 1][0] - roadPts[i][0]),
+          roadPts[i][1] + frac * (roadPts[i + 1][1] - roadPts[i][1]),
+        ];
+      }
+    }
+    return roadPts[roadPts.length - 1];
+  }
+
+  // startD ~ endD 구간의 중심선 점 수집
+  const center = [interp(startD)];
+  for (let i = 0; i < roadPts.length; i++) {
+    if (cumDist[i] > startD && cumDist[i] < endD) center.push(roadPts[i]);
+  }
+  center.push(interp(endD));
+
+  // 각 점에서 도로 방향에 수직으로 ±halfWidthM 오프셋
+  function offsetPts(pts, side) {
+    return pts.map((pt, i) => {
+      const prev = pts[i > 0 ? i - 1 : 0];
+      const next = pts[i < pts.length - 1 ? i + 1 : pts.length - 1];
+      const R_lon = 111320 * Math.cos(pt[0] * Math.PI / 180);
+      const dx = (next[1] - prev[1]) * R_lon; // 동(East) 성분 (미터)
+      const dy = (next[0] - prev[0]) * R_lat; // 북(North) 성분 (미터)
+      const len = Math.hypot(dx, dy) || 1e-9;
+      // 오른쪽 수직: (dy, -dx) / len × halfWidthM
+      const perpE =  (dy / len) * halfWidthM * side;
+      const perpN = -(dx / len) * halfWidthM * side;
+      return [pt[0] + perpN / R_lat, pt[1] + perpE / R_lon];
+    });
+  }
+
+  const right = offsetPts(center,  1);
+  const left  = offsetPts(center, -1);
+
+  // polygon: 오른쪽 엣지 → 왼쪽 엣지(역순) → 닫기
+  return [
+    ...right,
+    ...left.slice().reverse(),
+    right[0],
+  ].map(([lat, lon]) => [lon, lat]); // deck.gl: [lon, lat]
+}
+
 // 자동 캘리브레이션 후 — transform.py의 GPS 코너와 동일한 방식으로 계산
 // near/far 모두 road_width_m 고정 폭의 직사각형 (호모그래피 실제 사용 영역)
 function computeCalibPolygon(lat, lon, headingDeg, nearM, farM, halfWidthM) {
@@ -112,6 +209,8 @@ export default function MapView({
   fovHeadingDeg = null,
   fovSnapLat = null,
   fovSnapLon = null,
+  fovRoadPts = null,
+  fovSnapAlongM = null,
 }) {
   const { t } = useLang();
   const showVehicles = viewState.zoom >= VEHICLE_MIN_ZOOM;
@@ -176,8 +275,11 @@ export default function MapView({
       // 수동 4점 보정: 실제 클릭한 GPS 코너 사용
       ring = selectedCctv.calibGpsRing;
     } else if (fovNearM != null && fovFarM != null && fovRoadWidthM != null) {
-      // 자동 캘리브레이션: transform.py와 동일한 직사각형 GPS 코너
-      ring = computeCalibPolygon(originLat, originLon, heading, fovNearM, fovFarM, fovRoadWidthM / 2);
+      // 곡선 도로 polygon 우선, 없으면 직사각형 fallback
+      const curved = (fovRoadPts && fovSnapAlongM != null)
+        ? computeRoadCorridorPolygon(fovRoadPts, fovSnapAlongM, heading, fovNearM, fovFarM, fovRoadWidthM / 2)
+        : null;
+      ring = curved ?? computeCalibPolygon(originLat, originLon, heading, fovNearM, fovFarM, fovRoadWidthM / 2);
     } else {
       // 미보정: FOV 각도 기반 기본 사다리꼴
       ring = computeFovPolygon(originLat, originLon, heading);
@@ -192,7 +294,7 @@ export default function MapView({
       stroked:        true,
       filled:         true,
     });
-  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM, fovHeadingDeg, fovSnapLat, fovSnapLon]);
+  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM, fovHeadingDeg, fovSnapLat, fovSnapLon, fovRoadPts, fovSnapAlongM]);
 
   const nodeStroked = mapMode !== "dark";
   const nodeOutline = mapMode === "satellite" ? [0, 0, 0, 230] : [80, 80, 80, 180];

@@ -14,6 +14,35 @@ main.py — FastAPI WebSocket 브로드캐스트 서버
     ws/detect  — 브라우저 캔버스 프레임 처리 (YOLO 탭 활성 시)
     두 파이프라인은 동일 VehicleDetector를 공유하므로 동시에 track() 호출 금지.
     ws/detect 활성 시 live_loop는 프레임만 드레인하고 track()을 건너뜀.
+
+  도로 인식 및 GPS 보정:
+    switch_camera 호출 시:
+      1. nodelink SQLite DB에서 카메라 GPS 반경 500m 내 링크 쿼리
+      2. 카메라 GPS를 링크 F/T 노드 세그먼트에 직교 투영 → snap_lat/snap_lon (도로 중심선)
+      3. CCTV 이름에서 name_bearing 파싱 (도로명 방향 표기 기반)
+         없으면 nodelink F→T bearing 사용 (effective_bearing)
+      4. snap 좌표를 transformer GPS 기준점 및 FOV polygon 원점으로 사용
+
+    live_loop 카메라 전환 시:
+      5. OSM Overpass API로 도로폭 쿼리 (osm.py):
+           width 태그 → lanes:forward × 차선폭 → lanes/2 × 차선폭 순 우선순위
+           실패 시 nodelink lanes × 차선폭으로 폴백
+      6. 소실점(VP) 기반 자동 캘리브레이션 (auto_calibrate_from_frame):
+           - name_bearing 확정 시 (fix_direction=True): VP flip 스킵
+           - 미확정 시: VP가 우측 편향이면 bearing 180° 반전
+      7. 캘리브레이션 성공 시 auto_calibrated WS 메시지 브로드캐스트
+           (heading, near_m, far_m, road_width_m, cam_h_m, pitch_deg, road_length_m)
+
+  WS 메시지 타입:
+    camera_ready     카메라 전환 완료 (road_name, road_bearing, name_bearing,
+                     snap_lat, snap_lon, road_lanes, road_max_spd, calibrated)
+    auto_calibrated  자동 캘리브레이션 완료 (heading, near_m, far_m,
+                     road_width_m, cam_h_m, pitch_deg, road_length_m)
+    camera_error     카메라 전환 실패
+    [기타]           FrameAnalytics JSON (차량 추적 결과)
+
+  FOV polygon 방향 우선순위 (프론트엔드):
+    auto_calibrated.heading (곡률/VP 보정) > name_bearing > road_bearing (nodelink F→T)
 """
 
 from __future__ import annotations
@@ -114,7 +143,7 @@ _label_ann = sv.LabelAnnotator(text_scale=0.4, text_thickness=1, text_padding=3)
 
 # 차선 감지 자동 캘리브레이션 상태
 _auto_calib_attempts: int  = 0    # 남은 시도 횟수 (0 = 비활성)
-_auto_calib_road_width_m: float = 7.0  # lanes × lane_width_m
+_auto_calib_road_width_m: float = 7.0  # lanes × 2 × lane_width_m
 
 # ITS API 응답 캐시 (TTL 5분, 최대 50개 bbox 조합)
 _cctv_cache: TTLCache = TTLCache(maxsize=50, ttl=300)
@@ -217,15 +246,29 @@ _NAME_BEARING: dict[str, float] = {
 
 
 _ROAD_NAME_RE = re.compile(
+    # 우선순위 1: [국도 1호선] 대괄호 형식
     r"\[([^\]]*(?:국도|지방도|고속도로|특별시도|광역시도|시도|군도)[^\]]*)\]"
+    r"|"
+    # 우선순위 2: 대괄호 없이 도로종류 + 호선번호  예) "국도1호선", "지방도 302호"
+    r"((?:국도|지방도|고속도로|특별시도|광역시도|시도|군도)\s*\d+\s*호선?)"
 )
 
+
 def _parse_road_name_hint(cctv_name: str) -> str | None:
-    """CCTV 이름에서 '[국도 1호선]' 형태의 도로명을 파싱해 반환."""
+    """CCTV 이름에서 도로명 힌트를 파싱.
+
+    매칭 우선순위:
+      1. '[국도 1호선]' 대괄호 형식
+      2. '국도1호선', '지방도302호' 등 대괄호 없는 형식
+    ITS API cctvname에는 대부분 대괄호가 없으므로 두 형식 모두 지원.
+    """
     if not cctv_name:
         return None
     m = _ROAD_NAME_RE.search(cctv_name)
-    return m.group(1).strip() if m else None
+    if not m:
+        return None
+    # group(1) = 대괄호 형식, group(2) = 평문 형식
+    return (m.group(1) or m.group(2) or "").strip() or None
 
 
 def _parse_name_bearing(name: str, road_bearing: float | None = None) -> float | None:
@@ -252,8 +295,15 @@ def _parse_its_items(resp_json: dict) -> list[dict]:
     return raw if isinstance(raw, list) else []
 
 
-def _build_vehicles(tracked: "sv.Detections") -> "list[VehicleState]":
-    """BoT-SORT 결과를 VehicleState 리스트로 변환."""
+def _build_vehicles(
+    tracked: "sv.Detections",
+    frame_wh: tuple[int, int] | None = None,
+) -> "list[VehicleState]":
+    """BoT-SORT 결과를 VehicleState 리스트로 변환.
+
+    frame_wh: (width, height) — 프레임 범위 밖으로 Kalman 예측된 ghost 트랙 제거용.
+    """
+    fw, fh = frame_wh if frame_wh else (float("inf"), float("inf"))
     vehicles: list[VehicleState] = []
     for i in range(len(tracked)):
         xyxy     = tracked.xyxy[i].tolist()
@@ -263,6 +313,9 @@ def _build_vehicles(tracked: "sv.Detections") -> "list[VehicleState]":
         cy = (xyxy[1] + xyxy[3]) / 2
         # 호모그래피는 도로 평면 기준 → ground contact point(bbox 바닥 중심) 사용
         gx, gy = cx, xyxy[3]
+        # Kalman 예측으로 프레임 밖으로 이탈한 ghost 트랙 제거
+        if gx < -fw * 0.1 or gx > fw * 1.1 or gy < -fh * 0.1 or gy > fh * 1.1:
+            continue
         lat, lon = _transformer.pixel_to_gps(gx, gy)
         x_m, y_m = _transformer.pixel_to_meter(gx, gy)
         vehicles.append(VehicleState(
@@ -442,22 +495,62 @@ async def switch_camera(body: CameraSwitch):
         from config import SPEED_LIMIT_KPH
         analytics.speed_limit_kph = SPEED_LIMIT_KPH
     # FOV 삼각형과 동일한 우선순위: name_bearing → road_bearing
-    road_bearing = road["bearing_deg"] if road else None
+    # Prefer the snap-segment bearing. On curved roads the whole-link bearing can
+    # point the FOV down the wrong branch even when snapping picked the right road.
+    road_bearing = (
+        road_snap["bearing_deg"]
+        if road_snap and road_snap.get("bearing_deg") is not None
+        else (road["bearing_deg"] if road else None)
+    )
     name_bearing = _parse_name_bearing(body.name, road_bearing)
     effective_bearing = name_bearing if name_bearing is not None else road_bearing
     analytics.road_bearing_deg = effective_bearing
 
+    if road_snap:
+        logger.info(
+            "road_snap 성공: 도로=%s snap=(%.4f,%.4f) cam_dist=%.1fm 폭=%.1fm %s",
+            road_snap.get("road_name", "?"),
+            road_snap["snap_lat"], road_snap["snap_lon"],
+            road_snap.get("cam_dist_m", 0),
+            road_snap.get("road_width_m", 0),
+            "편도" if road_snap.get("is_oneway") else "양방향",
+        )
+    else:
+        logger.warning(
+            "road_snap 실패 — 카메라 GPS (%.4f, %.4f)를 snap으로 사용. "
+            "nodelink DB 미커버 도로일 가능성 있음.",
+            body.lat, body.lon,
+        )
     _current_cam = {
         "lat": body.lat, "lon": body.lon,
         "name": body.name, "cctvurl": body.cctvurl,
-        "snap_lat": road_snap["snap_lat"] if road_snap else body.lat,
-        "snap_lon": road_snap["snap_lon"] if road_snap else body.lon,
+        "snap_lat":     road_snap["snap_lat"]     if road_snap else body.lat,
+        "snap_lon":     road_snap["snap_lon"]     if road_snap else body.lon,
+        "road_width_m": road_snap["road_width_m"] if road_snap else None,
+        "is_oneway":    road_snap["is_oneway"]    if road_snap else None,
+        "has_name_bearing": name_bearing is not None,
+        "road_bearing": road_bearing,
+        "name_bearing": name_bearing,
+        "road_pts":     road_snap["road_pts"]     if road_snap else None,
+        "snap_along_m": road_snap["snap_along_m"] if road_snap else None,
     }
 
     # live_loop 스트림 전환 큐잉
     if body.cctvurl:
-        await _camera_queue.put({"url": body.cctvurl, "lat": body.lat, "lon": body.lon,
-                                  "snap_lat": _current_cam["snap_lat"], "snap_lon": _current_cam["snap_lon"]})
+        await _camera_queue.put({
+            "url":          body.cctvurl,
+            "lat":          body.lat,
+            "lon":          body.lon,
+            "name":         body.name,
+            "snap_lat":     _current_cam["snap_lat"],
+            "snap_lon":     _current_cam["snap_lon"],
+            "road_width_m": _current_cam["road_width_m"],
+            "is_oneway":    _current_cam["is_oneway"],
+            "road_bearing": _current_cam["road_bearing"],
+            "name_bearing": _current_cam["name_bearing"],
+            "road_pts":     _current_cam["road_pts"],
+            "snap_along_m": _current_cam["snap_along_m"],
+        })
 
     analytics.cam_lat = _current_cam["snap_lat"]
     analytics.cam_lon = _current_cam["snap_lon"]
@@ -610,7 +703,7 @@ async def ws_detect(ws: WebSocket):
                 )
 
             # GPS 변환 + VehicleState 생성
-            vehicles = _build_vehicles(tracked)
+            vehicles = _build_vehicles(tracked, frame_wh=(fw, fh))
             fid += 1
             result = analytics.update(fid, fid / FPS * 1000, vehicles, in_cnt, out_cnt, in_ids, out_ids)
             await _broadcast(_inject_its_speed(result.to_dict()))
@@ -950,12 +1043,55 @@ async def _safe_send(ws: WebSocket, msg: str) -> None:
 # ════════════════════════════════════════════════════════════════════════
 # LIVE 파이프라인 (서버사이드 HLS 직접 처리)
 # ════════════════════════════════════════════════════════════════════════
+async def _refresh_stream_url(stream: "VideoStream") -> None:
+    """ITS API에서 현재 카메라 URL을 즉시 갱신. 토큰 만료 복구용."""
+    cam = _current_cam
+    if cam is None or not cam.get("name"):
+        return
+    lat, lon, name = cam["lat"], cam["lon"], cam["name"]
+    params = {
+        "apiKey": ITS_API_KEY, "type": "its", "cctvType": "1",
+        "minX": str(lon - 0.002), "maxX": str(lon + 0.002),
+        "minY": str(lat - 0.002), "maxY": str(lat + 0.002),
+        "getType": "json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(ITS_BASE_URL, params=params)
+            resp.raise_for_status()
+            items = _parse_its_items(resp.json())
+        for item in items:
+            if item.get("cctvname") == name:
+                new_url = item.get("cctvurl", "")
+                if new_url:
+                    logger.info("HLS URL 긴급 갱신 (토큰 만료): %s", name)
+                    _current_cam["cctvurl"] = new_url
+                    await _camera_queue.put({
+                        "url":          new_url,
+                        "lat":          lat,
+                        "lon":          lon,
+                        "name":         name,
+                        "snap_lat":     cam.get("snap_lat", lat),
+                        "snap_lon":     cam.get("snap_lon", lon),
+                        "road_width_m": cam.get("road_width_m"),
+                        "is_oneway":    cam.get("is_oneway"),
+                        "road_bearing": cam.get("road_bearing"),
+                        "name_bearing": cam.get("name_bearing"),
+                        "road_pts":     cam.get("road_pts"),
+                        "snap_along_m": cam.get("snap_along_m"),
+                    })
+                break
+    except Exception as e:
+        logger.warning("HLS URL 긴급 갱신 실패: %s", e)
+
+
 async def live_loop(detector, stream) -> None:
     from tracker import VehicleTracker
 
     tracker        = VehicleTracker()
     target_interval = 1.0 / FPS
     skip_budget    = 0
+    _reconnect_fails = 0  # 연속 reconnect 실패 횟수
 
     logger.info("Live 루프 대기 중 — 지도에서 CCTV를 클릭하여 스트림을 시작하세요")
 
@@ -970,12 +1106,26 @@ async def live_loop(detector, stream) -> None:
                 await asyncio.to_thread(stream.switch_to, cam["url"])
                 snap_lat = cam.get("snap_lat", cam["lat"])
                 snap_lon = cam.get("snap_lon", cam["lon"])
+                snap_ok = snap_lat != cam["lat"] or snap_lon != cam["lon"]
+                if not snap_ok:
+                    logger.warning(
+                        "road_snap 실패 — snap이 카메라 GPS로 fallback됨 (%.4f, %.4f). "
+                        "polygon이 도로 옆에 표시될 수 있음.",
+                        cam["lat"], cam["lon"],
+                    )
+                else:
+                    cam_dist_m = ((snap_lat - cam["lat"]) * 110574) ** 2
+                    cam_dist_m += ((snap_lon - cam["lon"]) * 111320 * math.cos(math.radians(snap_lat))) ** 2
+                    cam_dist_m = cam_dist_m ** 0.5
+                    logger.info("snap 성공: 카메라→도로 거리 %.1fm", cam_dist_m)
                 _transformer.update_gps_center(snap_lat, snap_lon, bearing_deg=analytics.road_bearing_deg or 0.0)
+                _transformer.set_road_corridor(cam.get("road_pts"), cam.get("snap_along_m"))
                 analytics.cam_lat = snap_lat
                 analytics.cam_lon = snap_lon
                 tracker = VehicleTracker()
                 analytics.reset()
                 skip_budget = 0
+                _reconnect_fails = 0
 
                 # 수동으로 저장된 ROI만 적용 (auto-estimate는 탐지 정확도를 해칠 수 있어 자동 적용 안 함)
                 cam_url = cam["url"]
@@ -1009,16 +1159,31 @@ async def live_loop(detector, stream) -> None:
                     get_road_info, cam["lat"], cam["lon"], _parse_road_name_hint(cam.get("name", ""))
                 )
 
+                # 도로폭 계산 (카메라 공통 — manual/auto-calib 무관하게 broadcast에 사용)
+                _cam_road_width_m: float | None = cam.get("road_width_m")
+                if _cam_road_width_m is None:
+                    _ri_lanes = road_info["lanes"] if road_info and road_info.get("lanes") else 2
+                    _ri_rank  = str(road_info.get("road_rank", "")) if road_info else ""
+                    _ri_lane_w = 3.5 if _ri_rank in ("101", "102", "103") else (3.25 if _ri_rank in ("104", "105") else 3.0)
+                    _cam_road_width_m = max(1, _ri_lanes) * 2 * _ri_lane_w
+
                 # 수동 캘리브레이션 없으면 차선 감지 자동 보정 예약
                 global _auto_calib_attempts, _auto_calib_road_width_m
                 if not _manual_cal_loaded:
-                    lanes = road_info["lanes"] if road_info and road_info.get("lanes") else 2
-                    rank  = str(road_info.get("road_rank", "")) if road_info else ""
-                    lane_w = 3.5 if rank in ("101", "102") else (3.25 if rank == "103" else 3.0)
-                    _auto_calib_road_width_m = max(1, lanes) * lane_w
+                    _auto_calib_road_width_m = _cam_road_width_m
+                    oneway = cam.get("is_oneway", False)
+                    logger.info("도로폭: %.1fm (%s)", _cam_road_width_m, "편도" if oneway else "양방향")
                     _auto_calib_attempts = 5  # 최대 5프레임 시도
-                    logger.info("차선 감지 자동 캘리브레이션 예약: %.1fm (lanes=%d, rank=%s)",
-                                _auto_calib_road_width_m, lanes, rank)
+                road_bearing_for_ui = (
+                    cam.get("road_bearing")
+                    if cam.get("road_bearing") is not None
+                    else (road_info["bearing_deg"] if road_info else None)
+                )
+                name_bearing_for_ui = (
+                    cam.get("name_bearing")
+                    if cam.get("name_bearing") is not None
+                    else _parse_name_bearing(cam.get("name", ""), road_bearing_for_ui)
+                )
                 await _broadcast({
                     "type": "camera_ready",
                     "name": cam.get("name", ""),
@@ -1028,13 +1193,13 @@ async def live_loop(detector, stream) -> None:
                     "road_name": road_info["road_name"] if road_info else None,
                     "road_lanes": road_info["lanes"] if road_info else None,
                     "road_max_spd": road_info["max_spd"] if road_info else None,
-                    "road_bearing": road_info["bearing_deg"] if road_info else None,
-                    "name_bearing": _parse_name_bearing(
-                        cam.get("name", ""),
-                        road_info["bearing_deg"] if road_info else None,
-                    ),
-                    "snap_lat": snap_lat,
-                    "snap_lon": snap_lon,
+                    "road_bearing": road_bearing_for_ui,
+                    "name_bearing": name_bearing_for_ui,
+                    "snap_lat":     snap_lat,
+                    "snap_lon":     snap_lon,
+                    "road_width_m": _cam_road_width_m,
+                    "road_pts":     cam.get("road_pts"),
+                    "snap_along_m": cam.get("snap_along_m"),
                 })
                 logger.info("카메라 전환 완료, camera_ready 신호 전송")
             except RuntimeError as e:
@@ -1047,7 +1212,15 @@ async def live_loop(detector, stream) -> None:
 
         frame_id, frame = stream.read_frame()
         if frame is None:
-            await stream.reconnect()
+            ok = await stream.reconnect()
+            if ok:
+                _reconnect_fails = 0
+            else:
+                _reconnect_fails += 1
+                if _reconnect_fails >= 3:
+                    logger.warning("연속 %d회 reconnect 실패 — HLS 토큰 만료 의심, URL 긴급 갱신 시도", _reconnect_fails)
+                    _reconnect_fails = 0
+                    await _refresh_stream_url(stream)
             continue
 
         # 차선 감지 자동 캘리브레이션 (수동 캘리브 없을 때, 최초 N프레임 시도)
@@ -1057,6 +1230,9 @@ async def live_loop(detector, stream) -> None:
             ok, used_bearing, calib_info = await asyncio.to_thread(
                 _transformer.auto_calibrate_from_frame,
                 frame, bearing, _auto_calib_road_width_m,
+                _current_cam.get("has_name_bearing", False),
+                _current_cam.get("lat"),
+                _current_cam.get("lon"),
             )
             if ok:
                 logger.info("차선 감지 자동 캘리브레이션 완료 (bearing=%.1f°)", used_bearing)
@@ -1131,7 +1307,7 @@ def _live_process(frame_id, frame, detector, tracker, fps: float = 30.0) -> dict
     except Exception:
         pass
 
-    vehicles = _build_vehicles(tracked)
+    vehicles = _build_vehicles(tracked, frame_wh=(w, h))
     _frame_count += 1
     result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt, in_ids, out_ids)
     return _inject_its_speed(result.to_dict())
@@ -1171,7 +1347,20 @@ async def hls_refresh_loop(stream) -> None:
                     new_url = item.get("cctvurl", "")
                     if new_url and new_url != stream.url:
                         logger.info("HLS URL 갱신: %s", name)
-                        await _camera_queue.put({"url": new_url, "lat": lat, "lon": lon})
+                        await _camera_queue.put({
+                            "url":          new_url,
+                            "lat":          lat,
+                            "lon":          lon,
+                            "name":         name,
+                            "snap_lat":     cam.get("snap_lat", lat),
+                            "snap_lon":     cam.get("snap_lon", lon),
+                            "road_width_m": cam.get("road_width_m"),
+                            "is_oneway":    cam.get("is_oneway"),
+                            "road_bearing": cam.get("road_bearing"),
+                            "name_bearing": cam.get("name_bearing"),
+                            "road_pts":     cam.get("road_pts"),
+                            "snap_along_m": cam.get("snap_along_m"),
+                        })
                         _current_cam["cctvurl"] = new_url
                     break
         except Exception as e:

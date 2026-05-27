@@ -5,7 +5,13 @@
   "permissions": {
     "allow": [
       "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dksal\\\\OneDrive\\\\바탕 화면\\\\26 Spring\\\\cse 327\\\\DigitalTwin\\\\traffic-digital-twin\" -File -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.Extension -in @\\('.txt', '.json', '.yaml', '.yml', '.env', '.py', '.html', '.css', '.js'\\)} | Select-Object -ExpandProperty FullName | Sort-Object)",
-      "Bash(Get-ChildItem *)"
+      "Bash(Get-ChildItem *)",
+      "PowerShell(cmd /c \"dir /a C:\\\\Users\\\\User\\\\Documents\\\\GitHub\\\\DigitalTwin-main\")",
+      "PowerShell(cmd /c \"dir /a C:\\\\Users\\\\User\\\\Documents\\\\GitHub\\\\DigitalTwin-main\\\\.venv\\\\Lib\\\\site-packages\\\\boxmot\")",
+      "PowerShell(pyenv versions 2>&1)",
+      "PowerShell(pyenv version 2>&1)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Fix FOV polygon: use nodelink road bearing, thinner border *)"
     ],
     "deny": []
   },

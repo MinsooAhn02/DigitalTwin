@@ -67,6 +67,18 @@ class PerspectiveTransformer:
         self._gps_center_lon: float = float(np.mean(gps_arr[:, 1]))
         self._is_calibrated: bool = False  # 4-point 사용자 캘리브레이션 여부
 
+        # ── 도로 중심선 기반 곡선 GPS 매핑 ──────────────────────────────
+        # 단일 Homography의 직선 근사 대신, 도로 곡선을 따라 차량 GPS를 계산.
+        # Stage 1: pixel → (x_m, y_m) via H_meter  (기존, 평면 근사)
+        # Stage 2: (x_m, y_m) → (d_along, d_lateral) → road_pts 보간 → GPS
+        self._road_pts: list[list[float]] | None = None    # 도로 중심선 [[lat,lon],...]
+        self._road_cum_dist: list[float]  | None = None    # 누적 거리 (m)
+        self._snap_along_m:  float        | None = None    # road_pts[0]에서 snap까지 거리
+        self._snap_meter_x:  float        | None = None    # snap의 H_meter x좌표 (동쪽)
+        self._snap_meter_y:  float        | None = None    # snap의 H_meter y좌표 (북쪽)
+        self._curve_bearing_rad: float = 0.0               # 도로 방위각 (라디안)
+        self._curve_dir_sign: float = 1.0
+
     # ──────────────────────────────────────────────────────────────────
     def _transform_point(self, H: np.ndarray, u: float, v: float) -> tuple[float, float]:
         result = cv2.perspectiveTransform(np.float32([[[u, v]]]), H)
@@ -81,14 +93,144 @@ class PerspectiveTransformer:
         res = cv2.perspectiveTransform(arr, H)
         return [(float(r[0, 0]), float(r[0, 1])) for r in res]
 
-    def pixel_to_gps(self, u: float, v: float) -> tuple[float, float]:
-        """픽셀 (u, v) → (latitude, longitude), 카메라 베어링 보정 포함."""
-        lat, lon = self._transform_point(self._H_gps, u, v)
+    # ── 도로 중심선 곡선 GPS 매핑 헬퍼 ────────────────────────────────
 
+    def set_road_corridor(
+        self,
+        road_pts: list[list[float]] | None,
+        snap_along_m: float | None,
+    ) -> None:
+        """도로 중심선 포인트를 설정. 이후 pixel_to_gps가 곡선 매핑을 사용.
+
+        road_pts: [[lat, lon], ...] F→T 순서, nodelink shape_pts 기반
+        snap_along_m: road_pts[0]에서 snap(카메라 도로 투영점)까지의 거리(m)
+        """
+        if not road_pts or len(road_pts) < 2 or snap_along_m is None:
+            self._road_pts = None
+            self._road_cum_dist = None
+            self._snap_along_m = None
+            self._curve_dir_sign = 1.0
+            return
+        self._road_pts = road_pts
+        self._snap_along_m = float(snap_along_m)
+        cum: list[float] = [0.0]
+        for i in range(1, len(road_pts)):
+            R_lon = 111320.0 * math.cos(math.radians(road_pts[i - 1][0]))
+            cum.append(cum[-1] + math.hypot(
+                (road_pts[i][0] - road_pts[i - 1][0]) * 110574.0,
+                (road_pts[i][1] - road_pts[i - 1][1]) * R_lon,
+            ))
+        self._road_cum_dist = cum
+        self._refresh_curve_direction_sign()
+        logger.info(
+            "도로 중심선 설정: %d점 %.1fm, snap=%.1fm 위치",
+            len(road_pts), cum[-1], snap_along_m,
+        )
+
+    def _refresh_curve_direction_sign(self) -> None:
+        """Map camera-view distance to the F->T road_pts arc direction."""
+        if (self._road_pts is None or self._road_cum_dist is None
+                or self._snap_along_m is None):
+            self._curve_dir_sign = 1.0
+            return
+        road_ft_bearing = self._road_bearing_at(self._snap_along_m)
+        view_bearing = math.degrees(self._curve_bearing_rad) % 360.0
+        diff = abs((view_bearing - road_ft_bearing + 180.0) % 360.0 - 180.0)
+        self._curve_dir_sign = 1.0 if diff < 90.0 else -1.0
+
+    def _road_interp(self, arc: float) -> tuple[float, float]:
+        """arc 거리(m)에 해당하는 도로 중심선 GPS를 보간."""
+        pts, cum = self._road_pts, self._road_cum_dist  # type: ignore[assignment]
+        arc = max(0.0, min(cum[-1], arc))
+        for i in range(len(cum) - 1):
+            if cum[i] <= arc <= cum[i + 1]:
+                frac = (arc - cum[i]) / max(1e-9, cum[i + 1] - cum[i])
+                return (
+                    pts[i][0] + frac * (pts[i + 1][0] - pts[i][0]),
+                    pts[i][1] + frac * (pts[i + 1][1] - pts[i][1]),
+                )
+        return float(pts[-1][0]), float(pts[-1][1])
+
+    def _road_bearing_at(self, arc: float) -> float:
+        """arc 거리(m) 위치의 도로 진행 방위각(0=N, 시계방향)."""
+        pts, cum = self._road_pts, self._road_cum_dist  # type: ignore[assignment]
+        for i in range(len(cum) - 1):
+            if cum[i] <= arc <= cum[i + 1]:
+                la1, lo1 = pts[i][0], pts[i][1]
+                la2, lo2 = pts[i + 1][0], pts[i + 1][1]
+                break
+        else:
+            la1, lo1 = pts[-2][0], pts[-2][1]
+            la2, lo2 = pts[-1][0], pts[-1][1]
+        R_lon = 111320.0 * math.cos(math.radians(la1))
+        return math.degrees(math.atan2(
+            (lo2 - lo1) * R_lon,
+            (la2 - la1) * 110574.0,
+        )) % 360.0
+
+    def _pixel_to_gps_curved(self, u: float, v: float) -> tuple[float, float] | None:
+        """2단계 곡선 GPS 변환.
+
+        Stage 1: pixel → (x_m, y_m) via H_meter  (ENU from TL corner)
+        Stage 2: (x_m, y_m) → road-axis (d_along, d_lateral) → road_pts 보간 → GPS
+
+        반환 None 시 H_gps fallback 사용.
+        """
+        if (self._road_pts is None or self._road_cum_dist is None
+                or self._snap_along_m is None
+                or self._snap_meter_x is None or self._snap_meter_y is None):
+            return None
+
+        x_m, y_m = self._transform_point(self._H_meter, u, v)
+
+        # snap 기준 ENU 변위
+        dx = x_m - self._snap_meter_x   # east from snap (m)
+        dy = y_m - self._snap_meter_y   # north from snap (m)
+
+        sin_b = math.sin(self._curve_bearing_rad)
+        cos_b = math.cos(self._curve_bearing_rad)
+
+        # 도로 축 변환
+        d_along   =  dx * sin_b + dy * cos_b   # 도로 방향 (양수 = 카메라 시야 방향)
+        d_lateral =  dx * cos_b - dy * sin_b   # 횡방향 (양수 = 오른쪽)
+        d_along = dx * sin_b + dy * cos_b
+        d_along = max(0.0, d_along)
+
+        # road_pts 위에서 d_along 위치 보간
+        target_arc = self._snap_along_m + self._curve_dir_sign * d_along
+        center_lat, center_lon = self._road_interp(target_arc)
+
+        # 해당 위치의 로컬 도로 방위로 횡방향 오프셋 적용
+        b_local = math.radians(self._road_bearing_at(target_arc))
+        R_lat = 110574.0
+        R_lon = 111320.0 * math.cos(math.radians(center_lat))
+        # 오른쪽 수직 방향 (ENU): forward=(sin_b, cos_b) → right=(cos_b, -sin_b)
+        lateral_ft = self._curve_dir_sign * d_lateral
+        east_off  =  math.cos(b_local) * lateral_ft
+        north_off = -math.sin(b_local) * lateral_ft
+
+        return (
+            center_lat + north_off / R_lat,
+            center_lon + east_off  / R_lon,
+        )
+
+    # ── 좌표 변환 공개 API ───────────────────────────────────────────────
+
+    def pixel_to_gps(self, u: float, v: float) -> tuple[float, float]:
+        """픽셀 (u, v) → (latitude, longitude).
+
+        도로 중심선이 설정돼 있고 수동 캘리브레이션이 아닐 때는
+        2단계 곡선 매핑을 사용해 도로 곡선을 따른 GPS를 반환.
+        """
+        if not self._is_calibrated and self._road_pts is not None:
+            result = self._pixel_to_gps_curved(u, v)
+            if result is not None:
+                return result
+
+        lat, lon = self._transform_point(self._H_gps, u, v)
         if self._bearing_rad == 0.0:
             return lat, lon
-
-        # GPS 중심 기준 델타를 bearing 각도로 회전
+        # GPS 중심 기준 델타를 bearing 각도로 회전 (레거시 경로용)
         dlat = lat - self._gps_center_lat
         dlon = lon - self._gps_center_lon
         cos_b = math.cos(self._bearing_rad)
@@ -104,7 +246,16 @@ class PerspectiveTransformer:
     def batch_pixel_to_gps(
         self, points: list[tuple[float, float]]
     ) -> list[tuple[float, float]]:
-        """여러 픽셀 좌표를 한 번에 변환 (OpenCV 벡터 연산 활용)"""
+        """여러 픽셀 좌표를 GPS로 변환. 곡선 매핑 활성화 시 각 점에 개별 적용."""
+        if not self._is_calibrated and self._road_pts is not None:
+            results = []
+            for u, v in points:
+                r = self._pixel_to_gps_curved(u, v)
+                if r is not None:
+                    results.append(r)
+                else:
+                    results.append(self._transform_point(self._H_gps, u, v))
+            return results
         return self._batch_transform(self._H_gps, points)
 
     @staticmethod
@@ -163,24 +314,24 @@ class PerspectiveTransformer:
         frame: np.ndarray,
         bearing_deg: float = 0.0,
         road_width_m: float = 7.0,
-    ) -> tuple[bool, float]:
+        fix_direction: bool = False,
+        cam_lat: float | None = None,
+        cam_lon: float | None = None,
+    ) -> tuple[bool, float, dict | None]:
         """차선 감지(Hough)로 원근 파라미터 자동 추정.
 
         road_width_m: 노드링크 lanes × 차선폭(m) — 수평 스케일 기준값.
         반환: (성공여부, 실제사용된bearing_deg, calib_info_dict | None)
-          calib_info: {cam_h_m, near_m, far_m, road_width_m, pitch_deg}
-          - 소실점이 프레임 오른쪽으로 치우치면 도로가 카메라 오른쪽에 있는 것으로 판단해
-            bearing을 180° 반전 후 사용 (한국 도로 우측 설치 CCTV 기준 휴리스틱).
+          calib_info: {cam_h_m, near_m, far_m, road_width_m, pitch_deg, road_length_m}
         """
         h, w = frame.shape[:2]
-        fy = h * 1.2  # 대략적 초점거리 (픽셀) — 66° 수직 화각 기준
+        fy = h * 1.2  # assumed focal length (≈45° vFoV)
 
         # ── 1. Edge detection ────────────────────────────────────────
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         edges = cv2.Canny(blur, 50, 150)
 
-        # ROI: 하단 55% (하늘/원거리 영역 제외)
         roi_top = int(h * 0.45)
         roi_mask = np.zeros_like(edges)
         cv2.fillPoly(
@@ -198,7 +349,6 @@ class PerspectiveTransformer:
         if lines is None or len(lines) < 3:
             return False, bearing_deg, None
 
-        # 차선 방향 직선만 필터: 수직에서 60° 이내 (사선 차선마킹)
         diag: list[tuple] = []
         for l in lines:
             x1, y1, x2, y2 = l[0]
@@ -211,91 +361,172 @@ class PerspectiveTransformer:
         if len(diag) < 2:
             return False, bearing_deg, None
 
-        # ── 3. 소실점 추정 ───────────────────────────────────────────
-        vp_cands: list[tuple[float, float]] = []
-        for i in range(len(diag)):
-            for j in range(i + 1, min(i + 8, len(diag))):
-                pt = _line_intersection(diag[i], diag[j])
-                if pt is not None:
-                    px, py = pt
-                    if -w * 0.5 < px < w * 1.5 and -h * 0.2 < py < h * 0.6:
-                        vp_cands.append((px, py))
+        # ── 3. Multi-level road edge detection ───────────────────────
+        # Sample at 5 y levels from bottom to upper ROI for robust linear fit.
+        # Each line is extrapolated to the sample y; percentiles give left/right edge.
+        sample_ratios = (1.0, 0.88, 0.76, 0.64, 0.52)
+        left_pts:  list[tuple[float, float]] = []  # (y, x)
+        right_pts: list[tuple[float, float]] = []
 
-        vp_x = float(np.median([p[0] for p in vp_cands])) if len(vp_cands) >= 2 else w / 2.0
-        vp_y = float(np.median([p[1] for p in vp_cands])) if len(vp_cands) >= 2 else 0.0
-        vp_y = min(vp_y, h * 0.55)
+        for ratio in sample_ratios:
+            y_lvl = min(int(h * ratio), h - 1)
+            xs_at: list[float] = []
+            for x1, y1, x2, y2 in diag:
+                dy = y2 - y1
+                if dy == 0:
+                    continue
+                t = (y_lvl - y1) / dy
+                if -0.5 <= t <= 2.0:
+                    xv = x1 + t * (x2 - x1)
+                    if -w * 0.1 <= xv <= w * 1.1:
+                        xs_at.append(xv)
+            if len(xs_at) >= 2:
+                lx = float(np.percentile(xs_at, 15))
+                rx = float(np.percentile(xs_at, 85))
+                if rx - lx > w * 0.08:
+                    left_pts.append((float(y_lvl), lx))
+                    right_pts.append((float(y_lvl), rx))
 
-        # ── 3b. 소실점 수평 오프셋으로 카메라 방향 판별 ──────────────
-        # 도로 우측 설치 CCTV 기준: 도로가 카메라 왼쪽에 있어야 정방향
-        #   → VP가 프레임 왼쪽 치우침 (vp_x < w/2) = bearing 정방향
-        #   → VP가 프레임 오른쪽 치우침 (vp_x > w*0.55) = bearing 반전
-        # 임계값 5%: 중앙부 노이즈·정면 정렬 카메라는 플립하지 않음
-        if vp_x > w * 0.55:
-            bearing_deg = (bearing_deg + 180.0) % 360.0
-            logger.info("VP 우측 치우침 (%.0f/%.0f) → bearing %.1f°로 반전", vp_x, w, bearing_deg)
-
-        # ── 4. 카메라 틸트 각도 추정 ─────────────────────────────────
-        pitch_deg = math.degrees(math.atan2(h / 2 - vp_y, fy))
-        pitch_deg = max(3.0, min(50.0, pitch_deg))
-        vfov_half = math.degrees(math.atan2(h / 2, fy))  # ≈22.6° for fy=1.2h
-
-        # ── 5. 하단 도로 경계 검출 ───────────────────────────────────
-        xs_bot: list[float] = []
-        for x1, y1, x2, y2 in diag:
-            if y2 == y1:
-                continue
-            xb = x1 + (h - y1) * (x2 - x1) / (y2 - y1)
-            if -w * 0.1 <= xb <= w * 1.1:
-                xs_bot.append(xb)
-
-        if len(xs_bot) < 2:
+        if len(left_pts) < 2:
             return False, bearing_deg, None
 
-        road_left  = float(np.percentile(xs_bot, 10))
-        road_right = float(np.percentile(xs_bot, 90))
+        # ── 4. Linear fit: x = a*y + b for left and right edges ─────
+        # More robust than single-row detection; VP = intersection of the two fitted lines.
+        ys_l = np.array([p[0] for p in left_pts])
+        xs_l = np.array([p[1] for p in left_pts])
+        ys_r = np.array([p[0] for p in right_pts])
+        xs_r = np.array([p[1] for p in right_pts])
+
+        A_l = np.column_stack([ys_l, np.ones_like(ys_l)])
+        a_l, b_l = np.linalg.lstsq(A_l, xs_l, rcond=None)[0]
+        A_r = np.column_stack([ys_r, np.ones_like(ys_r)])
+        a_r, b_r = np.linalg.lstsq(A_r, xs_r, rcond=None)[0]
+
+        # ── 5. VP from fitted line intersection ──────────────────────
+        denom = a_l - a_r
+        if abs(denom) > 1e-6:
+            vp_y_fit = (b_r - b_l) / denom
+            vp_x_fit = a_l * vp_y_fit + b_l
+            if -h * 0.5 < vp_y_fit < h * 0.85 and -w * 0.3 < vp_x_fit < w * 1.3:
+                vp_y = min(float(vp_y_fit), h * 0.55)
+                vp_x = float(vp_x_fit)
+            else:
+                vp_y, vp_x = h * 0.35, w / 2.0
+        else:
+            # Parallel lines — fall back to pairwise Hough intersection median
+            vp_cands: list[tuple[float, float]] = []
+            for i in range(len(diag)):
+                for j in range(i + 1, min(i + 8, len(diag))):
+                    pt = _line_intersection(diag[i], diag[j])
+                    if pt is not None:
+                        px, py = pt
+                        if -w * 0.5 < px < w * 1.5 and -h * 0.2 < py < h * 0.6:
+                            vp_cands.append((px, py))
+            vp_x = float(np.median([p[0] for p in vp_cands])) if len(vp_cands) >= 2 else w / 2.0
+            vp_y_raw = float(np.median([p[1] for p in vp_cands])) if len(vp_cands) >= 2 else h * 0.35
+            vp_y = min(vp_y_raw, h * 0.55)
+
+        # ── 5b. VP + 지도 기반 카메라 방향 결정 ────────────────────────────
+        # name_bearing 확정(fix_direction=True)이면 skip.
+        # 그 외: VP 수평각(phi)과 카메라→snap 방위를 비교해 F→T / T→F 중 선택.
+        #
+        # 원리:
+        #   도로의 먼 쪽이 VP 방향으로 수렴함.
+        #   VP의 수평 오프셋 phi = atan2(vp_x - w/2, fy)
+        #   → 도로 방향이 카메라 광축보다 phi만큼 오른쪽에 있음.
+        #   따라서 카메라 방위 B_cam = B_road_toward_vp - phi.
+        #   두 후보:
+        #     cand_A: B_cam = bearing_deg - phi         (F→T 방향이 VP 방향)
+        #     cand_B: B_cam = bearing_deg + 180° - phi  (T→F 방향이 VP 방향)
+        #   카메라 GPS → snap GPS 방위(B_to_road)에 더 가까운 후보를 선택.
+        #   (CCTV는 도로 쪽을 향해 설치되므로 B_cam ≈ B_to_road)
+        if not fix_direction:
+            phi_deg = math.degrees(math.atan2(vp_x - w / 2.0, fy))
+
+            cand_a_cam = (bearing_deg - phi_deg) % 360.0          # F→T 방향이 VP
+            cand_b_cam = (bearing_deg + 180.0 - phi_deg) % 360.0  # T→F 방향이 VP
+
+            flip = False
+            if (cam_lat is not None and cam_lon is not None
+                    and self._gps_center_lat != 0.0):
+                d_north = (self._gps_center_lat - cam_lat) * 110574.0
+                d_east  = ((self._gps_center_lon - cam_lon)
+                           * 111320.0 * math.cos(math.radians(cam_lat)))
+                cam_dist = math.hypot(d_north, d_east)
+
+                if cam_dist > 2.0:
+                    b_to_road = math.degrees(math.atan2(d_east, d_north)) % 360.0
+                    diff_a = abs(((cand_a_cam - b_to_road + 180) % 360) - 180)
+                    diff_b = abs(((cand_b_cam - b_to_road + 180) % 360) - 180)
+                    flip = diff_b < diff_a
+                    logger.info(
+                        "VP+지도 방향: phi=%.1f° cam→road=%.1f° "
+                        "F→T_cam=%.1f°(Δ%.0f°) T→F_cam=%.1f°(Δ%.0f°) → %s",
+                        phi_deg, b_to_road,
+                        cand_a_cam, diff_a, cand_b_cam, diff_b,
+                        "T→F 선택" if flip else "F→T 선택",
+                    )
+                else:
+                    flip = vp_x > w * 0.55
+                    logger.info("VP 방향 fallback(cam≈snap): vp_x=%.0f/%.0f → %s",
+                                vp_x, w, "반전" if flip else "유지")
+            else:
+                flip = vp_x > w * 0.55
+                logger.info("VP 방향 fallback(cam GPS 없음): vp_x=%.0f/%.0f → %s",
+                            vp_x, w, "반전" if flip else "유지")
+
+            if flip:
+                bearing_deg = (bearing_deg + 180.0) % 360.0
+                logger.info("bearing %.1f°로 반전", bearing_deg)
+
+        # ── 6. Camera tilt estimation ────────────────────────────────
+        pitch_deg = math.degrees(math.atan2(h / 2 - vp_y, fy))
+        pitch_deg = max(3.0, min(50.0, pitch_deg))
+        vfov_half = math.degrees(math.atan2(h / 2, fy))
+
+        # ── 7. Road boundaries from fitted model at frame bottom ─────
+        road_left  = float(a_l * h + b_l)
+        road_right = float(a_r * h + b_r)
         road_px_w  = road_right - road_left
         if road_px_w < w * 0.08:
             return False, bearing_deg, None
 
-        # ── 6. 카메라 높이 역산 → near_m / far_m ─────────────────────
-        # Pinhole 공식: road_width_m = road_px_w × d_near / fy
-        # → d_near(하단 도로면까지 거리) = road_width_m × fy / road_px_w
-        # → cam_h(설치 높이) = d_near × tan(pitch + vfov_half)
+        # ── 8. Camera height → near_m / far_m ────────────────────────
+        # Pinhole: road_px_w at bottom = road_width_m * fy / d_near
         d_near = road_width_m * fy / road_px_w
         beta_near = math.radians(pitch_deg + vfov_half)
         cam_h = d_near * math.tan(beta_near)
-        cam_h = max(3.0, min(40.0, cam_h))   # 현실 범위 클램프 (3-40m)
+        cam_h = max(3.0, min(40.0, cam_h))
 
-        near_m = d_near  # 하단 = 최근거리
-        near_m = max(3.0, min(30.0, near_m))
+        near_m = max(3.0, min(30.0, d_near))
 
         far_angle = pitch_deg - vfov_half
-        if far_angle > 1.0:  # 지평선 위 → 유한한 원거리
+        if far_angle > 1.0:
             far_m = cam_h / math.tan(math.radians(far_angle))
             far_m = min(300.0, far_m)
-        else:                # 지평선 근처 → 사실상 무한 (도로가 수평에 가깝게 보임)
+        else:
             far_m = near_m + road_width_m * 8.0
         far_m = max(near_m + 10.0, far_m)
 
-        # ── 7. 원근 사다리꼴 픽셀 좌표 ──────────────────────────────
-        half_w  = road_width_m / 2.0
-        road_cx = (road_left + road_right) / 2.0
+        # ── 9. Trapezoid src_pts using fitted edge model ─────────────
+        # far corner x positions come directly from the fitted lines at far_y
+        # (avoids the vp_y-dependent linear interpolation that magnifies VP estimation error).
+        half_w = road_width_m / 2.0
+        far_y  = max(roi_top, int(vp_y + (h - vp_y) * 0.08))
 
-        if vp_y < h:
-            far_y       = max(roi_top, int(vp_y + (h - vp_y) * 0.08))
-            far_px_half = (road_px_w / 2) * max(0.04, (far_y - vp_y) / max(1.0, h - vp_y))
-        else:
-            far_y       = roi_top
-            far_px_half = road_px_w * 0.12
+        far_left  = float(a_l * far_y + b_l)
+        far_right = float(a_r * far_y + b_r)
+        far_cx    = (far_left + far_right) / 2.0
+        far_half  = max((far_right - far_left) / 2.0, 2.0)
 
         src_pts = np.float32([
-            [road_cx - far_px_half, far_y],   # TL far-left
-            [road_cx + far_px_half, far_y],   # TR far-right
-            [road_right,            h      ],  # BR near-right
-            [road_left,             h      ],  # BL near-left
+            [far_cx - far_half, far_y],   # TL far-left
+            [far_cx + far_half, far_y],   # TR far-right
+            [road_right,        h      ],  # BR near-right
+            [road_left,         h      ],  # BL near-left
         ])
 
-        # ── 8. GPS 코너 계산 ─────────────────────────────────────────
+        # ── 10. GPS corners ──────────────────────────────────────────
         R_lat = 110574.0
         R_lon = 111320.0 * math.cos(math.radians(self._gps_center_lat))
         b = math.radians(bearing_deg)
@@ -319,18 +550,31 @@ class PerspectiveTransformer:
         if H_m is not None:
             self._H_meter = H_m
         self._bearing_rad = 0.0
-        self._is_calibrated = False  # 자동 추정 = 수동 캘리브레이션 아님
+        self._is_calibrated = False
 
+        # snap의 H_meter 좌표 갱신 (곡선 GPS 매핑용)
+        # gps_pts[0] = TL (far-left), snap = _gps_center
+        _R = 6_371_000.0
+        _tl_lat, _tl_lon = float(gps_pts[0][0]), float(gps_pts[0][1])
+        _lat0_r = math.radians(_tl_lat)
+        self._snap_meter_x = _R * math.radians(self._gps_center_lon - _tl_lon) * math.cos(_lat0_r)
+        self._snap_meter_y = _R * math.radians(self._gps_center_lat - _tl_lat)
+        self._curve_bearing_rad = b
+        self._refresh_curve_direction_sign()
+
+        road_length_m = far_m - near_m
         logger.info(
-            "차선 감지 자동 캘리브레이션: pitch=%.1f° cam_h=%.1fm near=%.1fm far=%.1fm half_w=%.1fm bearing=%.1f°",
-            pitch_deg, cam_h, near_m, far_m, half_w, bearing_deg,
+            "차선 감지 자동 캘리브레이션: pitch=%.1f° cam_h=%.1fm near=%.1fm far=%.1fm "
+            "road_len=%.1fm half_w=%.1fm bearing=%.1f°",
+            pitch_deg, cam_h, near_m, far_m, road_length_m, half_w, bearing_deg,
         )
         calib_info = {
-            "cam_h_m":      round(cam_h, 1),
-            "near_m":       round(near_m, 1),
-            "far_m":        round(far_m, 1),
-            "road_width_m": round(road_width_m, 1),
-            "pitch_deg":    round(pitch_deg, 1),
+            "cam_h_m":       round(cam_h, 1),
+            "near_m":        round(near_m, 1),
+            "far_m":         round(far_m, 1),
+            "road_width_m":  round(road_width_m, 1),
+            "pitch_deg":     round(pitch_deg, 1),
+            "road_length_m": round(road_length_m, 1),
         }
         return True, bearing_deg, calib_info
 
@@ -341,6 +585,9 @@ class PerspectiveTransformer:
         bearing_deg 방향으로 그리드를 회전시켜 차량이 카메라 시야 방향에 맞게 배치됨.
           near=15m ~ far=80m (along bearing), width=±25m (lateral)
         """
+        # Must update GPS center so that auto_calibrate_from_frame later uses correct origin.
+        self._gps_center_lat = center_lat
+        self._gps_center_lon = center_lon
         R_lat = 110574.0
         R_lon = 111320.0 * math.cos(math.radians(center_lat))
         b = math.radians(bearing_deg)
@@ -386,6 +633,17 @@ class PerspectiveTransformer:
         self._gps_center_lat = center_lat
         self._gps_center_lon = center_lon
         self._is_calibrated = False
+
+        # snap의 H_meter 좌표 갱신 (곡선 GPS 매핑용)
+        # H_meter는 ENU(동/북 미터)를 TL GPS 코너 기준으로 계산.
+        # snap = center이므로 TL에서 snap까지의 ENU를 _gps_pts_to_local_meters와 동일 공식으로 계산.
+        _R = 6_371_000.0
+        _tl_lat, _tl_lon = new_gps[0]
+        _lat0_r = math.radians(_tl_lat)
+        self._snap_meter_x = _R * math.radians(center_lon - _tl_lon) * math.cos(_lat0_r)
+        self._snap_meter_y = _R * math.radians(center_lat - _tl_lat)
+        self._curve_bearing_rad = b
+        self._refresh_curve_direction_sign()
         logger.info("GPS 근사 캘리브레이션: 중심 (%.4f, %.4f) bearing=%.1f°", center_lat, center_lon, bearing_deg)
 
     def batch_pixel_to_meter(

@@ -1,0 +1,8 @@
+[X] 도로 위에 polygon 있도록 개선
+[X] 자동 calibration 개선 
+[X] 카메라 방향 정확도 개선
+[X] polygon 모양 정확도 개선 (직선 -> 곡선)
+[X] polygon이랑 차량 gps 범위가 일치하지않음 -> polygon 내에서 차량이 움직이도록 수정
+
+[] Cluster algorithm
+[] 속도 정확도 개선

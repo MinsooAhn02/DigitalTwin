@@ -71,7 +71,7 @@ VEHICLE_CLASSES: dict[int, str] = {
 
 # Tracking
 BYTE_TRACK_FPS: int = 30
-BYTE_TRACK_BUFFER: int = 90
+BYTE_TRACK_BUFFER: int = 30
 
 # LineZone
 COUNT_LINE_START = (0, 360)
@@ -118,7 +118,7 @@ BOTTLENECK_DWELL_FRAMES: int = int(os.getenv("BOTTLENECK_DWELL_FRAMES", "150"))
 SPEED_JITTER_THRESHOLD_M: float = 0.5
 SPEED_SMOOTHING_ALPHA: float = 0.15
 MAX_REASONABLE_KPH: float = 120.0
-GC_GRACE_FRAMES: int = 90
+GC_GRACE_FRAMES: int = 30
 
 # 슬라이딩 윈도우 속도 계산에 사용할 이력 프레임 수
 SPEED_WINDOW_FRAMES: int = 18

@@ -41,7 +41,8 @@ export function useWebSocket() {
         const data = JSON.parse(evt.data);
         // 메시지 타입 분기
         if (data.type === "camera_ready") {
-          setCameraReadyInfo({ camera_key: data.camera_key, roi: data.roi, name: data.name, calibrated: data.calibrated ?? false, road_name: data.road_name ?? null, road_lanes: data.road_lanes ?? null, road_max_spd: data.road_max_spd ?? null, road_bearing: data.road_bearing ?? null, name_bearing: data.name_bearing ?? null, snap_lat: data.snap_lat ?? null, snap_lon: data.snap_lon ?? null });
+          setCameraReadyInfo({ camera_key: data.camera_key, roi: data.roi, name: data.name, calibrated: data.calibrated ?? false, road_name: data.road_name ?? null, road_lanes: data.road_lanes ?? null, road_max_spd: data.road_max_spd ?? null, road_bearing: data.road_bearing ?? null, name_bearing: data.name_bearing ?? null, snap_lat: data.snap_lat ?? null, snap_lon: data.snap_lon ?? null, road_width_m: data.road_width_m ?? null, road_pts: data.road_pts ?? null, snap_along_m: data.snap_along_m ?? null });
+          setAutoCalibInfo(null); // 카메라 전환 시 이전 자동 캘리브 정보 초기화
           setCameraReady((n) => n + 1);
         } else if (data.type === "camera_error") {
           setError(`카메라 전환 실패: ${data.message ?? ""}`);
@@ -53,12 +54,13 @@ export function useWebSocket() {
             return { ...base, calibrated: true };
           });
           setAutoCalibInfo({
-            cam_h_m:      data.cam_h_m      ?? null,
-            near_m:       data.near_m       ?? null,
-            far_m:        data.far_m        ?? null,
-            road_width_m: data.road_width_m ?? null,
-            pitch_deg:    data.pitch_deg    ?? null,
-            heading:      data.heading      ?? null,
+            cam_h_m:       data.cam_h_m       ?? null,
+            near_m:        data.near_m        ?? null,
+            far_m:         data.far_m         ?? null,
+            road_width_m:  data.road_width_m  ?? null,
+            pitch_deg:     data.pitch_deg     ?? null,
+            heading:       data.heading       ?? null,
+            road_length_m: data.road_length_m ?? null,
           });
         } else {
           // 일반 frame analytics 데이터

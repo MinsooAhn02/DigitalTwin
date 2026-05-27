@@ -213,8 +213,8 @@ export default function App() {
           fovFarM={autoCalibInfo?.far_m ?? (cameraReadyInfo?.road_width_m ? 75 : null)}
           fovRoadWidthM={autoCalibInfo?.road_width_m ?? cameraReadyInfo?.road_width_m ?? null}
           fovHeadingDeg={
-            cameraReadyInfo?.name_bearing
-            ?? autoCalibInfo?.heading
+            autoCalibInfo?.heading
+            ?? cameraReadyInfo?.name_bearing
             ?? cameraReadyInfo?.road_bearing
             ?? null
           }

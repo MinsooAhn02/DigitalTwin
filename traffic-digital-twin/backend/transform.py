@@ -168,6 +168,109 @@ class PerspectiveTransformer:
             (la2 - la1) * 110574.0,
         )) % 360.0
 
+    @staticmethod
+    def _image_curve_sign(
+        left_pts: list[tuple[float, float]],
+        right_pts: list[tuple[float, float]],
+        frame_w: int,
+    ) -> tuple[int | None, float]:
+        """Return visual road curve sign: -1=left, +1=right, None=unclear."""
+        if len(left_pts) < 3 or len(right_pts) < 3:
+            return None, 0.0
+
+        centers = sorted(
+            [(l[0], (l[1] + r[1]) / 2.0) for l, r in zip(left_pts, right_pts)],
+            key=lambda p: p[0],
+            reverse=True,
+        )
+        near_y, near_x = centers[0]
+        far_y, far_x = centers[-1]
+        y_span = near_y - far_y
+        if y_span < 20:
+            return None, 0.0
+
+        residuals: list[float] = []
+        for y, x in centers[1:-1]:
+            s = (near_y - y) / y_span
+            straight_x = near_x + s * (far_x - near_x)
+            residuals.append(x - straight_x)
+
+        if not residuals:
+            return None, 0.0
+
+        curve_px = float(np.median(residuals))
+        threshold_px = max(6.0, frame_w * 0.012)
+        if abs(curve_px) < threshold_px:
+            return None, curve_px
+        return (1 if curve_px > 0 else -1), curve_px
+
+    def _map_curve_sign_for_dir(
+        self,
+        dir_sign: float,
+        lookahead_m: float = 90.0,
+    ) -> tuple[int | None, float]:
+        """Return map curve sign for a candidate view direction: -1=left, +1=right."""
+        if (self._road_pts is None or self._road_cum_dist is None
+                or self._snap_along_m is None):
+            return None, 0.0
+
+        total = self._road_cum_dist[-1]
+        available = (total - self._snap_along_m) if dir_sign > 0 else self._snap_along_m
+        if available < 25.0:
+            return None, 0.0
+
+        far_d = min(lookahead_m, available)
+        if far_d < 25.0:
+            return None, 0.0
+
+        base_lat, base_lon = self._road_interp(self._snap_along_m)
+        mid_lat, mid_lon = self._road_interp(self._snap_along_m + dir_sign * far_d * 0.5)
+        far_lat, far_lon = self._road_interp(self._snap_along_m + dir_sign * far_d)
+
+        base_bearing = self._road_bearing_at(self._snap_along_m)
+        if dir_sign < 0:
+            base_bearing = (base_bearing + 180.0) % 360.0
+        b = math.radians(base_bearing)
+        sin_b, cos_b = math.sin(b), math.cos(b)
+        r_lon = 111320.0 * math.cos(math.radians(base_lat))
+
+        def lateral_m(lat: float, lon: float) -> float:
+            dx = (lon - base_lon) * r_lon
+            dy = (lat - base_lat) * 110574.0
+            return dx * cos_b - dy * sin_b
+
+        curve_m = 0.35 * lateral_m(mid_lat, mid_lon) + 0.65 * lateral_m(far_lat, far_lon)
+        threshold_m = max(1.5, far_d * 0.025)
+        if abs(curve_m) < threshold_m:
+            return None, curve_m
+        return (1 if curve_m > 0 else -1), curve_m
+
+    def _curvature_flip_candidate(
+        self,
+        image_sign: int | None,
+        lookahead_m: float = 90.0,
+    ) -> tuple[bool | None, dict]:
+        """Choose F->T/T->F by matching image curve sign to map curve sign."""
+        ft_sign, ft_curve_m = self._map_curve_sign_for_dir(1.0, lookahead_m)
+        tf_sign, tf_curve_m = self._map_curve_sign_for_dir(-1.0, lookahead_m)
+        info: dict = {
+            "map_ft_sign": ft_sign,
+            "map_tf_sign": tf_sign,
+            "map_ft_curve_m": ft_curve_m,
+            "map_tf_curve_m": tf_curve_m,
+        }
+
+        if image_sign is None:
+            return None, info
+
+        ft_matches = ft_sign == image_sign
+        tf_matches = tf_sign == image_sign
+        if ft_matches and not tf_matches:
+            return False, info
+        if tf_matches and not ft_matches:
+            return True, info
+        return None, info
+
     def _pixel_to_gps_curved(self, u: float, v: float) -> tuple[float, float] | None:
         """2단계 곡선 GPS 변환.
 
@@ -191,9 +294,8 @@ class PerspectiveTransformer:
         cos_b = math.cos(self._curve_bearing_rad)
 
         # 도로 축 변환
-        d_along   =  dx * sin_b + dy * cos_b   # 도로 방향 (양수 = 카메라 시야 방향)
-        d_lateral =  dx * cos_b - dy * sin_b   # 횡방향 (양수 = 오른쪽)
         d_along = dx * sin_b + dy * cos_b
+        d_lateral = dx * cos_b - dy * sin_b
         d_along = max(0.0, d_along)
 
         # road_pts 위에서 d_along 위치 보간
@@ -440,7 +542,23 @@ class PerspectiveTransformer:
         #     cand_B: B_cam = bearing_deg + 180° - phi  (T→F 방향이 VP 방향)
         #   카메라 GPS → snap GPS 방위(B_to_road)에 더 가까운 후보를 선택.
         #   (CCTV는 도로 쪽을 향해 설치되므로 B_cam ≈ B_to_road)
-        if not fix_direction:
+        image_curve_sign, image_curve_px = self._image_curve_sign(left_pts, right_pts, w)
+        curve_flip, curve_info = self._curvature_flip_candidate(image_curve_sign)
+        direction_source = "fixed" if fix_direction else "vp"
+
+        if curve_flip is not None:
+            direction_source = "curvature"
+            if curve_flip:
+                bearing_deg = (bearing_deg + 180.0) % 360.0
+            logger.info(
+                "curve direction: image=%s(%.1fpx) map_ft=%s(%.1fm) "
+                "map_tf=%s(%.1fm) -> %s",
+                image_curve_sign, image_curve_px,
+                curve_info.get("map_ft_sign"), curve_info.get("map_ft_curve_m", 0.0),
+                curve_info.get("map_tf_sign"), curve_info.get("map_tf_curve_m", 0.0),
+                "T->F" if curve_flip else "F->T",
+            )
+        elif not fix_direction:
             phi_deg = math.degrees(math.atan2(vp_x - w / 2.0, fy))
 
             cand_a_cam = (bearing_deg - phi_deg) % 360.0          # F→T 방향이 VP
@@ -575,6 +693,13 @@ class PerspectiveTransformer:
             "road_width_m":  round(road_width_m, 1),
             "pitch_deg":     round(pitch_deg, 1),
             "road_length_m": round(road_length_m, 1),
+            "direction_source": direction_source,
+            "image_curve_sign": image_curve_sign,
+            "image_curve_px": round(image_curve_px, 1),
+            "map_ft_sign": curve_info.get("map_ft_sign"),
+            "map_tf_sign": curve_info.get("map_tf_sign"),
+            "map_ft_curve_m": round(curve_info.get("map_ft_curve_m", 0.0), 1),
+            "map_tf_curve_m": round(curve_info.get("map_tf_curve_m", 0.0), 1),
         }
         return True, bearing_deg, calib_info
 

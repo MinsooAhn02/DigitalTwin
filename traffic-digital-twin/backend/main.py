@@ -42,7 +42,7 @@ main.py — FastAPI WebSocket 브로드캐스트 서버
     [기타]           FrameAnalytics JSON (차량 추적 결과)
 
   FOV polygon 방향 우선순위 (프론트엔드):
-    name_bearing > auto_calibrated.heading (VP 보정) > road_bearing (nodelink F→T)
+    auto_calibrated.heading (곡률/VP 보정) > name_bearing > road_bearing (nodelink F→T)
 """
 
 from __future__ import annotations

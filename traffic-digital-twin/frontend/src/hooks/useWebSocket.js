@@ -61,6 +61,13 @@ export function useWebSocket() {
             pitch_deg:     data.pitch_deg     ?? null,
             heading:       data.heading       ?? null,
             road_length_m: data.road_length_m ?? null,
+            direction_source: data.direction_source ?? null,
+            image_curve_sign: data.image_curve_sign ?? null,
+            image_curve_px: data.image_curve_px ?? null,
+            map_ft_sign: data.map_ft_sign ?? null,
+            map_tf_sign: data.map_tf_sign ?? null,
+            map_ft_curve_m: data.map_ft_curve_m ?? null,
+            map_tf_curve_m: data.map_tf_curve_m ?? null,
           });
         } else {
           // 일반 frame analytics 데이터

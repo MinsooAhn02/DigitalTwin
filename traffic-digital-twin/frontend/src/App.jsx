@@ -209,17 +209,19 @@ export default function App() {
           onMapClick={handleMapClick}
           mapMode={calibTabActive && mapMode !== "satellite" ? "satellite" : mapMode}
           onMapModeChange={setMapMode}
-          fovNearM={autoCalibInfo?.near_m ?? null}
-          fovFarM={autoCalibInfo?.far_m ?? null}
-          fovRoadWidthM={autoCalibInfo?.road_width_m ?? null}
+          fovNearM={autoCalibInfo?.near_m ?? (cameraReadyInfo?.road_width_m ? 15 : null)}
+          fovFarM={autoCalibInfo?.far_m ?? (cameraReadyInfo?.road_width_m ? 75 : null)}
+          fovRoadWidthM={autoCalibInfo?.road_width_m ?? cameraReadyInfo?.road_width_m ?? null}
           fovHeadingDeg={
             cameraReadyInfo?.name_bearing
-            ?? cameraReadyInfo?.road_bearing
             ?? autoCalibInfo?.heading
+            ?? cameraReadyInfo?.road_bearing
             ?? null
           }
           fovSnapLat={cameraReadyInfo?.snap_lat ?? selectedCctv?.lat ?? null}
           fovSnapLon={cameraReadyInfo?.snap_lon ?? selectedCctv?.lon ?? null}
+          fovRoadPts={cameraReadyInfo?.road_pts ?? null}
+          fovSnapAlongM={cameraReadyInfo?.snap_along_m ?? null}
         />
 
         {/* 연결 상태 칩 */}
@@ -392,6 +394,10 @@ export default function App() {
               <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.near_m} m</b>
               <span>원거리</span>
               <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.far_m} m</b>
+              {autoCalibInfo.road_length_m != null && <>
+                <span>도로 가시거리</span>
+                <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_length_m} m</b>
+              </>}
               <span>카메라 틸트</span>
               <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.pitch_deg}°</b>
             </div>

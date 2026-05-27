@@ -673,10 +673,11 @@ class VideoStream:
         self._frame_id += 1
         return self._frame_id, frame
 
-    async def reconnect(self) -> None:
+    async def reconnect(self) -> bool:
+        """Try to reopen the stream with the current URL. Returns True on success."""
         if not self._url:
             await asyncio.sleep(1.0)
-            return
+            return False
         logger.info("Reconnecting stream: %s", self._url)
         if self._cap:
             self._cap.release()
@@ -684,9 +685,11 @@ class VideoStream:
         await asyncio.sleep(self.RECONNECT_DELAY)
         try:
             self._cap = open_video_source(self._url)
+            return True
         except RuntimeError as exc:
             logger.warning("Reconnect failed: %s", exc)
             self._cap = None
+            return False
 
     def release(self) -> None:
         if self._cap:

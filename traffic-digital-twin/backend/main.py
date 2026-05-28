@@ -109,8 +109,10 @@ from config import (
     CAPTURE_QUALITY,
     CAPTURE_WIDTH,
     FPS,
+    HLS_REFRESH_INTERVAL,
     ITS_API_KEY,
     ITS_BASE_URL,
+    ITS_POLL_INTERVAL,
     ITS_TRAFFIC_URL,
     JPEG_QUALITY,
     MAX_IN_FLIGHT,
@@ -150,6 +152,9 @@ _cctv_cache: TTLCache = TTLCache(maxsize=50, ttl=300)
 
 # ITS 구간속도 (5분 주기 폴링) — None이면 데이터 없음
 _its_speed_kph: float | None = None
+
+# 현재 스트림 실제 FPS — MJPEG 슬립 간격과 live_loop target_interval에 반영
+_stream_fps: float = float(FPS)
 
 
 def _safe_tid(tracker_id_arr, idx: int, fallback: int) -> int:
@@ -915,12 +920,13 @@ async def video_stream():
         last_sent: bytes | None = None
         while True:
             jpeg = _latest_frame_jpeg
+            sleep_s = 1.0 / max(_stream_fps, 1.0)
             if jpeg is None or jpeg is last_sent:
-                await asyncio.sleep(0.04)
+                await asyncio.sleep(sleep_s)
                 continue
             last_sent = jpeg
             yield boundary + jpeg + b"\r\n"
-            await asyncio.sleep(0.04)  # 최대 25 fps
+            await asyncio.sleep(sleep_s)
 
     return StreamingResponse(
         generate(),
@@ -938,12 +944,13 @@ async def video_stream_yolo():
         last_sent: bytes | None = None
         while True:
             jpeg = _latest_annotated_jpeg
+            sleep_s = 1.0 / max(_stream_fps, 1.0)
             if jpeg is None or jpeg is last_sent:
-                await asyncio.sleep(0.04)
+                await asyncio.sleep(sleep_s)
                 continue
             last_sent = jpeg
             yield boundary + jpeg + b"\r\n"
-            await asyncio.sleep(0.04)
+            await asyncio.sleep(sleep_s)
 
     return StreamingResponse(
         generate(),
@@ -966,6 +973,24 @@ async def nearby_nodes(
         return {"nodes": nodes}
     except FileNotFoundError:
         return {"nodes": []}
+
+
+# ── 카메라 정지 ──────────────────────────────────────────────────────
+@app.post("/stop-camera")
+async def stop_camera():
+    """프론트엔드 카메라 패널 종료 시 스트림 해제 + YOLO 처리 중지."""
+    global _current_cam, _latest_frame_jpeg, _latest_annotated_jpeg
+    stream = getattr(app.state, "stream", None)
+    if stream:
+        await asyncio.to_thread(stream.release)
+    det = getattr(app.state, "detector", None)
+    if det is not None:
+        det.reset_tracker()
+    _current_cam = None
+    _latest_frame_jpeg = None
+    _latest_annotated_jpeg = None
+    logger.info("카메라 스트림 해제 (프론트엔드 요청)")
+    return {"ok": True}
 
 
 # ── 헬스체크 ──────────────────────────────────────────────────────────
@@ -1092,6 +1117,7 @@ async def live_loop(detector, stream) -> None:
     target_interval = 1.0 / FPS
     skip_budget    = 0
     _reconnect_fails = 0  # 연속 reconnect 실패 횟수
+    global _stream_fps
 
     logger.info("Live 루프 대기 중 — 지도에서 CCTV를 클릭하여 스트림을 시작하세요")
 
@@ -1126,6 +1152,9 @@ async def live_loop(detector, stream) -> None:
                 analytics.reset()
                 skip_budget = 0
                 _reconnect_fails = 0
+                _stream_fps = stream.fps or FPS
+                target_interval = 1.0 / _stream_fps
+                logger.info("스트림 FPS: %.1f (target_interval=%.3fs)", _stream_fps, target_interval)
 
                 # 수동으로 저장된 ROI만 적용 (auto-estimate는 탐지 정확도를 해칠 수 있어 자동 적용 안 함)
                 cam_url = cam["url"]
@@ -1315,18 +1344,17 @@ def _live_process(frame_id, frame, detector, tracker, fps: float = 30.0) -> dict
 
 # ── ITS 구간속도 폴링 ─────────────────────────────────────────────────
 async def _its_speed_poll_loop() -> None:
-    """5분(API 집계주기)마다 ITS 구간속도 갱신. 카메라 선택 시에만 실제 조회."""
+    """ITS_POLL_INTERVAL(기본 5분)마다 ITS 구간속도 갱신. 카메라 선택 시에만 실제 조회."""
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(ITS_POLL_INTERVAL)
         await _update_its_speed()
 
 
 # ── HLS URL 자동 갱신 (서버사이드 live_loop 용) ───────────────────────
 async def hls_refresh_loop(stream) -> None:
-    """ITS HLS 토큰 만료 전 URL 갱신 (30분마다)."""
-    REFRESH_INTERVAL = 1800
+    """ITS HLS 토큰 만료 전 URL 갱신 (HLS_REFRESH_INTERVAL, 기본 30분)."""
     while True:
-        await asyncio.sleep(REFRESH_INTERVAL)
+        await asyncio.sleep(HLS_REFRESH_INTERVAL)
         cam = _current_cam
         if cam is None or not cam.get("name"):
             continue

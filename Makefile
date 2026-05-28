@@ -14,7 +14,7 @@ dev: kill nodelink
 nodelink:
 	@if not exist "node-link-data\nodelink.sqlite" ( \
 		if exist "node-link-data\MOCT_NODE.shp" ( \
-			echo [노드링크] DB 생성 중 (최초 1회 ~2분)... && \
+			echo [노드링크] DB 생성 중 ^(최초 1회 ~2분^)... && \
 			call $(PYTHON_RUNNER) -m pip install pyshp pyproj -q && \
 			call $(PYTHON_RUNNER) scripts\build_nodelink_db.py \
 		) else ( \

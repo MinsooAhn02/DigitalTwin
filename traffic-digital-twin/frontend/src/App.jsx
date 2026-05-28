@@ -9,6 +9,8 @@ import CounterPanel  from "./components/CounterPanel";
 import CctvPlayer    from "./components/CctvPlayer";
 import { useLang }   from "./i18n/index.jsx";
 
+const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+
 const INITIAL_VIEW = {
   longitude: 127.0386,
   latitude:  37.4626,
@@ -60,7 +62,7 @@ export default function App() {
   // 카메라 선택 시 주변 노드링크 노드 fetch (캘리브레이션 GPS 스냅용)
   useEffect(() => {
     if (!selectedCctv?.lat || !selectedCctv?.lon) { setSnapNodes([]); return; }
-    fetch(`http://localhost:8000/nodelink/nodes?lat=${selectedCctv.lat}&lon=${selectedCctv.lon}&radius_km=0.3`)
+    fetch(`${API_BASE}/nodelink/nodes?lat=${selectedCctv.lat}&lon=${selectedCctv.lon}&radius_km=0.3`)
       .then((r) => r.json())
       .then(({ nodes }) => setSnapNodes(nodes ?? []))
       .catch(() => setSnapNodes([]));
@@ -92,7 +94,7 @@ export default function App() {
 
   useEffect(() => {
     if (!cameraReadyInfo?.camera_key || !selectedCctv) return;
-    fetch(`http://localhost:8000/calibration/${cameraReadyInfo.camera_key}`)
+    fetch(`${API_BASE}/calibration/${cameraReadyInfo.camera_key}`)
       .then((r) => r.json())
       .then(({ calibration }) => {
         if (!calibration?.gps_pts) return;
@@ -128,7 +130,7 @@ export default function App() {
   const fetchCctvs = useCallback((vs) => {
     const { minX, maxX, minY, maxY } = viewBbox(vs ?? viewState);
     setCctvLoading(true);
-    fetch(`http://localhost:8000/cctvs?minX=${minX}&maxX=${maxX}&minY=${minY}&maxY=${maxY}`)
+    fetch(`${API_BASE}/cctvs?minX=${minX}&maxX=${maxX}&minY=${minY}&maxY=${maxY}`)
       .then((r) => r.json())
       .then(setCctvList)
       .catch(() => {})
@@ -175,7 +177,7 @@ export default function App() {
     switchDebounceRef.current = setTimeout(() => {
       setSwitching(true);
       switchTimeoutRef.current = setTimeout(() => setSwitching(false), 10000);
-      fetch("http://localhost:8000/switch-camera", {
+      fetch(`${API_BASE}/switch-camera`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ cctvurl: cctv.cctvurl, lat: cctv.lat, lon: cctv.lon, name: cctv.name ?? "" }),
@@ -246,7 +248,7 @@ export default function App() {
           }}>
             <span style={{ color: "#fbbf24", fontSize: 15 }}>📷</span>
             <span style={{ color: "#fde68a" }}>{selectedCctv.name || selectedCctv.id}</span>
-            <button onClick={() => setSelectedCctv(null)} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", padding: 0, marginLeft: 4, fontSize: 14 }}>✕</button>
+            <button onClick={() => { setSelectedCctv(null); fetch(`${API_BASE}/stop-camera`, { method: "POST" }).catch(() => {}); }} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", padding: 0, marginLeft: 4, fontSize: 14 }}>✕</button>
           </div>
         )}
 
@@ -331,7 +333,10 @@ export default function App() {
 
         <CctvPlayer
           cctv={selectedCctv}
-          onClose={() => { setSelectedCctv(null); setCalMode(null); setPendingGps(null); }}
+          onClose={() => {
+            setSelectedCctv(null); setCalMode(null); setPendingGps(null);
+            fetch(`${API_BASE}/stop-camera`, { method: "POST" }).catch(() => {});
+          }}
           pendingGps={pendingGps}
           onNeedGps={() => { setPendingGps(null); setCalMode("awaiting"); }}
           onCancelGps={() => { setCalMode(null); setPendingGps(null); }}

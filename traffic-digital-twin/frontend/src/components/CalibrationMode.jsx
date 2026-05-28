@@ -1,5 +1,7 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 
+const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+
 /**
  * CalibrationMode — 4-point pixel→GPS 보정 UI
  *
@@ -146,7 +148,7 @@ export default function CalibrationMode({
       const video = videoRef.current;
       const frameWidth  = video?.videoWidth  || 640;
       const frameHeight = video?.videoHeight || 360;
-      const res = await fetch("http://localhost:8000/calibration", {
+      const res = await fetch(`${API_BASE}/calibration`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

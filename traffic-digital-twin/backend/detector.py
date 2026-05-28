@@ -477,6 +477,11 @@ class VehicleDetector:
 
     def __init__(self):
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        if self._device == "cpu":
+            logger.warning("CUDA 미감지 — CPU 모드로 실행 (속도 저하 예상)")
+        else:
+            vram = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            logger.info("CUDA GPU: %s  VRAM=%.1f GB", torch.cuda.get_device_name(0), vram)
         selection = resolve_model_selection()
         self._model_path = str(selection.path)
         self._backend = selection.backend
@@ -491,7 +496,13 @@ class VehicleDetector:
         self._track_frame_count: int = 0
         self._last_dets_np: np.ndarray = np.empty((0, 6))
         self._last_tracks: sv.Detections = sv.Detections.empty()
-        self._detect_interval = max(1, int(YOLO_DETECT_INTERVAL))
+        # TensorRT/ONNX는 추론이 빨라 매 프레임 탐지해도 충분함
+        # CPU 모드에서만 DETECT_INTERVAL 설정값을 그대로 사용
+        if YOLO_DETECT_INTERVAL == 1 or selection.backend in ("tensorrt", "onnx"):
+            self._detect_interval = 1
+        else:
+            self._detect_interval = max(1, int(YOLO_DETECT_INTERVAL))
+        logger.info("DETECT_INTERVAL=%d (backend=%s)", self._detect_interval, selection.backend)
 
         # ROI polygon (정규화 좌표 0~1). None이면 전체 프레임
         self._roi: list[list[float]] | None = None
@@ -552,7 +563,7 @@ class VehicleDetector:
     def track(self, frame: np.ndarray) -> sv.Detections:
         """
         YOLO predict → ROI 필터 → boxmot tracker update → sv.Detections 반환.
-        YOLO_DETECT_INTERVAL 프레임마다 한 번만 추론, 나머지는 tracker 예측으로 보간.
+        YOLO_DETECT_INTERVAL 프레임마다 한 번만 추론, 비탐지 프레임은 tracker 상태 보존을 위해 스킵.
         """
         self._track_frame_count += 1
         should_detect = (self._track_frame_count - 1) % self._detect_interval == 0
@@ -587,6 +598,12 @@ class VehicleDetector:
                 logger.debug("Tracker input[0]: %s", tracker_input[0])
 
         # 2. boxmot tracker update
+        # 비탐지 프레임에서 update(empty)를 호출하면 ByteTrack이 active_tracks를
+        # 즉시 LOST로 전환 → 다음 detect 프레임에서 매칭 실패 → 영원히 빈 결과.
+        # 비탐지 프레임은 tracker 상태를 건드리지 않고 마지막 결과를 그대로 반환.
+        if not should_detect:
+            return self._last_tracks
+
         try:
             tracks = self._tracker.update(tracker_input, frame)
             logger.debug(
@@ -599,10 +616,6 @@ class VehicleDetector:
             return self._last_tracks
 
         result = _boxmot_to_sv(tracks)
-
-        # 비탐지 프레임에서 tracker가 빈 결과 반환 시 마지막 결과 유지
-        if len(result) == 0 and not should_detect:
-            return self._last_tracks
 
         # ReID 없는 tier(cpu/low): 중복 트랙 제거 후 ID 복원
         if self._tracker_tier in ("cpu", "low"):

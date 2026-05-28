@@ -57,10 +57,10 @@ YOLO_AUTO_EXPORT_ENGINE: bool = os.getenv(
     "true",
 ).lower() == "true"
 YOLO_IMGSZ: int = int(os.getenv("YOLO_IMGSZ", "640"))
-YOLO_CONF: float = 0.25
-YOLO_IOU: float = 0.45
+YOLO_CONF: float = float(os.getenv("YOLO_CONF", "0.25"))
+YOLO_IOU: float = float(os.getenv("YOLO_IOU", "0.45"))
 
-YOLO_DETECT_INTERVAL: int = 3
+YOLO_DETECT_INTERVAL: int = int(os.getenv("YOLO_DETECT_INTERVAL", "1"))
 
 VEHICLE_CLASSES: dict[int, str] = {
     2: "car",
@@ -70,8 +70,8 @@ VEHICLE_CLASSES: dict[int, str] = {
 }
 
 # Tracking
-BYTE_TRACK_FPS: int = 30
-BYTE_TRACK_BUFFER: int = 30
+BYTE_TRACK_FPS: int = int(os.getenv("BYTE_TRACK_FPS", "30"))
+BYTE_TRACK_BUFFER: int = int(os.getenv("BYTE_TRACK_BUFFER", "30"))
 
 # LineZone
 COUNT_LINE_START = (0, 360)
@@ -114,6 +114,8 @@ LOS_THRESHOLDS: dict[str, int] = {
 }
 
 BOTTLENECK_DWELL_FRAMES: int = int(os.getenv("BOTTLENECK_DWELL_FRAMES", "150"))
+ITS_POLL_INTERVAL: int = int(os.getenv("ITS_POLL_INTERVAL", "300"))
+HLS_REFRESH_INTERVAL: int = int(os.getenv("HLS_REFRESH_INTERVAL", "1800"))
 
 SPEED_JITTER_THRESHOLD_M: float = 0.5
 SPEED_SMOOTHING_ALPHA: float = 0.15

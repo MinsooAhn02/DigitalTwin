@@ -88,5 +88,15 @@
     "speed_scale": 0.6867,
     "converged": false,
     "updated_at": "2026-05-27T20:52:32.512480+00:00"
+  },
+  "d11c4812bd06": {
+    "speed_scale": 0.7462,
+    "converged": false,
+    "updated_at": "2026-05-28T15:42:34.237959+00:00"
+  },
+  "a3a9d8cc9693": {
+    "speed_scale": 0.9579,
+    "converged": false,
+    "updated_at": "2026-05-28T15:52:40.303074+00:00"
   }
 }

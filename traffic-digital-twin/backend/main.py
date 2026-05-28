@@ -334,6 +334,152 @@ def _build_vehicles(
     return vehicles
 
 
+# ── 백그라운드 멀티-카메라 모니터 ──────────────────────────────────────
+from dataclasses import dataclass as _dc, field as _field
+
+
+@_dc
+class _BgCamState:
+    cam_key:       str
+    name:          str
+    name_ko:       str
+    url:           str
+    lat:           float
+    lon:           float
+    status:        str   = "loading"   # loading / normal / busy / congested / error
+    vehicle_count: int   = 0
+    class_counts:  dict  = _field(default_factory=dict)
+    updated_at:    float = 0.0
+    _task:         object = _field(default=None, repr=False)   # asyncio.Task
+
+
+class BackgroundMonitor:
+    """N개 CCTV를 백그라운드에서 저속(5 s) 탐지하여 WS로 상태 브로드캐스트.
+
+    - 각 카메라는 독립 asyncio.Task로 실행 (독립 VideoStream, 공유 detector)
+    - detector.detect()는 내부 threading.Lock으로 직렬화되므로 GPU 충돌 없음
+    - B(클러스터링) / C(히스토리 저장) / D(Re-ID) 확장을 위한 훅 포함
+    """
+    POLL_S            = 8.0   # 캡처 주기 (초) — CPU 부하 절충
+    THRESH_BUSY       = 3     # > 3 → busy
+    THRESH_CONGESTED  = 6     # > 6 → congested
+
+    def __init__(self) -> None:
+        self._cams: dict[str, _BgCamState] = {}
+        self._lock = asyncio.Lock()
+
+    # ── 공개 인터페이스 ────────────────────────────────────────────────
+
+    async def add(self, cam_key: str, name: str, name_ko: str,
+                  url: str, lat: float, lon: float, detector) -> None:
+        async with self._lock:
+            if cam_key in self._cams:
+                return
+            state = _BgCamState(cam_key=cam_key, name=name, name_ko=name_ko,
+                                url=url, lat=lat, lon=lon)
+            state._task = asyncio.create_task(
+                self._loop(cam_key, state, detector),
+                name=f"bg-monitor-{cam_key}",
+            )
+            self._cams[cam_key] = state
+        await self._emit()
+
+    async def remove(self, cam_key: str) -> None:
+        async with self._lock:
+            state = self._cams.pop(cam_key, None)
+            if state and state._task:
+                state._task.cancel()
+        await self._emit()
+
+    def is_monitored(self, cam_key: str) -> bool:
+        return cam_key in self._cams
+
+    def snapshot(self) -> dict:
+        return {
+            k: {
+                "name":          s.name,
+                "name_ko":       s.name_ko,
+                "lat":           s.lat,
+                "lon":           s.lon,
+                "status":        s.status,
+                "vehicle_count": s.vehicle_count,
+                "class_counts":  s.class_counts,
+                "updated_at":    s.updated_at,
+            }
+            for k, s in self._cams.items()
+        }
+
+    # ── 확장 훅 (B: 클러스터링, C: 히스토리 저장 시 오버라이드) ──────────
+    async def on_frame_result(self, cam_key: str, state: "_BgCamState",
+                              vehicle_count: int, class_counts: dict) -> None:
+        """탐지 결과가 나올 때마다 호출. 하위 기능에서 오버라이드 가능."""
+
+    # ── 내부 ──────────────────────────────────────────────────────────
+
+    def _classify(self, n: int) -> str:
+        if n > self.THRESH_CONGESTED:
+            return "congested"
+        if n > self.THRESH_BUSY:
+            return "busy"
+        return "normal"
+
+    async def _emit(self) -> None:
+        await _broadcast({"type": "background_status", "cameras": self.snapshot()})
+
+    async def _loop(self, cam_key: str, state: _BgCamState, detector) -> None:
+        from detector import VideoStream as _VS
+        stream = _VS()
+        try:
+            await asyncio.to_thread(stream.switch_to, state.url)
+            while True:
+                try:
+                    _, frame = stream.read_frame()
+                    if frame is None:
+                        ok = await stream.reconnect()
+                        if not ok:
+                            state.status = "error"
+                            await self._emit()
+                        await asyncio.sleep(self.POLL_S)
+                        continue
+
+                    dets = await asyncio.to_thread(detector.detect, frame)
+
+                    cls_cnt: dict[str, int] = {}
+                    if dets.class_id is not None:
+                        for cid in dets.class_id:
+                            cn = VEHICLE_CLASSES.get(int(cid), "unknown")
+                            cls_cnt[cn] = cls_cnt.get(cn, 0) + 1
+
+                    n = len(dets)
+                    state.vehicle_count = n
+                    state.class_counts  = cls_cnt
+                    state.status        = self._classify(n)
+                    state.updated_at    = time.time()
+
+                    await self.on_frame_result(cam_key, state, n, cls_cnt)
+                    await self._emit()
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("BG monitor [%s] error: %s", cam_key, exc)
+                    state.status = "error"
+                    await self._emit()
+
+                await asyncio.sleep(self.POLL_S)
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("BG monitor [%s] startup error: %s", cam_key, exc)
+            state.status = "error"
+        finally:
+            stream.release()
+
+
+_bg_monitor = BackgroundMonitor()
+
+
 # ── 앱 생명주기 ───────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -381,20 +527,60 @@ async def ws_endpoint(ws: WebSocket):
 
 
 # ── CCTV 이름 한영 병기 ───────────────────────────────────────────────
-def _korname_to_en(name: str) -> str:
-    """ITS CCTV 한국어 이름에서 영어 약칭을 파싱해 괄호로 병기한다."""
+def _en_only_name(name: str) -> str:
+    """ITS CCTV 한국어 이름에서 영어만으로 구성된 약칭을 반환한다.
+    인식 가능한 패턴이 없으면 빈 문자열 반환 (프론트엔드 fallback 처리)."""
     en_parts: list[str] = []
 
     m = re.search(r'국도\s*(\d+)\s*호선?', name)
     if m:
-        en_parts.append(f"Nat'l Rt.{m.group(1)}")
+        en_parts.append(f"National Route {m.group(1)}")
 
     m = re.search(r'지방도\s*(\d+)\s*호?', name)
     if m:
-        en_parts.append(f"Prov.Rt.{m.group(1)}")
+        en_parts.append(f"Provincial Route {m.group(1)}")
 
     if re.search(r'고속(도로|국도)', name):
-        en_parts.append("Expwy")
+        en_parts.append("Expressway")
+
+    # ASCII 위치 힌트 추출 (IC, JC, TG, SA — 한국 도로명에 포함된 영어 약어)
+    seen: set[str] = set()
+    for hint in re.findall(r'\b(IC|JC|TG|SA)\b', name, re.IGNORECASE):
+        hu = hint.upper()
+        if hu not in seen:
+            seen.add(hu)
+            en_parts.append(hu)
+
+    # 구간 번호 (예: 1-1구간, 2구간)
+    m = re.search(r'(\d+[-–]\d+)\s*구간', name)
+    if m:
+        en_parts.append(f"Sec {m.group(1)}")
+
+    # 방향
+    if '상행' in name:
+        en_parts.append("NB↑")
+    elif '하행' in name:
+        en_parts.append("SB↓")
+    elif '양방향' in name:
+        en_parts.append("Both↕")
+
+    return " ".join(en_parts)  # 패턴 없으면 빈 문자열
+
+
+def _korname_to_en(name: str) -> str:
+    """ITS CCTV 한국어 이름에 영어 약칭을 괄호로 병기한다."""
+    en_parts: list[str] = []
+
+    m = re.search(r'국도\s*(\d+)\s*호선?', name)
+    if m:
+        en_parts.append(f"National Route {m.group(1)}")
+
+    m = re.search(r'지방도\s*(\d+)\s*호?', name)
+    if m:
+        en_parts.append(f"Provincial Route {m.group(1)}")
+
+    if re.search(r'고속(도로|국도)', name):
+        en_parts.append("Expressway")
 
     if '상행' in name:
         en_parts.append("NB↑")
@@ -441,11 +627,17 @@ async def get_cctvs(
                     lon = float(item.get("coordx") or 0)
                     if not (lat and lon):
                         continue
-                    url  = item.get("cctvurl", "")
-                    name = _korname_to_en(item.get("cctvname", ""))
+                    url     = item.get("cctvurl", "")
+                    name_ko = item.get("cctvname", "")
+                    name    = _korname_to_en(name_ko)
+                    name_en = _en_only_name(name_ko)
+                    cam_key = roi_manager.camera_key(url) if url else None
                     result.append({
                         "id":      url or name,
                         "name":    name,
+                        "name_ko": name_ko,
+                        "name_en": name_en,
+                        "cam_key": cam_key,
                         "lat":     lat,
                         "lon":     lon,
                         "cctvurl": url,
@@ -454,12 +646,62 @@ async def get_cctvs(
                     })
                 except (ValueError, TypeError):
                     continue
+            # 동일 name_en 중복 구분: 위도 순 정렬 후 (1)(2)... 부여
+            _name_buckets: dict[str, list] = {}
+            for item in result:
+                key = item["name_en"]
+                if key:
+                    _name_buckets.setdefault(key, []).append(item)
+            for _key, _items in _name_buckets.items():
+                if len(_items) > 1:
+                    _items.sort(key=lambda x: x.get("lat", 0))
+                    for _idx, _item in enumerate(_items, 1):
+                        _item["name_en"] = f"{_key} ({_idx})"
+
             logger.info("CCTV 조회 완료: %d개 (캐시 저장)", len(result))
             _cctv_cache[cache_key] = result
             return result
     except Exception as e:
         logger.warning("CCTV 목록 조회 실패: %s", e)
         return []
+
+
+# ── 백그라운드 모니터링 엔드포인트 ────────────────────────────────────
+class _BgAddBody(BaseModel):
+    cam_key: str
+    name:    str   = ""
+    name_ko: str   = ""
+    url:     str
+    lat:     float = 0.0
+    lon:     float = 0.0
+
+
+@app.post("/background/add")
+async def background_add(body: _BgAddBody, request: Request):
+    """카메라를 백그라운드 모니터링 목록에 추가."""
+    await _bg_monitor.add(
+        cam_key = body.cam_key,
+        name    = body.name or body.cam_key,
+        name_ko = body.name_ko or body.name or body.cam_key,
+        url     = body.url,
+        lat     = body.lat,
+        lon     = body.lon,
+        detector= request.app.state.detector,
+    )
+    return {"ok": True}
+
+
+@app.post("/background/remove/{cam_key}")
+async def background_remove(cam_key: str):
+    """카메라를 백그라운드 모니터링 목록에서 제거."""
+    await _bg_monitor.remove(cam_key)
+    return {"ok": True}
+
+
+@app.get("/background/status")
+async def background_status_endpoint():
+    """현재 백그라운드 모니터링 중인 카메라들의 상태 반환."""
+    return _bg_monitor.snapshot()
 
 
 # ── 카메라 전환 ───────────────────────────────────────────────────────

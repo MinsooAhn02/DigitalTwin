@@ -20,7 +20,7 @@ export default function ClassBarChart({ classCounts = {} }) {
         return (
           <div key={cls}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-              <span style={{ fontSize: 11, color: "#d1d5db" }}>{cls}</span>
+              <span style={{ fontSize: 11, color: "#d1d5db" }}>{t(`class.${cls}`) || cls}</span>
               <span style={{ fontSize: 11, color: "#9ca3af" }}>{t("chart.unit", { n: cnt, pct })}</span>
             </div>
             <div style={{ height: 8, borderRadius: 4, background: "#374151", overflow: "hidden" }}>

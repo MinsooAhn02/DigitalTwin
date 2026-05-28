@@ -598,10 +598,20 @@ class VehicleDetector:
                 logger.debug("Tracker input[0]: %s", tracker_input[0])
 
         # 2. boxmot tracker update
-        # 비탐지 프레임에서 update(empty)를 호출하면 ByteTrack이 active_tracks를
-        # 즉시 LOST로 전환 → 다음 detect 프레임에서 매칭 실패 → 영원히 빈 결과.
-        # 비탐지 프레임은 tracker 상태를 건드리지 않고 마지막 결과를 그대로 반환.
+        # 비탐지 프레임: 마지막 탐지 결과로 tracker를 갱신해 Kalman 예측 유지.
+        # update(empty)는 ByteTrack이 모든 트랙을 LOST로 처리하므로 사용 금지.
+        # 마지막 탐지 bbox를 재전달하면 IOU 매칭으로 기존 트랙 ID가 유지됨.
         if not should_detect:
+            if len(self._last_dets_np) > 0:
+                try:
+                    tracks = self._tracker.update(self._last_dets_np, frame)
+                    result = _boxmot_to_sv(tracks)
+                    if self._tracker_tier in ("cpu", "low"):
+                        result = _dedup_tracks(result)
+                        result = self._id_stabilizer.update(result, frame.shape[:2])
+                    self._last_tracks = result
+                except Exception:
+                    pass
             return self._last_tracks
 
         try:

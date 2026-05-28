@@ -176,7 +176,7 @@ class TrafficAnalytics:
             los_grade=self._los(len(active_vehicles)),
             in_count=in_count,
             out_count=out_count,
-            class_counts=self._class_counts(active_vehicles),
+            class_counts=self._class_counts(vehicles),
         )
 
         for v in vehicles:

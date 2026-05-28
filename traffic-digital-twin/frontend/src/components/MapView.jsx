@@ -5,9 +5,18 @@ import Map from "react-map-gl/maplibre";
 import { getVehicleColor } from "../utils/colorMap";
 import { useLang } from "../i18n/index.jsx";
 
-function makeCameraIconUrl(selected) {
-  const stroke  = selected ? "#22d3ee" : "#fbbf24";
-  const bg      = selected ? "#0e3a44" : "#1a1200";
+const BG_STATUS_COLORS = {
+  selected:  { stroke: "#22d3ee", bg: "#0e3a44" },
+  normal:    { stroke: "#22c55e", bg: "#0a2210" },
+  busy:      { stroke: "#f97316", bg: "#2a1200" },
+  congested: { stroke: "#ef4444", bg: "#2a0000" },
+  loading:   { stroke: "#94a3b8", bg: "#1e293b" },
+  error:     { stroke: "#6b7280", bg: "#111111" },
+  default:   { stroke: "#64748b", bg: "#1e293b" },  // 비모니터링: 눈에 덜 띄는 슬레이트
+};
+
+function makeCameraIconUrl(status) {
+  const { stroke, bg } = BG_STATUS_COLORS[status] ?? BG_STATUS_COLORS.default;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
     <rect x="2" y="2" width="36" height="36" rx="8" fill="${bg}" stroke="${stroke}" stroke-width="2"/>
     <rect x="4" y="13" width="21" height="12" rx="3" fill="${stroke}" opacity="0.9"/>
@@ -19,8 +28,16 @@ function makeCameraIconUrl(selected) {
   </svg>`;
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
-const ICON_NORMAL   = makeCameraIconUrl(false);
-const ICON_SELECTED = makeCameraIconUrl(true);
+
+const CAMERA_ICONS = {
+  selected:  makeCameraIconUrl("selected"),
+  normal:    makeCameraIconUrl("normal"),
+  busy:      makeCameraIconUrl("busy"),
+  congested: makeCameraIconUrl("congested"),
+  loading:   makeCameraIconUrl("loading"),
+  error:     makeCameraIconUrl("error"),
+  default:   makeCameraIconUrl(null),
+};
 
 const MAP_STYLES = {
   dark:      "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
@@ -211,8 +228,13 @@ export default function MapView({
   fovSnapLon = null,
   fovRoadPts = null,
   fovSnapAlongM = null,
+  backgroundStatus = {},
 }) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
+  const cctvLabel = (d) => {
+    if (lang === "en") return d.name_en || (d.cam_key ? `CCTV ${d.cam_key.slice(0, 6)}` : String(d.id));
+    return d.name_ko || d.name || String(d.id);
+  };
   const showVehicles = viewState.zoom >= VEHICLE_MIN_ZOOM;
 
   const sorted = useMemo(
@@ -236,32 +258,38 @@ export default function MapView({
     id:          "cctv-icons",
     data:        cctvList,
     getPosition: (d) => [d.lon, d.lat],
-    getIcon:     (d) => ({
-      url:    selectedCctv?.id === d.id ? ICON_SELECTED : ICON_NORMAL,
-      width:  40,
-      height: 40,
-    }),
+    getIcon:     (d) => {
+      let iconKey;
+      if (selectedCctv?.id === d.id) {
+        iconKey = "selected";
+      } else {
+        const bgInfo = d.cam_key ? backgroundStatus[d.cam_key] : null;
+        iconKey = bgInfo ? (bgInfo.status || "loading") : "default";
+      }
+      // anchorX/anchorY: 아이콘 하단-중앙을 GPS 좌표에 고정 → 위쪽으로 렌더링 (짤림 방지)
+      return { url: CAMERA_ICONS[iconKey] ?? CAMERA_ICONS.default, width: 40, height: 40, anchorX: 20, anchorY: 40 };
+    },
     getSize:        (d) => selectedCctv?.id === d.id ? 48 : 36,
     sizeUnits:      "pixels",
     getPixelOffset: [0, 0],
     pickable:       false,
-    updateTriggers: { getIcon: [selectedCctv?.id], getSize: [selectedCctv?.id] },
+    updateTriggers: { getIcon: [selectedCctv?.id, backgroundStatus], getSize: [selectedCctv?.id] },
   });
 
   const cctvLabelLayer = new TextLayer({
     id:             "cctv-labels",
     data:           cctvList,
     getPosition:    (d) => [d.lon, d.lat],
-    getText:        (d) => d.name || String(d.id),
+    getText:        (d) => cctvLabel(d),
     getSize:        (d) => selectedCctv?.id === d.id ? 13 : 11,
     getColor:       (d) => selectedCctv?.id === d.id ? [34, 211, 238, 255] : [253, 230, 138, 230],
-    getPixelOffset: [0, -30],
+    getPixelOffset: [0, -50],
     fontFamily:     '"Segoe UI", system-ui, sans-serif',
     fontWeight:     700,
     fontSettings:   { sdf: true, smoothing: 0.3 },
     outlineWidth:   3,
     outlineColor:   [0, 0, 0, 200],
-    updateTriggers: { getSize: [selectedCctv?.id], getColor: [selectedCctv?.id] },
+    updateTriggers: { getText: [lang], getSize: [selectedCctv?.id], getColor: [selectedCctv?.id] },
   });
 
   const fovLayer = useMemo(() => {
@@ -411,7 +439,7 @@ export default function MapView({
 
         if (d.id) {
           return {
-            html: `<b>📷 ${d.name || ""}</b><br/><span style="color:#9ca3af;font-size:11px">${t("map.clickHint")}</span>`,
+            html: `<b>📷 ${cctvLabel(d)}</b><br/><span style="color:#9ca3af;font-size:11px">${t("map.clickHint")}</span>`,
             style: {
               background: "#111827", color: "#fbbf24",
               fontSize: "12px", borderRadius: "6px", padding: "8px",

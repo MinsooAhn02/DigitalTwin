@@ -528,15 +528,6 @@ export default function App() {
   );
 }
 
-function Card({ children, label }) {
-  return (
-    <div style={{ background: "#1f2937", borderRadius: 12, padding: 16 }}>
-      {label && <p style={{ margin: "0 0 8px", fontSize: 12, color: "#9ca3af" }}>{label}</p>}
-      {children}
-    </div>
-  );
-}
-
 function CollapsibleCard({ children, label, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen);
   return (

@@ -73,10 +73,6 @@ VEHICLE_CLASSES: dict[int, str] = {
 BYTE_TRACK_FPS: int = int(os.getenv("BYTE_TRACK_FPS", "30"))
 BYTE_TRACK_BUFFER: int = int(os.getenv("BYTE_TRACK_BUFFER", "30"))
 
-# LineZone
-COUNT_LINE_START = (0, 360)
-COUNT_LINE_END = (1280, 360)
-
 # Perspective transform
 PIXEL_POINTS = [
     [0, 0],
@@ -118,7 +114,6 @@ ITS_POLL_INTERVAL: int = int(os.getenv("ITS_POLL_INTERVAL", "300"))
 HLS_REFRESH_INTERVAL: int = int(os.getenv("HLS_REFRESH_INTERVAL", "1800"))
 
 SPEED_JITTER_THRESHOLD_M: float = 0.5
-SPEED_SMOOTHING_ALPHA: float = 0.15
 MAX_REASONABLE_KPH: float = 120.0
 GC_GRACE_FRAMES: int = 30
 

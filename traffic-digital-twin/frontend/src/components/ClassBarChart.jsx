@@ -1,12 +1,13 @@
+import React, { useMemo } from "react";
 import { CLASS_COLORS } from "../utils/colorMap";
 import { useLang } from "../i18n/index.jsx";
 
 function toRgb([r, g, b]) { return `rgb(${r},${g},${b})`; }
 
-export default function ClassBarChart({ classCounts = {} }) {
+const ClassBarChart = React.memo(function ClassBarChart({ classCounts = {} }) {
   const { t } = useLang();
-  const entries = Object.entries(classCounts);
-  const total   = entries.reduce((s, [, n]) => s + n, 0);
+  const entries = useMemo(() => Object.entries(classCounts), [classCounts]);
+  const total   = useMemo(() => entries.reduce((s, [, n]) => s + n, 0), [entries]);
 
   if (total === 0) {
     return <p style={{ color: "#6b7280", fontSize: 12, textAlign: "center", padding: "12px 0" }}>{t("chart.noVehicles")}</p>;
@@ -31,4 +32,6 @@ export default function ClassBarChart({ classCounts = {} }) {
       })}
     </div>
   );
-}
+});
+
+export default ClassBarChart;

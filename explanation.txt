@@ -1,6 +1,6 @@
 ================================================================
   Traffic Digital Twin — 시스템 설명서
-  최종 업데이트: 2026-05-29
+  최종 업데이트: 2026-06-01
 ================================================================
 
 이 문서는 프로젝트를 처음 접하는 사람도 전체 구조와 동작 방식을
@@ -36,6 +36,13 @@
   - GPU(CUDA/TensorRT/ONNX) 추론 자동 선택
   - 다중 CCTV 백그라운드 모니터링: 선택하지 않은 카메라도 백그라운드에서 주기 탐지
   - 지도 스타일 토글: 다크/라이트/위성 3가지 선택
+  - 카메라 단위 정체 구간 클러스터링: haversine DBSCAN으로 인접 정체 카메라 그룹화
+    → 지도 위 폴리곤 오버레이 (경미/중간/심각 심각도 색상 구분)
+  - 교통 히스토리 저장 및 분석: SQLite에 30초 주기 스냅샷 누적 (14일 보존)
+    → 시간대별 차량 수/평균속도 시계열 차트, 피크타임 자동 탐지, CSV 내보내기
+  - 라이브 뷰어 게이트: 화면 미시청 시 live_loop 자동 일시정지 (불필요한 GPU 사용 방지)
+  - 속도 EMA 평활화: 트랙별 지수이동평균으로 순간 속도 튀김 방지
+    → 정지 차량 지터(5 km/h 미만) 0 처리, stale 값 감쇠
 
 
 ================================================================
@@ -141,6 +148,8 @@ DigitalTwin/
     │   ├── transform.py         PerspectiveTransformer (픽셀→GPS 호모그래피)
     │   ├── nodelink.py          국가 노드링크 DB 조회 (도로명/제한속도/bearing/snap)
     │   ├── osm.py               OSM Overpass API 도로폭 조회 (비동기)
+    │   ├── congestion.py        카메라 단위 정체 클러스터링 (haversine DBSCAN + convex hull)
+    │   ├── history.py           HistoryStore — SQLite 교통 히스토리 저장·조회
     │   ├── roi_manager.py       ROI 저장·로드 (정규화 좌표 기반)
     │   ├── model_setup.py       최초 실행 시 모델/트래커 선택 GUI (Tkinter)
     │   ├── config.py            전역 설정값 (API키, YOLO 파라미터, 임계값 등)
@@ -151,6 +160,7 @@ DigitalTwin/
     │   ├── roi_config.json      카메라별 ROI 폴리곤 저장소
     │   ├── calibration_data.json  카메라 보정 데이터 저장소
     │   ├── speed_scale.json       카메라별 속도 보정 계수 저장소 (자동생성)
+    │   ├── history.sqlite         교통 히스토리 DB (런타임 누적, git 제외)
     │   └── yolov8n.pt / .engine   YOLO 모델
     └── frontend/
         ├── vite.config.js
@@ -159,21 +169,22 @@ DigitalTwin/
             ├── main.jsx                 React 진입점
             ├── App.jsx                  최상위 컴포넌트, 전역 상태, 레이아웃
             ├── components/
-            │   ├── MapView.jsx          deck.gl 지도 + CCTV 아이콘 + 차량 마커
+            │   ├── MapView.jsx          deck.gl 지도 + CCTV 아이콘 + 차량 마커 + 정체 폴리곤
             │   ├── CctvPlayer.jsx       HLS 플레이어 + YOLO/ROI/보정 탭 패널
             │   ├── RoiEditor.jsx        ROI 폴리곤 편집 캔버스 오버레이
             │   ├── CalibrationMode.jsx  카메라 방향 보정 (픽셀↔GPS 4쌍 수집)
+            │   ├── HistoryPanel.jsx     히스토리 시계열 차트 + 피크타임 + CSV 내보내기
             │   ├── TrailLayer.jsx       차량 이동 궤적 PathLayer
             │   ├── SpeedGauge.jsx       평균 속도 레이디얼 게이지
             │   ├── LOSBadge.jsx         서비스 수준 (LOS A–F) 배지
             │   ├── ClassPieChart.jsx    차종 분포 파이 차트 (원형)
-            │   ├── ClassBarChart.jsx    차종 분포 바 차트 (App.jsx에서 사용)
-            │   ├── CounterPanel.jsx     진입/진출/현재 차량 카운터
-            │   └── VehicleTable.jsx     현재 추적 차량 목록 테이블
+            │   ├── ClassBarChart.jsx    차종 분포 바 차트 (React.memo 적용)
+            │   ├── CounterPanel.jsx     진입/진출/현재 차량 카운터 (React.memo 적용)
+            │   └── VehicleTable.jsx     현재 추적 차량 목록 테이블 (React.memo 적용)
             ├── hooks/
             │   └── useWebSocket.js      /ws WebSocket 연결·재연결 훅
             └── utils/
-                └── colorMap.js          방향별 차량 색상 매핑
+                └── colorMap.js          방향별 차량 색상 + 심각도 색상 매핑
 
 
 ================================================================
@@ -191,7 +202,13 @@ DigitalTwin/
     VEHICLE_CLASSES         탐지 대상 클래스 {2:car, 3:motorcycle, 5:bus, 7:truck}
     TRACKER_TIER            트래커 선택 (auto/cpu/low/medium/high)
     SPEED_LIMIT_KPH         과속 기준 (기본 120 kph)
-    MAX_REASONABLE_KPH      이상치 제거 상한 (120 kph)
+    MAX_REASONABLE_KPH      이상치 제거 상한 (180 kph — 고속도로 정상 속도 포함)
+    SPEED_MIN_KPH           이 미만은 정지 지터로 간주해 0 처리 (5 kph)
+    SPEED_EMA_ALPHA         속도 EMA 평활화 계수 (0.35 — 신규 샘플 반영 비율)
+    SPEED_SPIKE_FACTOR      EMA 대비 이 배 초과이면 스파이크로 거부 (2.5)
+    HISTORY_SAMPLE_S        히스토리 샘플러 주기 (30초)
+    HISTORY_RETENTION_DAYS  히스토리 보존 기간 (14일)
+    CONGESTION_EPS_M        정체 클러스터링 인접 거리 임계 (500m)
     GC_GRACE_FRAMES         트랙 GC 유예 프레임 수 (30 — 약 1초간 ID 보존)
     SPEED_WINDOW_FRAMES     슬라이딩 윈도우 속도 계산 이력 크기 (18 프레임)
     YOLO_DETECT_INTERVAL    YOLO 추론 주기 (기본 1 — 매 프레임 추론,
@@ -512,6 +529,12 @@ DigitalTwin/
     POST /background/add     카메라를 백그라운드 모니터링 목록에 추가
     POST /background/remove/{key}  백그라운드 모니터링 제거
     GET  /background/status  현재 모니터링 중인 카메라 상태 스냅샷
+    GET  /history/cameras    히스토리가 있는 카메라 목록
+    GET  /history/series     카메라별 시계열 데이터 (차량 수 / 평균속도)
+    GET  /history/peak       피크타임 탐지 (최대 차량 수 발생 시각)
+    GET  /history/export.csv 히스토리 CSV 내보내기
+    GET  /speed-debug/{state} 속도 진단 로그 활성화/비활성화 (on/off/status)
+    POST /viewer-active      라이브 뷰어 활성 상태 신호 (브라우저 탭 가시성 기반)
     GET  /health             서버 상태
 
   CCTV 이름 파싱:
@@ -536,11 +559,16 @@ DigitalTwin/
 
   백그라운드:
     live_loop            OpenCV로 HLS 스트림 읽기 → 탐지 → 브로드캐스트
+                         라이브 뷰어 게이트: _live_viewer_active=False 또는 클라이언트 없으면
+                         루프를 0.5초 sleep으로 건너뜀 → 불필요한 GPU 사용 방지
                          ws/detect 활성 시 boxmot 트래커 공유 충돌 방지를 위해
                          track() 호출을 건너뛰고 프레임만 드레인
     hls_refresh_loop     HLS_REFRESH_INTERVAL(30분)마다 ITS API 재호출 → URL 갱신
     _its_speed_poll_loop ITS_POLL_INTERVAL(5분)마다 ITS 구간속도 조회
                          → analytics.calibrate_from_its() → speed_scale.json 자동 저장
+    history_sampler_loop HISTORY_SAMPLE_S(30초)마다 bg+live 스냅샷 SQLite 저장
+                         → 14일 초과 행 자동 prune
+                         → 정체 클러스터 계산 후 변화 시 congestion_clusters WS 브로드캐스트
 
   자동 캘리브레이션:
     카메라 전환 시 수동 보정 없는 경우 _auto_calib_attempts=5 예약.
@@ -581,7 +609,11 @@ DigitalTwin/
       }
 
     on_frame_result(cam_key, state, vehicle_count, class_counts) — 확장 훅 (async)
-    기본 구현: pass. 클러스터링/히스토리 저장 기능 구현 시 오버라이드 포인트.
+    history_sampler_loop에서 오버라이드: bg+live 스냅샷을 SQLite에 저장.
+
+    상태 변화 시만 브로드캐스트:
+    (status, vehicle_count) 튜플이 이전 값과 다를 때만 _emit() 호출.
+    상태가 동일하면 WS 메시지 생략 → 불필요한 직렬화/전송 방지.
 
 
 ================================================================
@@ -623,6 +655,13 @@ DigitalTwin/
     Live View 탭: 카운터 · 도로정보(접이식) · 자동캘리브(접이식) ·
                   ITS비교(접이식) · 차종분포 · 차량목록
     Background 탭: MonitorPanel (백그라운드 모니터링 카메라 목록)
+    History 탭: HistoryPanel (카메라 선택 + 기간 선택 + 시계열 차트 + CSV 내보내기)
+
+  렌더링 최적화:
+    fetchCctvs: viewState를 useRef로 참조 → 지도 패닝 시 callback 재생성 없음
+    handleToggleMonitor: monitoredCams를 useRef로 참조 → Set 변경 시 재생성 없음
+    CounterPanel, ClassBarChart, VehicleTable: React.memo 적용
+    → WS 30fps에서 props가 동일하면 sidebar re-render 0
 
   CollapsibleCard: 헤더 클릭으로 내용 접기/펼치기. defaultOpen prop으로 초기 상태 제어.
 
@@ -635,6 +674,7 @@ DigitalTwin/
   deck.gl 레이어를 조합하여 지도를 렌더링하는 컴포넌트.
 
   레이어 구성:
+    congestionLayer (PolygonLayer)            정체 구간 오버레이 (배경, 제일 아래)
     cctvHitLayer    (ScatterplotLayer, 투명)  클릭 히트 영역
     cctvIconLayer   (IconLayer, SVG)          CCTV 아이콘 (상태별 색상)
     cctvLabelLayer  (TextLayer)               카메라 이름
@@ -642,6 +682,11 @@ DigitalTwin/
     trailLayer      (PathLayer)               차량 이동 궤적
     scatterLayer    (ScatterplotLayer)        차량 위치 마커 (zoom≥15 시 표시)
     textLayer       (TextLayer)               차량 track_id
+
+  렌더링 최적화:
+    모든 레이어 객체를 useMemo로 감싸 WS 30fps 프레임 수신 시
+    실제로 변경된 레이어만 재생성. layers 배열도 useMemo로 안정화.
+    cctvLabel 함수는 useCallback([lang])으로 안정화.
 
   지도 스타일 (mapMode):
     dark      Carto Dark Matter (기본)
@@ -750,16 +795,18 @@ DigitalTwin/
     autoCalibInfo    최신 auto_calibrated 페이로드
                      { cam_h_m, near_m, far_m, road_width_m, pitch_deg,
                        heading, road_length_m, direction_source, ... }
-    backgroundStatus 백그라운드 모니터링 카메라 상태 맵 (초기값: {})
+    backgroundStatus   백그라운드 모니터링 카메라 상태 맵 (초기값: {})
+    congestionClusters 정체 클러스터 목록 (초기값: [])
 
   메시지 타입 분기:
-    type: "camera_ready"     → cameraReadyInfo 업데이트, autoCalibInfo 초기화,
-                               cameraReady 카운터 증가 (switching 상태 해제)
-    type: "camera_error"     → 에러 메시지 표시 + cameraReady 카운터 증가
-    type: "auto_calibrated"  → autoCalibInfo 업데이트,
-                               cameraReadyInfo.calibrated=true 업데이트
-    type: "background_status" → backgroundStatus 업데이트
-    그 외                    → FrameAnalytics JSON → frameData 업데이트
+    type: "camera_ready"       → cameraReadyInfo 업데이트, autoCalibInfo 초기화,
+                                 cameraReady 카운터 증가 (switching 상태 해제)
+    type: "camera_error"       → 에러 메시지 표시 + cameraReady 카운터 증가
+    type: "auto_calibrated"    → autoCalibInfo 업데이트,
+                                 cameraReadyInfo.calibrated=true 업데이트
+    type: "background_status"  → backgroundStatus 업데이트
+    type: "congestion_clusters" → congestionClusters 업데이트
+    그 외                      → FrameAnalytics JSON → frameData 업데이트
 
   연결 끊김 시 3초 후 자동 재연결.
 
@@ -877,7 +924,18 @@ DigitalTwin/
     x(t), y(t) 각각에 대해 최소제곱법(OLS)으로 기울기(속도 성분) 추정.
       vx = d(x)/dt,  vy = d(y)/dt  (m/s)
       kph = sqrt(vx² + vy²) × 3.6
-    kph × speed_scale > MAX_REASONABLE_KPH(120) → 이상치 스킵 (이번 프레임 유지).
+    kph × speed_scale > MAX_REASONABLE_KPH(180) → 이상치 스킵 (이번 프레임 유지).
+
+  ─── 단계 3.5: EMA 평활화 (트랙별) ───
+    각 track_id별로 _speed_ema 딕셔너리에 지수이동평균 유지.
+    유효 샘플(SPEED_MIN_KPH≤scaled≤MAX_REASONABLE_KPH):
+      첫 샘플: EMA = scaled (0으로 시드하지 않음 — 0 시드는 스파이크 거부를 유발)
+      이후:    EMA = prev × (1 - α) + scaled × α  (α = SPEED_EMA_ALPHA = 0.35)
+      스파이크 거부: prev_ema > 5이고 scaled > prev_ema × 2.5 + 20 → 이번 샘플 무시
+    정지 판정(변위 < jitter 또는 scaled < SPEED_MIN_KPH):
+      EMA를 0.6배 감쇠 → SPEED_MIN_KPH 미만이면 0으로 강제
+      (stale 값이 2.2 km/h처럼 남아있는 문제 방지)
+    출력: v.speed_kph = round(_speed_ema.get(tid, 0.0), 1)
 
   ─── 단계 4: 자동 GPS 캘리브레이션 (auto_calibrate_from_frame) ───
     수동 4점 보정 없이 차선 감지만으로 호모그래피를 근사 추정.
@@ -1043,21 +1101,34 @@ DigitalTwin/
 
 
 ================================================================
-11. 확장 로드맵 (미구현)
+11. 확장 로드맵
 ================================================================
 
-  [B] 클러스터링 & 정체 구간 자동 탐지
-    BackgroundMonitor.on_frame_result() 훅 오버라이드
-    → 차량 위치(lat, lon) 수집
-    → 다중 카메라 합산 포인트에 DBSCAN 적용
-    → 저속 클러스터 = 정체 구간으로 지도 위 히트맵/폴리곤 오버레이
+  [B] ✅ 클러스터링 & 정체 구간 자동 탐지 (완료)
+    congestion.py — haversine 그리디 DBSCAN (eps=500m)으로 카메라 단위 클러스터링
+    convex hull 폴리곤으로 정체 구간 범위 계산 (Andrew monotone chain 알고리즘)
+    심각도: 카메라 수·congested 비율 기반 (minor/medium/severe)
+    history_sampler_loop(30초)에서 클러스터 계산 → 변화 시 WS 브로드캐스트
+    MapView PolygonLayer로 심각도별 색상 오버레이
 
-  [C] 데이터 저장 & 히스토리 분석
-    BackgroundMonitor.on_frame_result() 훅에서 SQLite INSERT
-    → 시간대별 차량 수 / 평균속도 시계열 차트 (Recharts)
-    → 피크타임 자동 탐지, CSV 내보내기 엔드포인트
+    * 차량 단위가 아닌 카메라 단위 클러스터링:
+      BackgroundMonitor는 개별 차량 GPS/속도 없이 차량 수·상태만 보유.
+      → 카메라 위치를 클러스터링 포인트로 사용.
+      "카메라 status=congested"를 저속 지표로 근사.
 
-  [D] 특정 차량 추적 (색상 + 크기 기반 Re-ID)
-    detector.detect()에 bbox 색상 히스토그램 추출 추가
-    → "이 차량 마킹" UI → 유사 차량 하이라이트
-    → 다중 카메라 간 동일 차량 추정
+  [C] ✅ 데이터 저장 & 히스토리 분석 (완료)
+    history.py — HistoryStore (SQLite WAL 모드, 14일 보존)
+    30초 단일 샘플러(history_sampler_loop)가 bg+live 스냅샷 일괄 기록
+    REST: /history/series (시계열), /history/peak (피크타임), /history/export.csv
+    HistoryPanel.jsx — Recharts LineChart
+      차량 수(평균+최대 peak 라인), 평균속도 차트
+      ReferenceLine으로 피크 시각 강조, CSV 내보내기 링크
+    브라우저 탭 비활성 시 폴링 자동 스킵 (document.hidden + visibilitychange)
+
+  [D] 특정 차량 추적 (색상 + 크기 기반 Re-ID) — 미구현
+    구현 방식: YOLO bbox 크롭 → HSV 히스토그램 (8×8×8 bins)
+              Bhattacharyya 거리로 유사도 비교
+    단일 카메라 MVP 예상 공수: ~6.5시간
+    정확도: 낮(90~95%), 야간(40~60% — 기능 비활성 처리 필요)
+    인프라 준비 완료: bbox_xyxy 이미 VehicleState에 존재,
+                     cv2 import됨, canvas 클릭 패턴 RoiEditor.jsx에 존재

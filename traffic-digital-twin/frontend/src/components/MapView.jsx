@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import DeckGL from "@deck.gl/react";
 import { ScatterplotLayer, TextLayer, PolygonLayer, IconLayer } from "@deck.gl/layers";
 import Map from "react-map-gl/maplibre";
@@ -232,10 +232,10 @@ export default function MapView({
   congestionClusters = [],
 }) {
   const { t, lang } = useLang();
-  const cctvLabel = (d) => {
+  const cctvLabel = useCallback((d) => {
     if (lang === "en") return d.name_en || (d.cam_key ? `CCTV ${d.cam_key.slice(0, 6)}` : String(d.id));
     return d.name_ko || d.name || String(d.id);
-  };
+  }, [lang]);
   const showVehicles = viewState.zoom >= VEHICLE_MIN_ZOOM;
 
   const sorted = useMemo(
@@ -243,7 +243,7 @@ export default function MapView({
     [vehicles]
   );
 
-  const cctvHitLayer = new ScatterplotLayer({
+  const cctvHitLayer = useMemo(() => new ScatterplotLayer({
     id:           "cctvs-hit",
     data:         cctvList,
     getPosition:  (d) => [d.lon, d.lat],
@@ -253,9 +253,9 @@ export default function MapView({
     radiusUnits:  "pixels",
     pickable:     !calibrationMode,
     onClick:      ({ object }) => !calibrationMode && object && onCctvClick?.(object),
-  });
+  }), [cctvList, calibrationMode, onCctvClick]);
 
-  const cctvIconLayer = new IconLayer({
+  const cctvIconLayer = useMemo(() => new IconLayer({
     id:          "cctv-icons",
     data:        cctvList,
     getPosition: (d) => [d.lon, d.lat],
@@ -275,9 +275,9 @@ export default function MapView({
     getPixelOffset: [0, 0],
     pickable:       false,
     updateTriggers: { getIcon: [selectedCctv?.id, backgroundStatus], getSize: [selectedCctv?.id] },
-  });
+  }), [cctvList, selectedCctv?.id, backgroundStatus]);
 
-  const cctvLabelLayer = new TextLayer({
+  const cctvLabelLayer = useMemo(() => new TextLayer({
     id:             "cctv-labels",
     data:           cctvList,
     getPosition:    (d) => [d.lon, d.lat],
@@ -291,7 +291,7 @@ export default function MapView({
     outlineWidth:   3,
     outlineColor:   [0, 0, 0, 200],
     updateTriggers: { getText: [lang], getSize: [selectedCctv?.id], getColor: [selectedCctv?.id] },
-  });
+  }), [cctvList, selectedCctv?.id, lang, cctvLabel]);
 
   const fovLayer = useMemo(() => {
     if (!selectedCctv) return null;
@@ -329,7 +329,7 @@ export default function MapView({
   const nodeOutline = mapMode === "satellite" ? [0, 0, 0, 230] : [80, 80, 80, 180];
   const parkedColor = mapMode === "light" ? [120, 120, 120, 160] : [80, 80, 80, 140];
 
-  const scatterLayer = new ScatterplotLayer({
+  const scatterLayer = useMemo(() => new ScatterplotLayer({
     id:           "vehicles",
     data:         sorted,
     getPosition:  (d) => [d.lon, d.lat],
@@ -341,11 +341,11 @@ export default function MapView({
     pickable:     true,
     radiusUnits:  "meters",
     radiusMinPixels: 3,
-    updateTriggers: { getFillColor: [vehicles, mapMode], getLineColor: mapMode },
-  });
+    updateTriggers: { getFillColor: [sorted, mapMode], getLineColor: mapMode },
+  }), [sorted, mapMode, nodeStroked, nodeOutline, parkedColor]);
 
   const labelColor = mapMode === "light" ? [30, 30, 30, 220] : [255, 255, 255, 200];
-  const textLayer = new TextLayer({
+  const textLayer = useMemo(() => new TextLayer({
     id:             "vehicle-labels",
     data:           sorted,
     getPosition:    (d) => [d.lon, d.lat],
@@ -355,10 +355,10 @@ export default function MapView({
     getPixelOffset: [0, -14],
     outlineWidth:   mapMode !== "dark" ? 2 : 0,
     outlineColor:   mapMode === "light" ? [255, 255, 255, 200] : [0, 0, 0, 180],
-    updateTriggers: { getText: vehicles, getColor: mapMode },
-  });
+    updateTriggers: { getText: sorted, getColor: mapMode },
+  }), [sorted, mapMode, labelColor]);
 
-  const snapNodeLayer = calibrationMode && snapNodes.length > 0
+  const snapNodeLayer = useMemo(() => calibrationMode && snapNodes.length > 0
     ? new ScatterplotLayer({
         id:           "snap-nodes",
         data:         snapNodes,
@@ -371,9 +371,9 @@ export default function MapView({
         stroked:      true,
         pickable:     true,
       })
-    : null;
+    : null, [calibrationMode, snapNodes]);
 
-  const snapNodeLabelLayer = calibrationMode && snapNodes.length > 0
+  const snapNodeLabelLayer = useMemo(() => calibrationMode && snapNodes.length > 0
     ? new TextLayer({
         id:             "snap-node-labels",
         data:           snapNodes,
@@ -386,7 +386,7 @@ export default function MapView({
         outlineColor:   [0, 0, 0, 200],
         pickable:       false,
       })
-    : null;
+    : null, [calibrationMode, snapNodes]);
 
   // 정체 구간 클러스터 오버레이 ([B]) — 차량/카메라보다 아래(배경)에 깔림
   const congestionLayer = useMemo(() => {
@@ -404,7 +404,7 @@ export default function MapView({
     });
   }, [congestionClusters]);
 
-  const layers = [
+  const layers = useMemo(() => [
     congestionLayer,
     ...(showVehicles ? extraLayers : []),
     fovLayer,
@@ -414,7 +414,11 @@ export default function MapView({
     ...(showVehicles ? [scatterLayer, textLayer] : []),
     snapNodeLayer,
     snapNodeLabelLayer,
-  ].filter(Boolean);
+  ].filter(Boolean), [
+    congestionLayer, showVehicles, extraLayers, fovLayer,
+    cctvHitLayer, cctvIconLayer, cctvLabelLayer,
+    scatterLayer, textLayer, snapNodeLayer, snapNodeLabelLayer,
+  ]);
 
   return (
     <DeckGL

@@ -39,10 +39,11 @@ export default function HistoryPanel({ lang, t }) {
 
   const range = RANGES[rangeKey];
 
-  // 카메라 목록 (탭 진입 시 + 주기 갱신)
+  // 카메라 목록 (탭 진입 시 + 주기 갱신, 비활성 탭에서는 스킵)
   useEffect(() => {
     let alive = true;
     const load = () => {
+      if (!alive || document.hidden) return;
       fetch(`${API_BASE}/history/cameras`)
         .then((r) => r.json())
         .then((list) => {
@@ -54,14 +55,16 @@ export default function HistoryPanel({ lang, t }) {
     };
     load();
     const timer = setInterval(load, 30000);
-    return () => { alive = false; clearInterval(timer); };
+    document.addEventListener("visibilitychange", load);
+    return () => { alive = false; clearInterval(timer); document.removeEventListener("visibilitychange", load); };
   }, []);
 
-  // 시계열 + 피크 (카메라/기간 변경 시 + 주기 갱신)
+  // 시계열 + 피크 (카메라/기간 변경 시 + 주기 갱신, 비활성 탭에서는 스킵)
   useEffect(() => {
     if (!camKey) { setSeries([]); setPeak(null); return; }
     let alive = true;
     const load = () => {
+      if (!alive || document.hidden) return;
       setLoading(true);
       Promise.all([
         fetch(`${API_BASE}/history/series?cam_key=${encodeURIComponent(camKey)}&hours=${range.hours}&bucket_s=${range.bucket_s}`).then((r) => r.json()),
@@ -77,7 +80,8 @@ export default function HistoryPanel({ lang, t }) {
     };
     load();
     const timer = setInterval(load, 30000);
-    return () => { alive = false; clearInterval(timer); };
+    document.addEventListener("visibilitychange", load);
+    return () => { alive = false; clearInterval(timer); document.removeEventListener("visibilitychange", load); };
   }, [camKey, rangeKey]);
 
   const chartData = useMemo(

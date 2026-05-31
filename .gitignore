@@ -41,5 +41,13 @@ traffic-digital-twin/backend/speed_debug.on
 .DS_Store
 Thumbs.db
 
+# Claude Code
+.claude/
+.claude-ignore
 .claudeignore
-.claude
+
+# IDE
+.vscode/
+
+# 개발 플래닝 (로컬 전용)
+tasks/

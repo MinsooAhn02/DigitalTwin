@@ -146,15 +146,18 @@ export default function App() {
     if (activeData) dispatchTrail(vehicles);
   }, [activeData]);
 
+  const viewStateRef = useRef(viewState);
+  useEffect(() => { viewStateRef.current = viewState; }, [viewState]);
+
   const fetchCctvs = useCallback((vs) => {
-    const { minX, maxX, minY, maxY } = viewBbox(vs ?? viewState);
+    const { minX, maxX, minY, maxY } = viewBbox(vs ?? viewStateRef.current);
     setCctvLoading(true);
     fetch(`${API_BASE}/cctvs?minX=${minX}&maxX=${maxX}&minY=${minY}&maxY=${maxY}`)
       .then((r) => r.json())
       .then(setCctvList)
       .catch(() => {})
       .finally(() => setCctvLoading(false));
-  }, [viewState]);
+  }, []);
 
   useEffect(() => { fetchCctvs(INITIAL_VIEW); }, []);
 
@@ -211,10 +214,13 @@ export default function App() {
     setCctvList((prev) => prev.map((c) => c.id === updated.id ? updated : c));
   }, [selectedCctv]);
 
+  const monitoredCamsRef = useRef(monitoredCams);
+  useEffect(() => { monitoredCamsRef.current = monitoredCams; }, [monitoredCams]);
+
   const handleToggleMonitor = useCallback((c) => {
     const camKey = c.cam_key;
     if (!camKey || !c.cctvurl) return;
-    if (monitoredCams.has(camKey)) {
+    if (monitoredCamsRef.current.has(camKey)) {
       fetch(`${API_BASE}/background/remove/${camKey}`, { method: "POST" }).catch(() => {});
       setMonitoredCams((prev) => { const s = new Set(prev); s.delete(camKey); return s; });
     } else {
@@ -232,7 +238,7 @@ export default function App() {
       }).catch(() => {});
       setMonitoredCams((prev) => new Set([...prev, camKey]));
     }
-  }, [monitoredCams]);
+  }, []);
 
   const noCameraSelected = guideVisible && cctvList.length > 0 && !selectedCctv;
   return (

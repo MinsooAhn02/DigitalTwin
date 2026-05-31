@@ -63,5 +63,5 @@ export function useTrailLayer(trailMap, vehicles) {
       capRounded:   true,
       updateTriggers: { getColor: [...trailMap.values()].map((t) => t.direction) },
     });
-  }, [trailMap, vehicles]);
+  }, [trailMap]);
 }

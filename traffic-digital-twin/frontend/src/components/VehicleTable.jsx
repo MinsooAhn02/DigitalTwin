@@ -1,14 +1,16 @@
-import { useState, useMemo } from "react";
+import React, { useState, useMemo } from "react";
 import { useLang } from "../i18n/index.jsx";
 
-export default function VehicleTable({ vehicles = [], calibrated = false }) {
+const VehicleTable = React.memo(function VehicleTable({ vehicles = [], calibrated = false }) {
   const { t } = useLang();
   const [logOpen, setLogOpen] = useState(false);
 
   const speeds = useMemo(() => vehicles.map((v) => v.speed_kph).filter((s) => s > 0), [vehicles]);
-  const minSpd = speeds.length ? Math.min(...speeds).toFixed(1) : "—";
-  const maxSpd = speeds.length ? Math.max(...speeds).toFixed(1) : "—";
-  const avgSpd = speeds.length ? (speeds.reduce((a, b) => a + b, 0) / speeds.length).toFixed(1) : "—";
+  const { minSpd, maxSpd, avgSpd } = useMemo(() => ({
+    minSpd: speeds.length ? Math.min(...speeds).toFixed(1) : "—",
+    maxSpd: speeds.length ? Math.max(...speeds).toFixed(1) : "—",
+    avgSpd: speeds.length ? (speeds.reduce((a, b) => a + b, 0) / speeds.length).toFixed(1) : "—",
+  }), [speeds]);
 
   if (vehicles.length === 0) {
     return <p style={{ color: "#6b7280", fontSize: 12, textAlign: "center", padding: "12px 0" }}>{t("chart.noVehicles")}</p>;
@@ -82,4 +84,6 @@ export default function VehicleTable({ vehicles = [], calibrated = false }) {
       </div>
     </div>
   );
-}
+});
+
+export default VehicleTable;

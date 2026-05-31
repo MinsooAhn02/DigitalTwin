@@ -448,6 +448,7 @@ class BackgroundMonitor:
     async def _loop(self, cam_key: str, state: _BgCamState, detector) -> None:
         from detector import VideoStream as _VS
         stream = _VS()
+        prev_sig: tuple | None = None
         try:
             await asyncio.to_thread(stream.switch_to, state.url)
             while True:
@@ -458,6 +459,7 @@ class BackgroundMonitor:
                         if not ok:
                             state.status = "error"
                             await self._emit()
+                            prev_sig = None
                         await asyncio.sleep(self.POLL_S)
                         continue
 
@@ -476,7 +478,10 @@ class BackgroundMonitor:
                     state.updated_at    = time.time()
 
                     await self.on_frame_result(cam_key, state, n, cls_cnt)
-                    await self._emit()
+                    new_sig = (state.status, state.vehicle_count)
+                    if new_sig != prev_sig:
+                        await self._emit()
+                        prev_sig = new_sig
 
                 except asyncio.CancelledError:
                     raise
@@ -484,6 +489,7 @@ class BackgroundMonitor:
                     logger.warning("BG monitor [%s] error: %s", cam_key, exc)
                     state.status = "error"
                     await self._emit()
+                    prev_sig = None
 
                 await asyncio.sleep(self.POLL_S)
 

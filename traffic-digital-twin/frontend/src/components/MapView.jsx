@@ -424,7 +424,7 @@ export default function MapView({
     <DeckGL
       viewState={viewState}
       onViewStateChange={({ viewState: vs }) => onViewStateChange(vs)}
-      controller
+      controller={{ maxZoom: 20 }}
       layers={layers}
       style={{ position: "relative", width: "100%", height: "100%", cursor: calibrationMode ? "crosshair" : "grab" }}
       onClick={calibrationMode ? onMapClick : undefined}
@@ -451,7 +451,7 @@ export default function MapView({
 
         if (d.node_id) {
           return {
-            html: `<b>📍 ${d.node_name || d.node_id}</b><br/><span style="color:#9ca3af;font-size:11px">클릭하면 이 노드 GPS 사용</span>`,
+            html: `<b>📍 ${d.node_name || d.node_id}</b><br/><span style="color:#9ca3af;font-size:11px">${t("map.nodeSnapHint")}</span>`,
             style: {
               background: "#111827", color: "#fbbf24",
               fontSize: "12px", borderRadius: "6px", padding: "8px",

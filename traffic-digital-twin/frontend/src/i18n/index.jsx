@@ -91,6 +91,7 @@ const TRANSLATIONS = {
     "table.col.status": "Status",
     "table.col.dwell":  "Dwell(f)",
     "table.speedLog":   "Speed Log",
+    "table.calibWarn":  "Not calibrated — approximate value",
     "table.status.speeding":   "Speeding",
     "table.status.bottleneck": "Bottleneck",
     "table.status.parked":     "Parked",
@@ -103,6 +104,7 @@ const TRANSLATIONS = {
     "map.speeding":   "🚨 Speeding",
     "map.bottleneck": "⚠ Bottleneck",
     "map.clickHint":  "Click → switch live · show FOV",
+    "map.nodeSnapHint": "Click to use this node's GPS",
     "map.modeToggle": "Map: {{mode}} → {{next}}",
     // ── CctvPlayer tabs / header ─────────────────────────────────────
     "cctv.tab.live": "📷 Live",
@@ -210,7 +212,7 @@ const TRANSLATIONS = {
     "legend.in":       "진입 (In)",
     "legend.out":      "진출 (Out)",
     "legend.speeding": "과속",
-    "legend.unknown":  "Unknown",
+    "legend.unknown":  "미분류",
     "legend.fov":      "시야 범위 (선택 시)",
     // ── Sidebar widgets ──────────────────────────────────────────────
     "counter.current": "현재 차량",
@@ -234,6 +236,7 @@ const TRANSLATIONS = {
     "table.col.status": "상태",
     "table.col.dwell":  "체류(f)",
     "table.speedLog":   "속도 로그",
+    "table.calibWarn":  "캘리브레이션 미설정 — 근사값",
     "table.status.speeding":   "과속",
     "table.status.bottleneck": "병목",
     "table.status.parked":     "주차",
@@ -246,6 +249,7 @@ const TRANSLATIONS = {
     "map.speeding":   "🚨 과속",
     "map.bottleneck": "⚠ 병목",
     "map.clickHint":  "클릭 → 실시간 전환 · 시야 범위 표시",
+    "map.nodeSnapHint": "클릭하면 이 노드 GPS 사용",
     "map.modeToggle": "현재: {{mode}} → {{next}}로 전환",
     // ── CctvPlayer ───────────────────────────────────────────────────
     "cctv.tab.live": "📷 실시간",

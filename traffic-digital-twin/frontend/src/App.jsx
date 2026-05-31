@@ -356,7 +356,7 @@ export default function App() {
           >
             {cctvLoading ? t("app.loading") : t("app.refreshCctv")}
           </button>
-          <div style={{ fontSize: 10, color: "#6b7280", textAlign: "center" }}>
+          <div style={{ fontSize: 11, color: "#9ca3af", textAlign: "center" }}>
             {t("app.nCameras", { n: cctvList.length })}
           </div>
         </div>
@@ -456,7 +456,7 @@ export default function App() {
             {roadName && (
               <CollapsibleCard label={t("app.roadInfo")}>
                 <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-                  <div style={{ fontWeight: 600, color: "#e2e8f0", marginBottom: 4 }}>{roadName}</div>
+                  <div style={{ fontWeight: 600, color: "#e2e8f0", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={roadName}>{roadName}</div>
                   <div style={{ display: "flex", gap: 16, color: "#94a3b8" }}>
                     {roadLanes != null && roadLanes > 0 && <span>{t("app.roadLanes", { n: roadLanes })}</span>}
                     {roadMaxSpd != null && roadMaxSpd > 0 && (

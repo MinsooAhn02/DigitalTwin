@@ -79,8 +79,8 @@ def _load_speed_scale(cam_key: str) -> float:
         if SPEED_SCALE_PATH.exists():
             data = json.loads(SPEED_SCALE_PATH.read_text(encoding="utf-8"))
             return float(data.get(cam_key, {}).get("speed_scale", 1.0))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("speed_scale 로드 실패 (기본 1.0 사용): %s", exc)
     return 1.0
 
 
@@ -93,7 +93,6 @@ def _save_speed_scale(cam_key: str, scale: float, converged: bool) -> None:
                 data = json.loads(SPEED_SCALE_PATH.read_text(encoding="utf-8"))
             except Exception:
                 pass
-        from datetime import datetime, timezone
         data[cam_key] = {
             "speed_scale": scale,
             "converged": converged,
@@ -178,12 +177,12 @@ _stream_fps: float = float(FPS)
 
 def _safe_tid(tracker_id_arr, idx: int, fallback: int) -> int:
     """BoT-SORT가 미확정 트랙에 np.nan을 반환할 때 ValueError 방지."""
-    if tracker_id_arr is None:
+    if tracker_id_arr is None or idx >= len(tracker_id_arr):
         return fallback
     try:
         v = int(tracker_id_arr[idx])
         return fallback if math.isnan(float(v)) else v
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, IndexError):
         return fallback
 
 
@@ -642,21 +641,35 @@ async def ws_endpoint(ws: WebSocket):
 
 
 # ── CCTV 이름 한영 병기 ───────────────────────────────────────────────
+def _en_road_parts(name: str) -> list[str]:
+    """도로명 영어 약칭 (국도/지방도/고속) — 두 변환 함수의 공통 코어."""
+    parts: list[str] = []
+    m = re.search(r'국도\s*(\d+)\s*호선?', name)
+    if m:
+        parts.append(f"National Route {m.group(1)}")
+    m = re.search(r'지방도\s*(\d+)\s*호?', name)
+    if m:
+        parts.append(f"Provincial Route {m.group(1)}")
+    if re.search(r'고속(도로|국도)', name):
+        parts.append("Expressway")
+    return parts
+
+
+def _en_dir_parts(name: str) -> list[str]:
+    """방향 영어 약칭 (상행/하행/양방향) — 두 변환 함수의 공통 코어."""
+    if '상행' in name:
+        return ["NB↑"]
+    if '하행' in name:
+        return ["SB↓"]
+    if '양방향' in name:
+        return ["Both↕"]
+    return []
+
+
 def _en_only_name(name: str) -> str:
     """ITS CCTV 한국어 이름에서 영어만으로 구성된 약칭을 반환한다.
     인식 가능한 패턴이 없으면 빈 문자열 반환 (프론트엔드 fallback 처리)."""
-    en_parts: list[str] = []
-
-    m = re.search(r'국도\s*(\d+)\s*호선?', name)
-    if m:
-        en_parts.append(f"National Route {m.group(1)}")
-
-    m = re.search(r'지방도\s*(\d+)\s*호?', name)
-    if m:
-        en_parts.append(f"Provincial Route {m.group(1)}")
-
-    if re.search(r'고속(도로|국도)', name):
-        en_parts.append("Expressway")
+    en_parts: list[str] = _en_road_parts(name)
 
     # ASCII 위치 힌트 추출 (IC, JC, TG, SA — 한국 도로명에 포함된 영어 약어)
     seen: set[str] = set()
@@ -671,39 +684,13 @@ def _en_only_name(name: str) -> str:
     if m:
         en_parts.append(f"Sec {m.group(1)}")
 
-    # 방향
-    if '상행' in name:
-        en_parts.append("NB↑")
-    elif '하행' in name:
-        en_parts.append("SB↓")
-    elif '양방향' in name:
-        en_parts.append("Both↕")
-
+    en_parts.extend(_en_dir_parts(name))
     return " ".join(en_parts)  # 패턴 없으면 빈 문자열
 
 
 def _korname_to_en(name: str) -> str:
     """ITS CCTV 한국어 이름에 영어 약칭을 괄호로 병기한다."""
-    en_parts: list[str] = []
-
-    m = re.search(r'국도\s*(\d+)\s*호선?', name)
-    if m:
-        en_parts.append(f"National Route {m.group(1)}")
-
-    m = re.search(r'지방도\s*(\d+)\s*호?', name)
-    if m:
-        en_parts.append(f"Provincial Route {m.group(1)}")
-
-    if re.search(r'고속(도로|국도)', name):
-        en_parts.append("Expressway")
-
-    if '상행' in name:
-        en_parts.append("NB↑")
-    elif '하행' in name:
-        en_parts.append("SB↓")
-    elif '양방향' in name:
-        en_parts.append("Both↕")
-
+    en_parts = _en_road_parts(name) + _en_dir_parts(name)
     if not en_parts:
         return name
     return f"{name} ({' '.join(en_parts)})"
@@ -1234,7 +1221,6 @@ async def save_calibration(body: CalibBody):
             data = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
         except Exception:
             pass
-    from datetime import datetime, timezone
     data[cam_key] = {
         "pixel_pts": body.pixel_pts,
         "gps_pts":   body.gps_pts,
@@ -1522,8 +1508,12 @@ async def _safe_send(ws: WebSocket, msg: str) -> None:
 # ════════════════════════════════════════════════════════════════════════
 # LIVE 파이프라인 (서버사이드 HLS 직접 처리)
 # ════════════════════════════════════════════════════════════════════════
-async def _refresh_stream_url(stream: "VideoStream") -> None:
-    """ITS API에서 현재 카메라 URL을 즉시 갱신. 토큰 만료 복구용."""
+async def _refresh_hls_url_from_its(stream: "VideoStream", *, force: bool) -> None:
+    """ITS API에서 현재 카메라의 신선한 HLS URL을 조회해 live_loop 큐에 투입.
+
+    force=True : 토큰 만료 긴급 복구 — URL 동일 여부 무관하게 갱신.
+    force=False: 주기 갱신 — 기존 stream.url과 다를 때만 갱신.
+    """
     cam = _current_cam
     if cam is None or not cam.get("name"):
         return
@@ -1534,6 +1524,7 @@ async def _refresh_stream_url(stream: "VideoStream") -> None:
         "minY": str(lat - 0.002), "maxY": str(lat + 0.002),
         "getType": "json",
     }
+    label = "긴급 갱신 (토큰 만료)" if force else "갱신"
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(ITS_BASE_URL, params=params)
@@ -1542,8 +1533,8 @@ async def _refresh_stream_url(stream: "VideoStream") -> None:
         for item in items:
             if item.get("cctvname") == name:
                 new_url = item.get("cctvurl", "")
-                if new_url:
-                    logger.info("HLS URL 긴급 갱신 (토큰 만료): %s", name)
+                if new_url and (force or new_url != stream.url):
+                    logger.info("HLS URL %s: %s", label, name)
                     _current_cam["cctvurl"] = new_url
                     await _camera_queue.put({
                         "url":          new_url,
@@ -1561,7 +1552,12 @@ async def _refresh_stream_url(stream: "VideoStream") -> None:
                     })
                 break
     except Exception as e:
-        logger.warning("HLS URL 긴급 갱신 실패: %s", e)
+        logger.warning("HLS URL %s 실패: %s", label, e)
+
+
+async def _refresh_stream_url(stream: "VideoStream") -> None:
+    """ITS API에서 현재 카메라 URL을 즉시 갱신. 토큰 만료 복구용."""
+    await _refresh_hls_url_from_its(stream, force=True)
 
 
 async def live_loop(detector, stream) -> None:
@@ -1840,44 +1836,7 @@ async def hls_refresh_loop(stream) -> None:
     """ITS HLS 토큰 만료 전 URL 갱신 (HLS_REFRESH_INTERVAL, 기본 30분)."""
     while True:
         await asyncio.sleep(HLS_REFRESH_INTERVAL)
-        cam = _current_cam
-        if cam is None or not cam.get("name"):
-            continue
-        lat, lon, name = cam["lat"], cam["lon"], cam["name"]
-        params = {
-            "apiKey": ITS_API_KEY, "type": "its", "cctvType": "1",
-            "minX": str(lon - 0.002), "maxX": str(lon + 0.002),
-            "minY": str(lat - 0.002), "maxY": str(lat + 0.002),
-            "getType": "json",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                resp = await client.get(ITS_BASE_URL, params=params)
-                resp.raise_for_status()
-                items = _parse_its_items(resp.json())
-            for item in items:
-                if item.get("cctvname") == name:
-                    new_url = item.get("cctvurl", "")
-                    if new_url and new_url != stream.url:
-                        logger.info("HLS URL 갱신: %s", name)
-                        await _camera_queue.put({
-                            "url":          new_url,
-                            "lat":          lat,
-                            "lon":          lon,
-                            "name":         name,
-                            "snap_lat":     cam.get("snap_lat", lat),
-                            "snap_lon":     cam.get("snap_lon", lon),
-                            "road_width_m": cam.get("road_width_m"),
-                            "is_oneway":    cam.get("is_oneway"),
-                            "road_bearing": cam.get("road_bearing"),
-                            "name_bearing": cam.get("name_bearing"),
-                            "road_pts":     cam.get("road_pts"),
-                            "snap_along_m": cam.get("snap_along_m"),
-                        })
-                        _current_cam["cctvurl"] = new_url
-                    break
-        except Exception as e:
-            logger.warning("HLS URL 갱신 실패: %s", e)
+        await _refresh_hls_url_from_its(stream, force=False)
 
 
 # ── 진입점 ────────────────────────────────────────────────────────────

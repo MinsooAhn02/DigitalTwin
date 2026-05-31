@@ -124,7 +124,7 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
   const [roiState, setRoiState]           = useState(null);
 
   useEffect(() => {
-    fetch("${API_BASE}/runtime-config")
+    fetch(`${API_BASE}/runtime-config`)
       .then((r) => r.json())
       .then((config) => setRuntimeConfig({ ...DEFAULT_RUNTIME_CONFIG, ...config }))
       .catch(() => setRuntimeConfig(DEFAULT_RUNTIME_CONFIG));

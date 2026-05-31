@@ -163,8 +163,9 @@ class TrafficAnalytics:
         self._dwell: dict[int, int] = defaultdict(int)
         # GC grace period: 미감지 프레임 수 (GC_GRACE_FRAMES 이후 실제 삭제)
         self._lost_frames: dict[int, int] = {}
-        # 주차 확정된 픽셀 위치 목록 — track_id 변경에도 유지
-        self._parked_positions: list[tuple[float, float]] = []
+        # 주차 확정된 픽셀 위치 목록 — track_id 변경에도 유지.
+        # bounded: 장시간 구동 시 무한 증가 방지(+ _is_near_parked O(n) 스캔 상한).
+        self._parked_positions: deque = deque(maxlen=200)
         # C: 슬라이딩 윈도우 — (x_m, y_m, timestamp_s) 이력
         self._pos_window: dict[int, deque] = {}
         # 트랙별 평활(EMA) 속도 — 프레임마다 재생성되는 VehicleState를 넘어 값 유지
@@ -505,11 +506,18 @@ class TrafficAnalytics:
                 return None
 
             old_scale = self.speed_scale
-            target = old_scale * its_speed_kph / our_avg
-            target = max(0.3, min(5.0, target))
+            raw_target = old_scale * its_speed_kph / our_avg
+            target = max(0.3, min(5.0, raw_target))
+            if raw_target != target:
+                # 클램프 도달 = 호모그래피가 크게 어긋났을 가능성 → 무음 열화 방지
+                logger.warning(
+                    "speed_scale 클램프 도달: raw=%.2f → %.2f "
+                    "(our_avg=%.1f, ITS=%.1f — 보정/호모그래피 점검 권장)",
+                    raw_target, target, our_avg, its_speed_kph,
+                )
 
-            # 수렴 여부에 따라 학습률 조정
-            alpha = 0.95 if self.speed_scale_converged else 0.7
+            # 수렴 여부에 따라 학습률 조정 (미수렴 시 0.5로 더 빠른 초기 수렴)
+            alpha = 0.95 if self.speed_scale_converged else 0.5
             self.speed_scale = round(old_scale * alpha + target * (1 - alpha), 4)
 
             # 변화율 1% 미만 → 안정, 그 이상 → 안정 카운트 리셋

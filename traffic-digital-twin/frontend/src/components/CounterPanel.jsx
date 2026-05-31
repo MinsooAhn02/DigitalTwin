@@ -1,6 +1,7 @@
+import React from "react";
 import { useLang } from "../i18n/index.jsx";
 
-export default function CounterPanel({ inCount = 0, outCount = 0, vehicleCount = 0 }) {
+const CounterPanel = React.memo(function CounterPanel({ inCount = 0, outCount = 0, vehicleCount = 0 }) {
   const { t } = useLang();
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
@@ -9,7 +10,9 @@ export default function CounterPanel({ inCount = 0, outCount = 0, vehicleCount =
       <Stat label={t("counter.out")}     value={outCount}     color="#fb923c" />
     </div>
   );
-}
+});
+
+export default CounterPanel;
 
 function Stat({ label, value, color }) {
   return (

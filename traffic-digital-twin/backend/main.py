@@ -53,6 +53,7 @@ import math
 import re
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -65,7 +66,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from analytics import TrafficAnalytics, VehicleState
+from analytics import TrafficAnalytics, VehicleState, set_speed_debug, speed_debug_status
 from transform import PerspectiveTransformer, CALIBRATION_PATH
 import roi_manager
 
@@ -108,7 +109,10 @@ from config import (
     CAPTURE_INTERVAL_MS,
     CAPTURE_QUALITY,
     CAPTURE_WIDTH,
+    CONGESTION_EPS_M,
     FPS,
+    HISTORY_RETENTION_DAYS,
+    HISTORY_SAMPLE_S,
     HLS_REFRESH_INTERVAL,
     ITS_API_KEY,
     ITS_BASE_URL,
@@ -119,6 +123,8 @@ from config import (
     RUNTIME_PROFILE_NAME,
     VEHICLE_CLASSES,
 )
+from congestion import compute_clusters
+from history import HistoryStore, SnapshotRow, retention_cutoff
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -134,6 +140,19 @@ _detect_clients: int = 0   # ws/detect 활성 연결 수 — live_loop 브로드
 
 # 현재 선택된 카메라 정보 (lat, lon, name, cctvurl)
 _current_cam: dict | None = None
+
+# 라이브 시청 활성 여부 — 프론트가 (카메라 선택 × 페이지 visible) 상태를 보고함.
+# False면 live_loop 가 YOLO/broadcast 를 스킵해 미시청 시 GPU 낭비를 막는다.
+# (백그라운드 모니터는 이 플래그와 무관하게 상시 동작)
+_live_viewer_active: bool = False
+
+# ── History 저장 & 정체 클러스터 ([B]/[C]) ─────────────────────────────
+_history = HistoryStore(Path(__file__).resolve().parent / "history.sqlite")
+# 라이브 카메라의 최신 FrameAnalytics 캐시 (샘플러가 읽어 저장).
+# _broadcast 에서 부작용 없이 갱신 — 기존 _latest_frame_jpeg 와 동일 패턴.
+_latest_live_analytics: dict | None = None
+# 직전 broadcast 한 클러스터 시그니처 — 변경 시에만 재전송.
+_last_cluster_sig: str | None = None
 _cam_version: int = 0
 
 # MJPEG 스트림용 최신 프레임 버퍼
@@ -480,6 +499,93 @@ class BackgroundMonitor:
 _bg_monitor = BackgroundMonitor()
 
 
+# ── History 샘플러 + 정체 클러스터 ([B]/[C]) ──────────────────────────
+def _collect_snapshot_rows(now: float) -> list[SnapshotRow]:
+    """현 시점 bg 카메라 전체 + 라이브 카메라 1대를 SnapshotRow 리스트로."""
+    rows: list[SnapshotRow] = []
+
+    # 백그라운드 모니터 카메라들 (개수만, 속도 없음)
+    for cam_key, s in _bg_monitor.snapshot().items():
+        if s.get("status") in ("loading", "error"):
+            continue
+        rows.append(SnapshotRow(
+            ts=now, cam_key=cam_key,
+            name=s.get("name", ""), name_ko=s.get("name_ko", ""),
+            lat=s.get("lat", 0.0), lon=s.get("lon", 0.0),
+            source="bg",
+            vehicle_count=int(s.get("vehicle_count", 0)),
+            class_counts=json.dumps(s.get("class_counts", {})),
+            status=s.get("status", "normal"),
+            avg_speed_kph=None,
+        ))
+
+    # 라이브 카메라 (FrameAnalytics 캐시 — 평균 속도 포함)
+    fa, cam = _latest_live_analytics, _current_cam
+    if fa is not None and cam is not None and cam.get("cctvurl"):
+        live_key = roi_manager.camera_key(cam["cctvurl"])
+        # 같은 카메라가 bg 로도 모니터링 중이면 중복 저장 방지
+        if not _bg_monitor.is_monitored(live_key):
+            cnt = int(fa.get("vehicle_count", 0))
+            rows.append(SnapshotRow(
+                ts=now, cam_key=live_key,
+                name=cam.get("name", ""), name_ko=cam.get("name", ""),
+                lat=cam.get("lat", 0.0), lon=cam.get("lon", 0.0),
+                source="live",
+                vehicle_count=cnt,
+                class_counts=json.dumps(fa.get("class_counts", {})),
+                status=_bg_monitor._classify(cnt),
+                avg_speed_kph=fa.get("avg_speed_kph"),
+            ))
+    return rows
+
+
+async def _broadcast_clusters_if_changed() -> None:
+    """bg 스냅샷으로 정체 클러스터 1회 계산 → 변경 시에만 브로드캐스트."""
+    global _last_cluster_sig
+    clusters = compute_clusters(_bg_monitor.snapshot(), eps_m=CONGESTION_EPS_M)
+    sig = json.dumps(
+        [(c["id"], c["severity"], c["camera_count"]) for c in clusters],
+        sort_keys=True,
+    )
+    if sig == _last_cluster_sig:
+        return
+    _last_cluster_sig = sig
+    await _broadcast({"type": "congestion_clusters", "clusters": clusters})
+
+
+async def history_sampler_loop() -> None:
+    """단일 주기 샘플러 — bg+live 스냅샷 누적 저장 + 정체 클러스터 갱신.
+
+    detect 루프와 분리된 독립 주기(HISTORY_SAMPLE_S). 매 틱:
+      1) 모든 모니터 카메라 + 라이브 1대를 batched INSERT (1 트랜잭션)
+      2) 같은 스냅샷으로 클러스터 1회 계산 → 변경 시 broadcast
+      3) 보존 기간 경과 행 prune (틱마다 가벼운 DELETE)
+    """
+    prune_every = max(1, int(3600 / HISTORY_SAMPLE_S))  # ≈1시간마다
+    tick = 0
+    logger.info("History 샘플러 시작 (주기 %ds, 보존 %d일)",
+                HISTORY_SAMPLE_S, HISTORY_RETENTION_DAYS)
+    while True:
+        try:
+            now = time.time()
+            rows = _collect_snapshot_rows(now)
+            if rows:
+                await asyncio.to_thread(_history.record_many, rows)
+            await _broadcast_clusters_if_changed()
+
+            tick += 1
+            if tick % prune_every == 0:
+                cutoff = retention_cutoff(HISTORY_RETENTION_DAYS, now)
+                deleted = await asyncio.to_thread(_history.prune, cutoff)
+                if deleted:
+                    logger.info("History prune: %d개 행 삭제", deleted)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("History 샘플러 오류: %s", exc)
+        await asyncio.sleep(HISTORY_SAMPLE_S)
+
+
 # ── 앱 생명주기 ───────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -492,11 +598,14 @@ async def lifespan(app: FastAPI):
     task         = asyncio.create_task(live_loop(detector, stream))
     refresh_task = asyncio.create_task(hls_refresh_loop(stream))
     its_task     = asyncio.create_task(_its_speed_poll_loop())
+    hist_task    = asyncio.create_task(history_sampler_loop())
 
     yield
     task.cancel()
     refresh_task.cancel()
     its_task.cancel()
+    hist_task.cancel()
+    _history.close()
     if hasattr(app.state, "stream"):
         app.state.stream.release()
 
@@ -702,6 +811,53 @@ async def background_remove(cam_key: str):
 async def background_status_endpoint():
     """현재 백그라운드 모니터링 중인 카메라들의 상태 반환."""
     return _bg_monitor.snapshot()
+
+
+# ── 히스토리 분석 엔드포인트 ([C]) ────────────────────────────────────
+@app.get("/history/cameras")
+async def history_cameras():
+    """기록이 있는 카메라 목록 (드롭다운용)."""
+    return await asyncio.to_thread(_history.cameras)
+
+
+@app.get("/history/series")
+async def history_series(
+    cam_key: str = Query(...),
+    hours: float = Query(24.0),
+    bucket_s: int = Query(300),
+):
+    """시간 버킷별 평균 차량수 / 평균 속도 시계열."""
+    since = time.time() - hours * 3600.0
+    return await asyncio.to_thread(_history.series, cam_key, since, bucket_s)
+
+
+@app.get("/history/peak")
+async def history_peak(cam_key: str = Query(...), hours: float = Query(24.0)):
+    """기간 내 피크타임(최대 차량수 시점)."""
+    since = time.time() - hours * 3600.0
+    return await asyncio.to_thread(_history.peak, cam_key, since) or {}
+
+
+@app.get("/history/export.csv")
+async def history_export_csv(cam_key: str = Query(...), hours: float = Query(24.0)):
+    """기간 내 raw 스냅샷을 CSV 로 내보내기."""
+    since = time.time() - hours * 3600.0
+    rows = await asyncio.to_thread(_history.export_rows, cam_key, since)
+    lines = ["timestamp_iso,ts,source,vehicle_count,status,avg_speed_kph"]
+    for r in rows:
+        iso = datetime.fromtimestamp(r["ts"], tz=timezone.utc).isoformat()
+        spd = "" if r["avg_speed_kph"] is None else r["avg_speed_kph"]
+        lines.append(
+            f'{iso},{r["ts"]:.1f},{r["source"]},{r["vehicle_count"]},'
+            f'{r["status"]},{spd}'
+        )
+    csv = "\n".join(lines)
+    fname = f"traffic_{cam_key[:8]}_{int(time.time())}.csv"
+    return Response(
+        content=csv,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 # ── 카메라 전환 ───────────────────────────────────────────────────────
@@ -952,7 +1108,9 @@ async def ws_detect(ws: WebSocket):
             # GPS 변환 + VehicleState 생성
             vehicles = _build_vehicles(tracked, frame_wh=(fw, fh))
             fid += 1
-            result = analytics.update(fid, fid / FPS * 1000, vehicles, in_cnt, out_cnt, in_ids, out_ids)
+            # 브라우저 캔버스 프레임은 실시간 도착 → 벽시계를 속도 시간축으로 사용
+            # (합성 fid/FPS 는 처리 지연 시 dt 과소계산 → 속도 0 버그 원인)
+            result = analytics.update(fid, time.monotonic() * 1000, vehicles, in_cnt, out_cnt, in_ids, out_ids)
             await _broadcast(_inject_its_speed(result.to_dict()))
             await ws.send_bytes(ann_bytes)
 
@@ -1231,8 +1389,51 @@ async def stop_camera():
     _current_cam = None
     _latest_frame_jpeg = None
     _latest_annotated_jpeg = None
+    _set_viewer_active(False)
     logger.info("카메라 스트림 해제 (프론트엔드 요청)")
     return {"ok": True}
+
+
+# ── 라이브 시청 상태 ──────────────────────────────────────────────────
+class _ViewerState(BaseModel):
+    active: bool
+
+
+def _set_viewer_active(active: bool) -> None:
+    global _live_viewer_active
+    if _live_viewer_active == active:
+        return
+    _live_viewer_active = active
+    if not active:
+        # 미시청 전환 → 재개 시 깨끗한 트래커 보장
+        det = getattr(app.state, "detector", None)
+        if det is not None:
+            det.reset_tracker()
+    logger.info("라이브 시청 상태: %s", "active" if active else "inactive")
+
+
+@app.post("/viewer-active")
+async def viewer_active(body: _ViewerState):
+    """프론트가 (카메라 선택 × 페이지 visible) 상태를 보고 → 미시청 시 라이브 YOLO 중단."""
+    _set_viewer_active(body.active)
+    return {"ok": True}
+
+
+# ── 속도 진단 토글 (브라우저에서 켜고 끄기) ──────────────────────────
+@app.get("/speed-debug/{state}")
+async def speed_debug_toggle(state: str):
+    """state=on|off|status. 브라우저에서 http://localhost:8000/speed-debug/on 으로 즉시 토글.
+
+    on  → backend/speed_debug.log 에 per-frame 속도 진단 기록 시작
+    off → 기록 중지
+    status → 현재 상태/파일 크기 확인
+    """
+    if state in ("on", "off"):
+        path = set_speed_debug(state == "on")
+        logger.info("속도 진단 로깅 %s (%s)", state, path)
+    elif state != "status":
+        return {"error": "state must be on|off|status"}
+    return speed_debug_status()
 
 
 # ── 헬스체크 ──────────────────────────────────────────────────────────
@@ -1291,6 +1492,11 @@ def _inject_its_speed(payload: dict) -> dict:
 
 # ── 브로드캐스트 헬퍼 ─────────────────────────────────────────────────
 async def _broadcast(payload: dict) -> None:
+    # FrameAnalytics(라이브 카메라) 최신값을 캐시 — I/O 없는 메모리 캡처만.
+    # 실제 DB 저장은 history_sampler_loop 가 주기적으로 담당한다.
+    if "frame_id" in payload:
+        global _latest_live_analytics
+        _latest_live_analytics = payload
     if not _clients:
         return
     msg = json.dumps(payload)
@@ -1494,6 +1700,13 @@ async def live_loop(detector, stream) -> None:
                     await _refresh_stream_url(stream)
             continue
 
+        # 라이브 미시청 시: 스트림만 keep-alive(위 read_frame 으로 수행됨),
+        # YOLO·자동캘리브·JPEG 인코딩·broadcast 모두 스킵해 GPU/CPU 낭비 차단.
+        # _clients 가 비면(브라우저 종료) visibilitychange 없이도 자동 정지.
+        if not (_current_cam and _live_viewer_active and _clients):
+            await asyncio.sleep(0.5)
+            continue
+
         # 차선 감지 자동 캘리브레이션 (수동 캘리브 없을 때, 최초 N프레임 시도)
         if _auto_calib_attempts > 0 and frame is not None:
             _auto_calib_attempts -= 1
@@ -1540,7 +1753,7 @@ async def live_loop(detector, stream) -> None:
 
         t0 = time.perf_counter()
         payload = await asyncio.to_thread(
-            _live_process, frame_id, frame, detector, tracker, stream.fps
+            _live_process, frame_id, frame, detector, tracker, stream.pos_msec
         )
         if payload:
             await _broadcast(payload)
@@ -1552,11 +1765,35 @@ async def live_loop(detector, stream) -> None:
             await asyncio.sleep(target_interval - elapsed)
 
 
-def _live_process(frame_id, frame, detector, tracker, fps: float = 30.0) -> dict | None:
+# ── 속도 계산용 실시간 타임라인 ───────────────────────────────────────
+# 프레임 PTS(CAP_PROP_POS_MSEC) delta를 우선 사용하고, PTS가 0/비단조(카메라 전환,
+# 미지원 스트림)면 벽시계 delta로 폴백하여 단조 증가하는 ms 타임라인을 만든다.
+# 기존 frame_id/fps 합성값은 HLS 드롭/버퍼링 시 dt를 과소계산 → 속도 과대추정 →
+# MAX_REASONABLE_KPH 가드에 걸려 0으로 방치되는 버그의 원인이었다.
+_spd_pts_prev:  float | None = None
+_spd_wall_prev: float | None = None
+_spd_clock_ms:  float = 0.0
+
+
+def _speed_timestamp_ms(pos_msec: float) -> float:
+    global _spd_pts_prev, _spd_wall_prev, _spd_clock_ms
+    now = time.monotonic() * 1000.0
+    if _spd_pts_prev is None:
+        _spd_pts_prev, _spd_wall_prev = pos_msec, now
+        return _spd_clock_ms
+    d_pts = pos_msec - _spd_pts_prev
+    d_wall = now - _spd_wall_prev
+    # PTS가 합리적으로 전진(0~10s)했으면 PTS delta, 아니면 벽시계 delta
+    _spd_clock_ms += d_pts if 0.0 < d_pts < 10000.0 else max(0.0, d_wall)
+    _spd_pts_prev, _spd_wall_prev = pos_msec, now
+    return _spd_clock_ms
+
+
+def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> dict | None:
     global _frame_count, _latest_annotated_jpeg
 
     h, w = frame.shape[:2]
-    timestamp_ms = frame_id / fps * 1000  # 처리 지연 무관, 프레임 번호 기반
+    timestamp_ms = _speed_timestamp_ms(pos_msec)  # 실시간 타임라인 (PTS 우선)
 
     tracked = detector.track(frame)
     tracked, in_cnt, out_cnt, in_ids, out_ids = tracker.update(tracked, (w, h))

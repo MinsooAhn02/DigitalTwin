@@ -401,9 +401,11 @@ DigitalTwin/
     ITS 구간속도와 최근 10분 측정 평균을 비교해 speed_scale을 자동 갱신.
       our_avg = 최근 600초 _speed_samples 평균 (window_s=600)
       target  = speed_scale × (ITS / our_avg) = ITS / raw_avg
-      EMA 갱신: 미수렴 시 α=0.7(빠른 학습), 수렴 후 α=0.95(거의 고정)
+      EMA 갱신: 미수렴 시 α=0.5(빠른 초기 수렴), 수렴 후 α=0.95(거의 고정)
       수렴 판정: 연속 3회 변화율 < 1% → speed_scale_converged = True
       변동성 가드: 표준편차/평균(CV) > 0.4 → 불안정 구간으로 갱신 스킵
+      클램프 가드: target이 [0.3, 5.0] 범위를 벗어나면 클램프 + warning 로깅
+                   (호모그래피가 크게 어긋난 무음 열화를 표면화)
 
   _speed_samples: maxlen=6000 (10분 @ 10fps)
     avg_speed_kph > 0인 프레임마다 (속도, 단조 시각) 튜플 추가.
@@ -545,13 +547,17 @@ DigitalTwin/
     _parse_name_bearing(name, road_bearing):
       - 명시적 방위 키워드 우선: 남측/북측/(북)/(남)/동방향 등 → 절대 각도
       - 상행/하행: road_bearing 기반 ±180° 계산
-    _en_only_name(name): 한국어 이름에서 영어 전용 약칭 추출
+    _en_road_parts(name) / _en_dir_parts(name): 도로명·방향 영어 약칭 공통 코어
+      (_en_only_name·_korname_to_en 두 변환 함수가 공유 — 중복 제거)
+    _en_only_name(name): 한국어 이름에서 영어 전용 약칭 추출 (name_en 필드용)
       - 국도 N호선 → "National Route N"
       - 지방도 → "Provincial Route N"
       - 고속도로 → "Expressway"
-      - IC/JC/TG/SA ASCII 위치 힌트 포함
+      - IC/JC/TG/SA ASCII 위치 힌트 + 구간 번호(Sec N-N) 포함
       - 상행/하행/양방향 방향 표시 (NB↑/SB↓/Both↕)
       - 인식 불가 시 빈 문자열 반환 (프론트엔드 fallback 처리)
+    _korname_to_en(name): 한국어 이름에 영어 약칭을 괄호로 병기 (name 필드용)
+      - "원래이름 (National Route N NB↑)" 형식, 약칭 없으면 원래 이름 그대로
 
   WebSocket:
     WS /ws          JSON 브로드캐스트 구독 (FrameAnalytics 데이터)
@@ -564,6 +570,8 @@ DigitalTwin/
                          ws/detect 활성 시 boxmot 트래커 공유 충돌 방지를 위해
                          track() 호출을 건너뛰고 프레임만 드레인
     hls_refresh_loop     HLS_REFRESH_INTERVAL(30분)마다 ITS API 재호출 → URL 갱신
+                         _refresh_hls_url_from_its(force=False) 공통 헬퍼 사용
+                         (긴급 복구 _refresh_stream_url은 force=True로 동일 헬퍼 호출)
     _its_speed_poll_loop ITS_POLL_INTERVAL(5분)마다 ITS 구간속도 조회
                          → analytics.calibrate_from_its() → speed_scale.json 자동 저장
     history_sampler_loop HISTORY_SAMPLE_S(30초)마다 bg+live 스냅샷 SQLite 저장
@@ -945,8 +953,8 @@ DigitalTwin/
 
   ─── 단계 5: ITS 구간속도 자동 보정 (speed_scale) ───
     ITS API 5분 구간속도와 최근 10분 측정 rolling 평균을 비교해 speed_scale 학습.
-      target = speed_scale × (ITS속도 / 측정평균)
-      수렴 전: EMA α=0.7 (빠른 학습), 수렴 후: α=0.95 (거의 고정)
+      target = speed_scale × (ITS속도 / 측정평균)  [0.3~5.0 클램프, 초과 시 warning]
+      수렴 전: EMA α=0.5 (빠른 초기 수렴), 수렴 후: α=0.95 (거의 고정)
       수렴 판정: 연속 3회 변화율 < 1%
     수렴된 계수는 speed_scale.json에 카메라별 저장 → 재시작 후 즉시 복원.
     ITS 비교 창으로 10분(window_s=600)을 사용하는 이유:
@@ -965,6 +973,8 @@ DigitalTwin/
 [ 주차 차량 감지 ]
   방법 1 (dwell 기반): 연속 정지 300프레임(~10초) → is_parked=True
                         픽셀 위치를 _parked_positions에 등록
+                        (_parked_positions는 deque(maxlen=200) — 장시간 구동 시
+                         무한 증가 및 _is_near_parked O(n) 스캔 비용 상한)
 
   방법 2 (위치 기반): 새로 탐지된 차량이 등록 위치 30px 이내
                        → track_id 무관하게 즉시 is_parked=True
@@ -1125,10 +1135,14 @@ DigitalTwin/
       ReferenceLine으로 피크 시각 강조, CSV 내보내기 링크
     브라우저 탭 비활성 시 폴링 자동 스킵 (document.hidden + visibilitychange)
 
-  [D] 특정 차량 추적 (색상 + 크기 기반 Re-ID) — 미구현
+  [D] 특정 차량 추적 (색상 + 크기 기반 Re-ID) — 보류 (타당성 평가 완료)
     구현 방식: YOLO bbox 크롭 → HSV 히스토그램 (8×8×8 bins)
               Bhattacharyya 거리로 유사도 비교
-    단일 카메라 MVP 예상 공수: ~6.5시간
-    정확도: 낮(90~95%), 야간(40~60% — 기능 비활성 처리 필요)
+    단일 카메라(track loss 재연결): 낮 90~95%, 구현 가치 있음 (~6.5h)
+    크로스 카메라: 보류 — 색상만으론 비현실적
+      이유: CCTV 간격 1km + 차량 노출 5~10초 → 카메라 사이 ~60초 공백 동안
+            같은 색 차량 수십 대 통과 → HSV 히스토그램으로 구분 불가.
+            카메라별 색감 차이까지 겹쳐 정확도 30~50%(추측 수준).
+    근본 해결책: 색상 대신 OSNet 등 딥러닝 ReID 모델 + 시공간 게이팅 필요.
     인프라 준비 완료: bbox_xyxy 이미 VehicleState에 존재,
                      cv2 import됨, canvas 클릭 패턴 RoiEditor.jsx에 존재

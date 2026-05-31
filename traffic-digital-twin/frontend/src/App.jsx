@@ -7,6 +7,7 @@ import ClassBarChart  from "./components/ClassBarChart";
 import VehicleTable   from "./components/VehicleTable";
 import CounterPanel  from "./components/CounterPanel";
 import CctvPlayer    from "./components/CctvPlayer";
+import HistoryPanel  from "./components/HistoryPanel";
 import { useLang }   from "./i18n/index.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
@@ -34,7 +35,7 @@ function trailReducer(state, vehicles) {
 }
 
 export default function App() {
-  const { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo, backgroundStatus } = useWebSocket();
+  const { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo, backgroundStatus, congestionClusters } = useWebSocket();
   const { t, lang, setLang } = useLang();
   const [trailMap, dispatchTrail]         = useReducer(trailReducer, new Map());
   const [cctvList, setCctvList]           = useState([]);
@@ -60,6 +61,22 @@ export default function App() {
       if (switchTimeoutRef.current) clearTimeout(switchTimeoutRef.current);
     }
   }, [cameraReady]);
+
+  // 라이브 시청 상태(카메라 선택 × 페이지 visible)를 백엔드에 보고 →
+  // 미시청 시 라이브 YOLO 중단(GPU 절약). 백그라운드 모니터는 영향 없음.
+  useEffect(() => {
+    const report = () => {
+      const active = selectedCctv != null && document.visibilityState === "visible";
+      fetch(`${API_BASE}/viewer-active`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active }),
+      }).catch(() => {});
+    };
+    report();
+    document.addEventListener("visibilitychange", report);
+    return () => document.removeEventListener("visibilitychange", report);
+  }, [selectedCctv]);
 
   // 카메라 선택 시 주변 노드링크 노드 fetch (캘리브레이션 GPS 스냅용)
   useEffect(() => {
@@ -250,6 +267,7 @@ export default function App() {
           fovRoadPts={cameraReadyInfo?.road_pts ?? null}
           fovSnapAlongM={cameraReadyInfo?.snap_along_m ?? null}
           backgroundStatus={backgroundStatus}
+          congestionClusters={congestionClusters}
         />
 
         {/* 연결 상태 칩 */}
@@ -400,6 +418,7 @@ export default function App() {
             {[
               { key: "live",    label: t("tab.live") },
               { key: "monitor", label: t("tab.background"), badge: monitoredCams.size || null },
+              { key: "history", label: t("tab.history") },
             ].map(tab => (
               <button key={tab.key} onClick={() => setSidebarTab(tab.key)}
                 style={{
@@ -517,6 +536,9 @@ export default function App() {
               }}
             />
           )}
+
+          {/* ── History 탭 ── */}
+          {sidebarTab === "history" && <HistoryPanel lang={lang} t={t} />}
         </div>
 
         {/* CctvSearch: 하단 고정 */}

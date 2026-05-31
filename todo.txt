@@ -17,16 +17,19 @@
       [X] 접이식 카드 (도로정보, 자동캘리브, ITS비교)
       [ ] 이상 감지 시 알림 (과속/병목 — 현재 상태만 표시, 알림 미구현)
 
-[B] [] 클러스터링 & 정체 구간 자동 탐지
-      - BackgroundMonitor.on_frame_result() 훅에서 차량 위치 수집
-      - 다중 카메라 차량 위치 데이터에 DBSCAN 적용
-      - 속도 급저하 클러스터 = 정체 구간으로 지도에 히트맵/폴리곤 오버레이
-      - 심각도 레벨 (경미/중간/심각) 색상 구분
+[B] [X] 클러스터링 & 정체 구간 자동 탐지
+      [X] 카메라 단위 클러스터링 (congestion.py) — haversine 그리디 DBSCAN, eps 500m
+          * bg 카메라는 개별 차량 GPS/속도 없음 → 차량 단위 대신 카메라 단위로 구현
+          * "속도 급저하" → 카메라 status(busy/congested) 기반 근사
+      [X] 정체 구간 지도 폴리곤 오버레이 (MapView PolygonLayer, convex hull)
+      [X] 심각도 레벨 (경미/중간/심각) 색상 구분 (SEVERITY_COLORS)
+      [X] history_sampler_loop 에서 변경 시에만 congestion_clusters WS 브로드캐스트
 
-[C] [] 데이터 저장 & 히스토리 분석
-      - BackgroundMonitor.on_frame_result() 훅에서 SQLite 누적 저장
-      - 시간대별 차량 수 / 평균속도 시계열 차트 (Recharts)
-      - 피크타임 자동 탐지, CSV 내보내기
+[C] [X] 데이터 저장 & 히스토리 분석
+      [X] 단일 주기 샘플러(history_sampler_loop, 30s)가 bg+live 스냅샷 SQLite 누적
+          * on_frame_result 대신 샘플러로 통합 — batched write, 보존정책(14일) 포함
+      [X] 시간대별 차량 수 / 평균속도 시계열 차트 (HistoryPanel, Recharts)
+      [X] 피크타임 자동 탐지(ReferenceLine), CSV 내보내기(/history/export.csv)
 
 [D] [] 특정 차량 추적 (색상 + 크기 기반 Re-ID)
       - YOLO bbox 색상 히스토그램 추출

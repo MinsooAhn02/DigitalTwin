@@ -30,6 +30,13 @@ node-link-data/*.prj
 node-link-data/*.cpg
 node-link-data/*.sqlite
 
+# 트래픽 히스토리 DB (런타임 누적, 용량 증가)
+traffic-digital-twin/backend/history.sqlite*
+
+# 속도 진단 로그 + 활성화 플래그 (런타임 생성)
+traffic-digital-twin/backend/speed_debug.log
+traffic-digital-twin/backend/speed_debug.on
+
 # OS
 .DS_Store
 Thumbs.db

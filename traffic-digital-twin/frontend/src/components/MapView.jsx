@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import DeckGL from "@deck.gl/react";
 import { ScatterplotLayer, TextLayer, PolygonLayer, IconLayer } from "@deck.gl/layers";
 import Map from "react-map-gl/maplibre";
-import { getVehicleColor } from "../utils/colorMap";
+import { getVehicleColor, getSeverityColor } from "../utils/colorMap";
 import { useLang } from "../i18n/index.jsx";
 
 const BG_STATUS_COLORS = {
@@ -229,6 +229,7 @@ export default function MapView({
   fovRoadPts = null,
   fovSnapAlongM = null,
   backgroundStatus = {},
+  congestionClusters = [],
 }) {
   const { t, lang } = useLang();
   const cctvLabel = (d) => {
@@ -387,7 +388,24 @@ export default function MapView({
       })
     : null;
 
+  // 정체 구간 클러스터 오버레이 ([B]) — 차량/카메라보다 아래(배경)에 깔림
+  const congestionLayer = useMemo(() => {
+    if (!congestionClusters || congestionClusters.length === 0) return null;
+    return new PolygonLayer({
+      id:           "congestion-clusters",
+      data:         congestionClusters,
+      getPolygon:   (d) => d.polygon,
+      getFillColor: (d) => getSeverityColor(d.severity, 70),
+      getLineColor: (d) => getSeverityColor(d.severity, 200),
+      lineWidthMinPixels: 2,
+      stroked:      true,
+      filled:       true,
+      pickable:     true,
+    });
+  }, [congestionClusters]);
+
   const layers = [
+    congestionLayer,
     ...(showVehicles ? extraLayers : []),
     fovLayer,
     cctvHitLayer,
@@ -432,6 +450,20 @@ export default function MapView({
             html: `<b>📍 ${d.node_name || d.node_id}</b><br/><span style="color:#9ca3af;font-size:11px">클릭하면 이 노드 GPS 사용</span>`,
             style: {
               background: "#111827", color: "#fbbf24",
+              fontSize: "12px", borderRadius: "6px", padding: "8px",
+            },
+          };
+        }
+
+        if (d.severity) {
+          const sevColor = { minor: "#fbbf24", medium: "#f97316", severe: "#ef4444" }[d.severity];
+          return {
+            html: `<b style="color:${sevColor}">⚠ ${t(`congestion.${d.severity}`)}</b><br/>`
+              + `<span style="color:#9ca3af;font-size:11px">`
+              + `${t("congestion.cameras", { n: d.camera_count })} · ${t("congestion.vehicles", { n: d.total_vehicles })}`
+              + `</span>`,
+            style: {
+              background: "#111827", color: "#f9fafb",
               fontSize: "12px", borderRadius: "6px", padding: "8px",
             },
           };

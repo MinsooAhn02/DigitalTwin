@@ -242,7 +242,10 @@ def _build_tracker(tier: str, device: Any) -> Any:
         cuda_dev = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
         half = torch.cuda.is_available()
         if tier == "medium":
-            return BotSort(reid_weights=reid_path, device=cuda_dev, half=half)
+            # cmc_method="sof"(옵티컬 플로우): 기본 "ecc"는 야간/저텍스처 프레임에서
+            # findTransformECC 수렴 실패 경고를 쏟아냄. 고정 CCTV라 카메라 모션 보정 효용도
+            # 낮으므로 더 강건한 sof 로 교체(경고 제거 + 추적 안정).
+            return BotSort(reid_weights=reid_path, device=cuda_dev, half=half, cmc_method="sof")
         if tier == "high":
             return DeepOcSort(reid_weights=reid_path, device=cuda_dev, half=half)
     except Exception as exc:
@@ -665,6 +668,7 @@ class VideoStream:
         self._url: str | None = None
         self._cap: cv2.VideoCapture | None = None
         self._frame_id = 0
+        self._pos_msec: float = 0.0   # 최근 프레임의 스트림 PTS (CAP_PROP_POS_MSEC)
 
     @property
     def is_open(self) -> bool:
@@ -673,6 +677,15 @@ class VideoStream:
     @property
     def fps(self) -> float:
         return self._cap.get(cv2.CAP_PROP_FPS) or 30.0 if self._cap else 30.0
+
+    @property
+    def pos_msec(self) -> float:
+        """최근 read_frame 프레임의 스트림 표시 시각(ms). 속도 계산의 정확한 시간축용.
+
+        프레임 드롭/버퍼링과 무관한 '프레임 콘텐츠 타임라인'을 제공한다.
+        스트림이 0/비단조 PTS를 줄 수 있으므로 호출부에서 폴백(벽시계) 필요.
+        """
+        return self._pos_msec
 
     @property
     def url(self) -> str | None:
@@ -684,7 +697,12 @@ class VideoStream:
             self._cap = None
         self._url = url
         self._cap = open_video_source(url)
+        # NOTE: CAP_PROP_BUFFERSIZE=1 은 의도적으로 설정하지 않는다.
+        # 최신 프레임으로 건너뛰면 연속 프레임 간 움직임이 커져 BoT-SORT CMC(ECC)가
+        # 수렴 실패하고 추적 정확도가 떨어진다. 속도 시간축은 PTS/벽시계로 이미 보정되므로
+        # 버퍼를 강제로 줄일 필요가 없다.
         self._frame_id = 0
+        self._pos_msec = 0.0
         logger.info("Camera switched: %s", url)
 
     def read_frame(self) -> tuple[int, np.ndarray] | tuple[None, None]:
@@ -694,6 +712,11 @@ class VideoStream:
         if not ok:
             return None, None
         self._frame_id += 1
+        # 프레임의 스트림 PTS 보관 (속도 시간축용). 미지원 시 0.0.
+        try:
+            self._pos_msec = float(self._cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
+        except Exception:
+            self._pos_msec = 0.0
         return self._frame_id, frame
 
     async def reconnect(self) -> bool:

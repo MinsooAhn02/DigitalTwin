@@ -327,7 +327,9 @@ def _build_vehicles(
     frame_wh: (width, height) — 프레임 범위 밖으로 Kalman 예측된 ghost 트랙 제거용.
     """
     fw, fh = frame_wh if frame_wh else (float("inf"), float("inf"))
-    vehicles: list[VehicleState] = []
+
+    # 1단계: ghost track 제거 + 유효 항목 수집
+    valid: list[tuple] = []
     for i in range(len(tracked)):
         xyxy     = tracked.xyxy[i].tolist()
         class_id = int(tracked.class_id[i])
@@ -339,8 +341,21 @@ def _build_vehicles(
         # Kalman 예측으로 프레임 밖으로 이탈한 ghost 트랙 제거
         if gx < -fw * 0.1 or gx > fw * 1.1 or gy < -fh * 0.1 or gy > fh * 1.1:
             continue
-        lat, lon = _transformer.pixel_to_gps(gx, gy)
-        x_m, y_m = _transformer.pixel_to_meter(gx, gy)
+        valid.append((xyxy, class_id, track_id, cx, cy, gx, gy))
+
+    if not valid:
+        return []
+
+    # 2단계: 배치 homography — cv2.perspectiveTransform 1회 호출
+    pts = [(v[5], v[6]) for v in valid]
+    gps_coords   = _transformer.batch_pixel_to_gps(pts)
+    meter_coords = _transformer.batch_pixel_to_meter(pts)
+
+    # 3단계: VehicleState 조립
+    vehicles: list[VehicleState] = []
+    for (xyxy, class_id, track_id, cx, cy, gx, gy), (lat, lon), (x_m, y_m) in zip(
+        valid, gps_coords, meter_coords
+    ):
         vehicles.append(VehicleState(
             track_id=track_id,
             class_name=VEHICLE_CLASSES.get(class_id, "unknown"),

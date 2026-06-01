@@ -100,16 +100,7 @@ from config import (
     SPEED_MIN_KPH,
 )
 
-# ── Haversine 거리 계산 ───────────────────────────────────────────────
-_R_EARTH = 6_371_000.0
-
-def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """두 GPS 좌표 간 거리 (미터)."""
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlam = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
-    return _R_EARTH * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+from utils import haversine_m
 
 
 # ── 차량 단위 상태 ────────────────────────────────────────────────────

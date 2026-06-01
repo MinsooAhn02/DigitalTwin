@@ -14,20 +14,12 @@ from __future__ import annotations
 
 import math
 
+from utils import haversine_m as _haversine_m
+
 # 심각도 레벨 (프론트 colorMap.SEVERITY_COLORS 와 1:1 대응)
 SEV_MINOR = "minor"
 SEV_MEDIUM = "medium"
 SEV_SEVERE = "severe"
-
-
-def _haversine_m(a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> float:
-    """두 GPS 좌표 사이 거리 (m)."""
-    r = 6371000.0
-    p1, p2 = math.radians(a_lat), math.radians(b_lat)
-    dp = math.radians(b_lat - a_lat)
-    dl = math.radians(b_lon - a_lon)
-    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(min(1.0, math.sqrt(h)))
 
 
 def _cluster_points(pts: list[dict], eps_m: float) -> list[list[dict]]:

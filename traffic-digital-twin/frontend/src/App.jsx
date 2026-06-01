@@ -167,7 +167,7 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [cctvList.length]);
 
-  const trailLayer = useTrailLayer(trailMap, vehicles);
+  const trailLayer = useTrailLayer(trailMap);
 
   const handleMapClick = useCallback((info) => {
     if (calMode !== "awaiting") return;

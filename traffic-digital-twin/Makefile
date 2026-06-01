@@ -19,7 +19,7 @@ PY      = $(VENV)/Scripts/python
 UVICORN = $(VENV)/Scripts/uvicorn
 ENGINE  = backend/yolov8s.engine
 
-.PHONY: dev _check-python _setup-venv _setup-torch _setup-pip _setup-nodelink _setup-engine _setup-npm
+.PHONY: dev report _check-python _setup-venv _setup-torch _setup-pip _setup-nodelink _setup-engine _setup-npm
 
 # ── 메인 진입점 ──────────────────────────────────────────────────────
 dev: _check-python _setup-venv _setup-torch _setup-pip _setup-nodelink _setup-engine _setup-npm
@@ -28,6 +28,24 @@ dev: _check-python _setup-venv _setup-torch _setup-pip _setup-nodelink _setup-en
 	@echo ""
 	start "Backend" cmd /k "cd backend && $(UVICORN) main:app --host 0.0.0.0 --port 8000 --reload"
 	cd frontend && npm run dev
+
+# ── 리포트 PDF 빌드 ──────────────────────────────────────────────────
+# base/contribution 두 PDF를 컴파일. 그림 4장은 report/img/ 에 직접 넣는다
+# (cctv_map.png, yolo_detect.png, auto_calib.png, congestion_map.png).
+# 없으면 placeholder 박스로 컴파일되므로 사진은 나중에 추가해도 됨.
+# pdflatex(MiKTeX/TeX Live)가 PATH에 있어야 함. Evaluation 표 수치는
+# 서버 실행 중 자동 생성되는 backend/eval_summary.json 에서 채운다.
+report:
+	@mkdir -p ../report/img
+	@cd ../report && for f in report_base report_contribution; do \
+		echo "[report] building $$f.pdf ..." && \
+		pdflatex -interaction=nonstopmode -halt-on-error $$f.tex >/dev/null && \
+		bibtex $$f >/dev/null && \
+		pdflatex -interaction=nonstopmode $$f.tex >/dev/null && \
+		pdflatex -interaction=nonstopmode $$f.tex >/dev/null || \
+		{ echo "[report] FAILED building $$f — is pdflatex on PATH?"; exit 1; }; \
+	done
+	@echo "[report] done: report/report_base.pdf, report/report_contribution.pdf"
 
 # ── Python 버전 체크 ─────────────────────────────────────────────────
 _check-python:

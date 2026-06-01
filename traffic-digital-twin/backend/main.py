@@ -69,6 +69,7 @@ from pydantic import BaseModel
 from analytics import TrafficAnalytics, VehicleState, set_speed_debug, speed_debug_status
 from transform import PerspectiveTransformer, CALIBRATION_PATH
 import roi_manager
+import metrics
 
 SPEED_SCALE_PATH = Path(__file__).resolve().parent / "speed_scale.json"
 
@@ -130,6 +131,10 @@ logger = logging.getLogger(__name__)
 
 analytics    = TrafficAnalytics()
 _transformer = PerspectiveTransformer()
+# 실행 중 자동 측정 수집기 — make dev로 실행 후 카메라를 보면 자동으로 누적되고
+# history_sampler_loop(30s)가 backend/eval_*.csv + eval_summary.json 으로 flush.
+# GET /eval/report 로 즉시 스냅샷, POST /eval/reset 로 초기화.
+_metrics     = metrics.LiveMetrics()
 _clients: set[WebSocket] = set()
 
 _camera_queue: asyncio.Queue = asyncio.Queue()
@@ -593,6 +598,10 @@ async def history_sampler_loop() -> None:
                 await asyncio.to_thread(_history.record_many, rows)
             await _broadcast_clusters_if_changed()
 
+            # 측정 자동 flush — 프레임이 처리됐을 때만 eval_*.csv + eval_summary.json 갱신
+            if getattr(_metrics, "_frames", 0) > 0:
+                await asyncio.to_thread(_metrics.report)
+
             tick += 1
             if tick % prune_every == 0:
                 cutoff = retention_cutoff(HISTORY_RETENTION_DAYS, now)
@@ -615,6 +624,10 @@ async def lifespan(app: FastAPI):
     stream   = VideoStream()
     app.state.stream   = stream
     app.state.detector = detector
+    _metrics.set_context(
+        backend=detector.tracker_info.get("backend", ""),
+        tracker=detector.tracker_info.get("tracker", ""),
+    )
     task         = asyncio.create_task(live_loop(detector, stream))
     refresh_task = asyncio.create_task(hls_refresh_loop(stream))
     its_task     = asyncio.create_task(_its_speed_poll_loop())
@@ -1119,6 +1132,7 @@ async def ws_detect(ws: WebSocket):
             # 브라우저 캔버스 프레임은 실시간 도착 → 벽시계를 속도 시간축으로 사용
             # (합성 fid/FPS 는 처리 지연 시 dt 과소계산 → 속도 0 버그 원인)
             result = analytics.update(fid, time.monotonic() * 1000, vehicles, in_cnt, out_cnt, in_ids, out_ids)
+            _metrics.add_frame(result.vehicles)  # 브라우저 경로: 추적/속도/탐지 통계 누적
             await _broadcast(_inject_its_speed(result.to_dict()))
             await ws.send_bytes(ann_bytes)
 
@@ -1443,6 +1457,21 @@ async def speed_debug_toggle(state: str):
     return speed_debug_status()
 
 
+# ── 측정 리포트 (실행 중 자동 수집) ──────────────────────────────────
+@app.get("/eval/report")
+async def eval_report():
+    """현재까지 누적된 측정값을 집계해 backend/eval_*.csv + eval_summary.json 으로
+    저장하고 JSON(markdown 표 포함)으로 반환. 카메라를 보는 동안 자동 누적됨."""
+    return await asyncio.to_thread(_metrics.report)
+
+
+@app.post("/eval/reset")
+async def eval_reset():
+    """측정 누적값 초기화 (새 실험 시작)."""
+    _metrics.reset()
+    return {"ok": True}
+
+
 # ── 헬스체크 ──────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
@@ -1615,6 +1644,7 @@ async def live_loop(detector, stream) -> None:
                 analytics.cam_lon = snap_lon
                 tracker = VehicleTracker()
                 analytics.reset()
+                _metrics.set_context(source=cam.get("name", ""))
                 skip_budget = 0
                 _reconnect_fails = 0
                 _stream_fps = stream.fps or FPS
@@ -1812,7 +1842,9 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
     h, w = frame.shape[:2]
     timestamp_ms = _speed_timestamp_ms(pos_msec)  # 실시간 타임라인 (PTS 우선)
 
+    _t0 = time.perf_counter()
     tracked = detector.track(frame)
+    _track_ms = (time.perf_counter() - _t0) * 1000.0
     tracked, in_cnt, out_cnt, in_ids, out_ids = tracker.update(tracked, (w, h))
 
     # YOLO annotated 프레임 생성 → /video-stream-yolo 버퍼
@@ -1832,9 +1864,14 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
     except Exception:
         pass
 
+    _t0 = time.perf_counter()
     vehicles = _build_vehicles(tracked, frame_wh=(w, h))
+    _transform_ms = (time.perf_counter() - _t0) * 1000.0
     _frame_count += 1
+    _t0 = time.perf_counter()
     result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt, in_ids, out_ids)
+    _analytics_ms = (time.perf_counter() - _t0) * 1000.0
+    _metrics.add_frame(result.vehicles, _track_ms, _transform_ms, _analytics_ms)
     return _inject_its_speed(result.to_dict())
 
 

@@ -959,6 +959,11 @@ async def switch_camera(body: CameraSwitch):
         "snap_along_m": road_snap["snap_along_m"] if road_snap else None,
     }
 
+    # 이전 카메라 프레임이 새 연결에 흘러들어가지 않도록 버퍼 초기화
+    global _latest_frame_jpeg, _latest_annotated_jpeg
+    _latest_frame_jpeg = None
+    _latest_annotated_jpeg = None
+
     # live_loop 스트림 전환 큐잉
     if body.cctvurl:
         await _camera_queue.put({

@@ -10,6 +10,7 @@ transform.py — Perspective Transform (픽셀 → 실세계 좌표)
 import json
 import logging
 import math
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,9 @@ from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIG
 CALIBRATION_PATH = Path(__file__).parent / "calibration_data.json"
 
 logger = logging.getLogger(__name__)
+
+# 차종별 알려진 폭 (m) — vehicle apparent size calibration에 사용
+VEHICLE_WIDTHS_M: dict[str, float] = {"car": 1.8, "truck": 2.5, "bus": 2.5}
 
 
 def _line_intersection(l1: tuple, l2: tuple) -> tuple[float, float] | None:
@@ -66,6 +70,13 @@ class PerspectiveTransformer:
         self._gps_center_lat: float = float(np.mean(gps_arr[:, 0]))
         self._gps_center_lon: float = float(np.mean(gps_arr[:, 1]))
         self._is_calibrated: bool = False  # 4-point 사용자 캘리브레이션 여부
+
+        # ── Vehicle apparent-size scale model ──────────────────────────
+        self._scale_obs: deque[tuple[float, float]] = deque(maxlen=200)  # (v_px, scale_m/px)
+        self._scale_model: tuple[float, float] | None = None             # (B, C): 1/scale = B*v + C
+        self._scale_obs_since_fit: int = 0
+        self._frame_h: int = 0
+        self._frame_w: int = 0
 
         # ── 도로 중심선 기반 곡선 GPS 매핑 ──────────────────────────────
         # 단일 Homography의 직선 근사 대신, 도로 곡선을 따라 차량 GPS를 계산.
@@ -342,8 +353,15 @@ class PerspectiveTransformer:
         return self._gps_center_lat + new_dlat, self._gps_center_lon + new_dlon
 
     def pixel_to_meter(self, u: float, v: float) -> tuple[float, float]:
-        """픽셀 (u, v) → (x_m, y_m) — 속도 계산용 실세계 미터 좌표"""
-        return self._transform_point(self._H_meter, u, v)
+        """픽셀 (u, v) → (x_m, y_m) — 속도 계산용 실세계 미터 좌표.
+
+        vehicle scale model이 로드돼 있으면 y-위치별 보정 계수를 적용한다.
+        """
+        x_m, y_m = self._transform_point(self._H_meter, u, v)
+        if self._scale_model is not None:
+            corr = self._scale_correction_at(v)
+            return x_m * corr, y_m * corr
+        return x_m, y_m
 
     def batch_pixel_to_gps(
         self, points: list[tuple[float, float]]
@@ -376,6 +394,96 @@ class PerspectiveTransformer:
     @property
     def is_calibrated(self) -> bool:
         return self._is_calibrated
+
+    # ── Vehicle apparent-size scale model ──────────────────────────────
+
+    def accumulate_scale_obs(
+        self,
+        v: float,
+        bbox_w_px: float,
+        class_name: str,
+        frame_h: int,
+        frame_w: int,
+    ) -> None:
+        """차량 bbox 폭 관측을 scale model 피팅용 버퍼에 추가."""
+        real_w = VEHICLE_WIDTHS_M.get(class_name)
+        if real_w is None or bbox_w_px < 20.0:
+            return
+        self._frame_h, self._frame_w = frame_h, frame_w
+        self._scale_obs.append((float(v), real_w / bbox_w_px))
+        self._scale_obs_since_fit += 1
+
+    def fit_scale_model(self) -> bool:
+        """누적 관측으로 1/scale = B*v + C 선형 모델 피팅.
+
+        성공 시 _scale_model 업데이트 후 True 반환.
+        유효성 조건: B > 0, vp_y = -C/B ∈ (0, 0.7*frame_h).
+        """
+        if len(self._scale_obs) < 20:
+            return False
+        vs    = np.array([o[0] for o in self._scale_obs], dtype=np.float64)
+        invsc = np.array([1.0 / o[1] for o in self._scale_obs], dtype=np.float64)
+        A = np.column_stack([vs, np.ones_like(vs)])
+        result = np.linalg.lstsq(A, invsc, rcond=None)
+        B, C = float(result[0][0]), float(result[0][1])
+        if B <= 0:
+            logger.debug("fit_scale_model: B=%.5f <= 0, 피팅 거부", B)
+            return False
+        vp_y = -C / B
+        if not (0 < vp_y < 0.7 * self._frame_h):
+            logger.debug("fit_scale_model: vp_y=%.1f 유효 범위 벗어남, 피팅 거부", vp_y)
+            return False
+        self._scale_model = (B, C)
+        self._scale_obs_since_fit = 0
+        logger.info("fit_scale_model 완료: B=%.5f C=%.3f vp_y=%.1fpx (obs=%d)",
+                    B, C, vp_y, len(self._scale_obs))
+        return True
+
+    def _scale_correction_at(self, v: float) -> float:
+        """픽셀 y=v에서의 스케일 보정 계수 (fitted/homography). [0.3, 3.0] 클램프."""
+        if self._scale_model is None or self._frame_w == 0:
+            return 1.0
+        B, C = self._scale_model
+        denom = B * v + C
+        if denom <= 0:
+            return 1.0
+        fitted_scale = 1.0 / denom
+        w2 = self._frame_w / 2.0
+        x0m, _ = self._transform_point(self._H_meter, w2, v)
+        x1m, _ = self._transform_point(self._H_meter, w2 + 1.0, v)
+        h_scale = abs(x1m - x0m)
+        if h_scale < 1e-6:
+            return 1.0
+        return min(max(fitted_scale / h_scale, 0.3), 3.0)
+
+    def load_scale_params(self, params: dict) -> None:
+        """vehicle_calib.json 엔트리에서 scale model 복원."""
+        try:
+            B, C = float(params["B"]), float(params["C"])
+            self._scale_model = (B, C)
+            self._frame_h = int(params.get("frame_h", self._frame_h))
+            self._frame_w = int(params.get("frame_w", self._frame_w))
+            logger.info("load_scale_params: B=%.5f C=%.3f (frame %dx%d)",
+                        B, C, self._frame_w, self._frame_h)
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("load_scale_params 실패: %s", exc)
+
+    def get_scale_params(self) -> dict | None:
+        """현재 scale model을 직렬화 가능한 dict로 반환. 모델 없으면 None."""
+        if self._scale_model is None:
+            return None
+        B, C = self._scale_model
+        return {"B": B, "C": C, "frame_h": self._frame_h, "frame_w": self._frame_w}
+
+    def reset_scale_obs(self, clear_model: bool = False) -> None:
+        """카메라 전환 시 관측 버퍼 초기화.
+
+        clear_model=True: 이전 카메라 모델도 제거 (load_scale_params로 새 모델 로드 전).
+        """
+        self._scale_obs.clear()
+        self._scale_obs_since_fit = 0
+        if clear_model:
+            self._scale_model = None
 
     def update_from_calibration(
         self,
@@ -774,4 +882,10 @@ class PerspectiveTransformer:
     def batch_pixel_to_meter(
         self, points: list[tuple[float, float]]
     ) -> list[tuple[float, float]]:
-        return self._batch_transform(self._H_meter, points)
+        raw = self._batch_transform(self._H_meter, points)
+        if self._scale_model is None:
+            return raw
+        return [
+            (x_m * self._scale_correction_at(v), y_m * self._scale_correction_at(v))
+            for (u, v), (x_m, y_m) in zip(points, raw)
+        ]

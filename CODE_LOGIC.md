@@ -266,7 +266,7 @@ los_grade, in_count, out_count, class_counts`.
    (> 5) and `scaled > ema·2.5 + 20`, ignore the sample. The EMA is **never seeded at 0** (a 0 seed
    makes spike-reject block all real speeds → stuck at 0). Stop decay: when stopped, decay ×0.6 and
    floor to 0 below `SPEED_MIN_KPH = 5`.
-5. **Scale + flag** — `speed_kph = round(raw · speed_scale, 1)`; `is_speeding = speed_kph > limit`.
+5. **Scale + flag** — `speed_kph = round(raw · speed_scale, 1)`; `is_speeding = speed_kph > limit * 1.10` (10 % tolerance — accounts for measurement noise and the common 70→77 kph real-world tolerance on national routes).
    `MAX_REASONABLE_KPH = 180` rejects only ID-swap/homography blow-ups (so legit highway speed passes
    and feeds the ITS calibration).
 
@@ -448,6 +448,13 @@ camera, `POST /switch-camera`, clear `switching` when `camera_ready` arrives. Bu
 `PathLayer` from a reducer that appends recent positions (capped). Uses `useRef`/`useCallback`/
 `React.memo` (CounterPanel, ClassBarChart, VehicleTable) so 30 fps frames don't re-render the sidebar.
 
+**`CollapsibleCard`.** Defined inline in `App.jsx`. Accepts an optional `description` prop; when
+provided a small `ℹ` button appears in the card header. Clicking it opens a **centered fixed-position
+modal overlay** (dark card, `zIndex 9999`, click-outside to dismiss) showing the description text.
+The Auto Calibration Estimate and ITS Speed Comparison cards both pass a bilingual description string
+(via `t("app.autoCalibDesc")` / `t("app.itsCompareDesc")`) explaining what the section does and what
+each displayed value means.
+
 ### 5.2 `MapView.jsx` — deck.gl rendering
 Layer z-order (bottom→top): `congestion-clusters` → trails (`extraLayers`) → `cctv-fov` →
 `cctvs-hit` (invisible click target) → `cctv-icons` (status-coloured SVG) → `cctv-labels` →
@@ -489,6 +496,12 @@ Recharts line charts for vehicle count (average + peak) and average speed over 6
 Single `/ws` connection with 3 s auto-reconnect. Demultiplexes 6 message types into
 `frameData, cameraReadyInfo (+counter), autoCalibInfo, backgroundStatus, congestionClusters` and an
 `error` string.
+
+### 5.7b `VehicleTable.jsx` — direction tabs
+The vehicle list now has a 3-tab toggle (`All / Inbound / Out`) above the table. A local `dirTab`
+state filters the `vehicles` prop by `v.direction` before rendering. Tab badges show the count per
+direction; active tab colour matches the direction convention (blue = In, red = Out, neutral = All).
+The speed-log summary (min/avg/max) is computed from the currently visible (filtered) set.
 
 ### 5.8 `i18n`, `colorMap.js`
 React-context i18n (en/ko, `{{param}}` interpolation). `colorMap` maps vehicle direction

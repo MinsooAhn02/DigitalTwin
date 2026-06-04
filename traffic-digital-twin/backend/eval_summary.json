@@ -1,68 +1,69 @@
 {
-  "source": "[국도 48호선] 김포 태리교차로",
+  "source": "[국도48호선] 김포 하성삼거리",
   "inference_backend": "tensorrt",
   "tracker": "BotSort",
-  "frames_processed": 3514,
-  "elapsed_s": 698.7,
+  "frames_processed": 7618,
+  "elapsed_s": 2591.9,
   "latency_ms": {
     "yolo_isolated": {
       "n": 0
     },
     "track": {
-      "n": 3514,
-      "mean": 31.295,
-      "median": 35.781,
-      "p95": 44.758,
-      "min": 8.865,
-      "max": 693.61
+      "n": 7618,
+      "mean": 36.903,
+      "median": 42.316,
+      "p95": 57.672,
+      "min": 8.208,
+      "max": 1156.608
     },
     "transform": {
-      "n": 3514,
-      "mean": 0.065,
-      "median": 0.059,
-      "p95": 0.152,
-      "min": 0.001,
-      "max": 0.531
+      "n": 7618,
+      "mean": 0.118,
+      "median": 0.112,
+      "p95": 0.273,
+      "min": 0.002,
+      "max": 2.291
     },
     "analytics": {
-      "n": 3514,
-      "mean": 0.094,
-      "median": 0.084,
-      "p95": 0.194,
+      "n": 7618,
+      "mean": 0.142,
+      "median": 0.126,
+      "p95": 0.304,
       "min": 0.024,
-      "max": 1.324
+      "max": 0.926
     },
     "end_to_end": {
-      "n": 3514,
-      "mean": 31.454,
-      "median": 35.938,
-      "p95": 44.942,
-      "min": 8.988,
-      "max": 693.779
+      "n": 7618,
+      "mean": 37.164,
+      "median": 42.618,
+      "p95": 58.14,
+      "min": 8.414,
+      "max": 1157.233
     }
   },
-  "throughput_fps": 31.8,
+  "throughput_fps": 26.9,
   "tracking": {
-    "frames_processed": 3514,
-    "unique_tracks": 21,
-    "id_appearances": 62,
-    "mean_lifetime_frames": 203.9,
-    "median_lifetime_frames": 95.0,
-    "max_lifetime_frames": 2036
+    "frames_processed": 7618,
+    "unique_tracks": 119,
+    "id_appearances": 529,
+    "mean_lifetime_frames": 108.29,
+    "median_lifetime_frames": 68.0,
+    "max_lifetime_frames": 782
   },
   "speed": {
-    "n": 1108,
-    "mean": 107.934,
-    "median": 107.3,
-    "p95": 174.7,
+    "n": 11173,
+    "mean": 73.043,
+    "median": 75.1,
+    "p95": 145.44,
     "min": 1.8,
-    "max": 178.6,
-    "pct_moving_obs": 25.9,
-    "total_vehicle_obs": 4282
+    "max": 179.6,
+    "pct_moving_obs": 86.7,
+    "total_vehicle_obs": 12887
   },
   "detection_class_totals": {
-    "car": 4249,
-    "truck": 33
+    "car": 11699,
+    "truck": 1182,
+    "bus": 6
   },
   "speed_scale_snapshot": {
     "16c3b5b2fa97": {
@@ -184,6 +185,11 @@
       "speed_scale": 0.8904,
       "converged": false,
       "updated_at": "2026-06-01T08:59:37.935325+00:00"
+    },
+    "865ad9709e6f": {
+      "speed_scale": 0.7582,
+      "converged": false,
+      "updated_at": "2026-06-04T19:25:06.788646+00:00"
     }
   }
 }

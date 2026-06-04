@@ -41,6 +41,19 @@ export function getVehicleColor(direction, highContrast = false) {
   return palette[direction] ?? palette.Unknown;
 }
 
+// 정체 구간 클러스터 심각도 색상 ([B]) — [R,G,B] (alpha 는 레이어에서 부여)
+// congestion.py 의 minor/medium/severe 와 1:1 대응
+export const SEVERITY_COLORS = {
+  minor:  [251, 191, 36],   // 노랑
+  medium: [249, 115, 22],   // 주황
+  severe: [239, 68, 68],    // 빨강
+};
+
+export function getSeverityColor(severity, alpha = 255) {
+  const rgb = SEVERITY_COLORS[severity] ?? SEVERITY_COLORS.minor;
+  return [...rgb, alpha];
+}
+
 export const LOS_BADGE_COLORS = {
   A: "bg-green-500",
   B: "bg-lime-500",

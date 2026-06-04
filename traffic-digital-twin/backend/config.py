@@ -57,10 +57,10 @@ YOLO_AUTO_EXPORT_ENGINE: bool = os.getenv(
     "true",
 ).lower() == "true"
 YOLO_IMGSZ: int = int(os.getenv("YOLO_IMGSZ", "640"))
-YOLO_CONF: float = 0.25
-YOLO_IOU: float = 0.45
+YOLO_CONF: float = float(os.getenv("YOLO_CONF", "0.25"))
+YOLO_IOU: float = float(os.getenv("YOLO_IOU", "0.45"))
 
-YOLO_DETECT_INTERVAL: int = 3
+YOLO_DETECT_INTERVAL: int = int(os.getenv("YOLO_DETECT_INTERVAL", "1"))
 
 VEHICLE_CLASSES: dict[int, str] = {
     2: "car",
@@ -70,12 +70,8 @@ VEHICLE_CLASSES: dict[int, str] = {
 }
 
 # Tracking
-BYTE_TRACK_FPS: int = 30
-BYTE_TRACK_BUFFER: int = 30
-
-# LineZone
-COUNT_LINE_START = (0, 360)
-COUNT_LINE_END = (1280, 360)
+BYTE_TRACK_FPS: int = int(os.getenv("BYTE_TRACK_FPS", "30"))
+BYTE_TRACK_BUFFER: int = int(os.getenv("BYTE_TRACK_BUFFER", "30"))
 
 # Perspective transform
 PIXEL_POINTS = [
@@ -114,11 +110,31 @@ LOS_THRESHOLDS: dict[str, int] = {
 }
 
 BOTTLENECK_DWELL_FRAMES: int = int(os.getenv("BOTTLENECK_DWELL_FRAMES", "150"))
+ITS_POLL_INTERVAL: int = int(os.getenv("ITS_POLL_INTERVAL", "300"))
+HLS_REFRESH_INTERVAL: int = int(os.getenv("HLS_REFRESH_INTERVAL", "1800"))
+
+# ── History 저장 & 정체 클러스터링 ([B]/[C]) ────────────────────────────
+# 단일 주기 샘플러가 bg snapshot + live 캐시를 누적 저장하는 주기 (초).
+# detect 주기(8s)와 독립 — 더 큰 값으로 DB 증가 속도를 통제한다.
+HISTORY_SAMPLE_S: int = int(os.getenv("HISTORY_SAMPLE_S", "30"))
+# 보존 기간 — 이보다 오래된 행은 샘플러가 주기적으로 prune.
+HISTORY_RETENTION_DAYS: int = int(os.getenv("HISTORY_RETENTION_DAYS", "14"))
+# 카메라단위 정체 클러스터링 — 두 카메라를 같은 구간으로 묶는 최대 거리 (m).
+CONGESTION_EPS_M: float = float(os.getenv("CONGESTION_EPS_M", "500"))
 
 SPEED_JITTER_THRESHOLD_M: float = 0.5
-SPEED_SMOOTHING_ALPHA: float = 0.15
-MAX_REASONABLE_KPH: float = 120.0
+# 물리적 상한 — 트랙 ID 스왑/호모그래피 폭주(수백 m 점프)만 거른다. 고속도로 차량이
+# 보정 전(scale=1) 130~160으로 측정돼도 통과시켜야 OK 샘플이 쌓이고 ITS 보정이 시작된다.
+# (과거 120은 정상 고속 차량까지 잘라 OK=0 → 속도 0 고착의 원인이었음)
+MAX_REASONABLE_KPH: float = 180.0
+# 이 미만의 측정 속도는 정지차 지터 노이즈로 간주해 0 처리 (정지차가 2km/h로 뜨는 문제)
+SPEED_MIN_KPH: float = 5.0
 GC_GRACE_FRAMES: int = 30
+
+# 속도 출력 평활화 (0↔100 깜빡임 제거)
+SPEED_EMA_ALPHA: float = 0.35      # 신규 샘플 반영 비율 (낮을수록 부드러움)
+SPEED_STOP_SPAN_S: float = 1.0     # 변위<jitter가 이 시간 이상 지속돼야 '정지'로 0 감쇠
+SPEED_SPIKE_FACTOR: float = 2.5    # raw > ema*factor+20 이면 이상치로 보고 EMA 미반영
 
 # 슬라이딩 윈도우 속도 계산에 사용할 이력 프레임 수
 SPEED_WINDOW_FRAMES: int = 18

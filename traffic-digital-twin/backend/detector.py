@@ -242,7 +242,10 @@ def _build_tracker(tier: str, device: Any) -> Any:
         cuda_dev = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
         half = torch.cuda.is_available()
         if tier == "medium":
-            return BotSort(reid_weights=reid_path, device=cuda_dev, half=half)
+            # cmc_method="sof"(옵티컬 플로우): 기본 "ecc"는 야간/저텍스처 프레임에서
+            # findTransformECC 수렴 실패 경고를 쏟아냄. 고정 CCTV라 카메라 모션 보정 효용도
+            # 낮으므로 더 강건한 sof 로 교체(경고 제거 + 추적 안정).
+            return BotSort(reid_weights=reid_path, device=cuda_dev, half=half, cmc_method="sof")
         if tier == "high":
             return DeepOcSort(reid_weights=reid_path, device=cuda_dev, half=half)
     except Exception as exc:
@@ -477,6 +480,11 @@ class VehicleDetector:
 
     def __init__(self):
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        if self._device == "cpu":
+            logger.warning("CUDA 미감지 — CPU 모드로 실행 (속도 저하 예상)")
+        else:
+            vram = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            logger.info("CUDA GPU: %s  VRAM=%.1f GB", torch.cuda.get_device_name(0), vram)
         selection = resolve_model_selection()
         self._model_path = str(selection.path)
         self._backend = selection.backend
@@ -491,7 +499,13 @@ class VehicleDetector:
         self._track_frame_count: int = 0
         self._last_dets_np: np.ndarray = np.empty((0, 6))
         self._last_tracks: sv.Detections = sv.Detections.empty()
-        self._detect_interval = max(1, int(YOLO_DETECT_INTERVAL))
+        # TensorRT/ONNX는 추론이 빨라 매 프레임 탐지해도 충분함
+        # CPU 모드에서만 DETECT_INTERVAL 설정값을 그대로 사용
+        if YOLO_DETECT_INTERVAL == 1 or selection.backend in ("tensorrt", "onnx"):
+            self._detect_interval = 1
+        else:
+            self._detect_interval = max(1, int(YOLO_DETECT_INTERVAL))
+        logger.info("DETECT_INTERVAL=%d (backend=%s)", self._detect_interval, selection.backend)
 
         # ROI polygon (정규화 좌표 0~1). None이면 전체 프레임
         self._roi: list[list[float]] | None = None
@@ -552,7 +566,7 @@ class VehicleDetector:
     def track(self, frame: np.ndarray) -> sv.Detections:
         """
         YOLO predict → ROI 필터 → boxmot tracker update → sv.Detections 반환.
-        YOLO_DETECT_INTERVAL 프레임마다 한 번만 추론, 나머지는 tracker 예측으로 보간.
+        YOLO_DETECT_INTERVAL 프레임마다 한 번만 추론, 비탐지 프레임은 tracker 상태 보존을 위해 스킵.
         """
         self._track_frame_count += 1
         should_detect = (self._track_frame_count - 1) % self._detect_interval == 0
@@ -587,6 +601,22 @@ class VehicleDetector:
                 logger.debug("Tracker input[0]: %s", tracker_input[0])
 
         # 2. boxmot tracker update
+        # 비탐지 프레임: 마지막 탐지 결과로 tracker를 갱신해 Kalman 예측 유지.
+        # update(empty)는 ByteTrack이 모든 트랙을 LOST로 처리하므로 사용 금지.
+        # 마지막 탐지 bbox를 재전달하면 IOU 매칭으로 기존 트랙 ID가 유지됨.
+        if not should_detect:
+            if len(self._last_dets_np) > 0:
+                try:
+                    tracks = self._tracker.update(self._last_dets_np, frame)
+                    result = _boxmot_to_sv(tracks)
+                    if self._tracker_tier in ("cpu", "low"):
+                        result = _dedup_tracks(result)
+                        result = self._id_stabilizer.update(result, frame.shape[:2])
+                    self._last_tracks = result
+                except Exception:
+                    pass
+            return self._last_tracks
+
         try:
             tracks = self._tracker.update(tracker_input, frame)
             logger.debug(
@@ -599,10 +629,6 @@ class VehicleDetector:
             return self._last_tracks
 
         result = _boxmot_to_sv(tracks)
-
-        # 비탐지 프레임에서 tracker가 빈 결과 반환 시 마지막 결과 유지
-        if len(result) == 0 and not should_detect:
-            return self._last_tracks
 
         # ReID 없는 tier(cpu/low): 중복 트랙 제거 후 ID 복원
         if self._tracker_tier in ("cpu", "low"):
@@ -642,6 +668,7 @@ class VideoStream:
         self._url: str | None = None
         self._cap: cv2.VideoCapture | None = None
         self._frame_id = 0
+        self._pos_msec: float = 0.0   # 최근 프레임의 스트림 PTS (CAP_PROP_POS_MSEC)
 
     @property
     def is_open(self) -> bool:
@@ -650,6 +677,15 @@ class VideoStream:
     @property
     def fps(self) -> float:
         return self._cap.get(cv2.CAP_PROP_FPS) or 30.0 if self._cap else 30.0
+
+    @property
+    def pos_msec(self) -> float:
+        """최근 read_frame 프레임의 스트림 표시 시각(ms). 속도 계산의 정확한 시간축용.
+
+        프레임 드롭/버퍼링과 무관한 '프레임 콘텐츠 타임라인'을 제공한다.
+        스트림이 0/비단조 PTS를 줄 수 있으므로 호출부에서 폴백(벽시계) 필요.
+        """
+        return self._pos_msec
 
     @property
     def url(self) -> str | None:
@@ -661,7 +697,12 @@ class VideoStream:
             self._cap = None
         self._url = url
         self._cap = open_video_source(url)
+        # NOTE: CAP_PROP_BUFFERSIZE=1 은 의도적으로 설정하지 않는다.
+        # 최신 프레임으로 건너뛰면 연속 프레임 간 움직임이 커져 BoT-SORT CMC(ECC)가
+        # 수렴 실패하고 추적 정확도가 떨어진다. 속도 시간축은 PTS/벽시계로 이미 보정되므로
+        # 버퍼를 강제로 줄일 필요가 없다.
         self._frame_id = 0
+        self._pos_msec = 0.0
         logger.info("Camera switched: %s", url)
 
     def read_frame(self) -> tuple[int, np.ndarray] | tuple[None, None]:
@@ -671,6 +712,11 @@ class VideoStream:
         if not ok:
             return None, None
         self._frame_id += 1
+        # 프레임의 스트림 PTS 보관 (속도 시간축용). 미지원 시 0.0.
+        try:
+            self._pos_msec = float(self._cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
+        except Exception:
+            self._pos_msec = 0.0
         return self._frame_id, frame
 
     async def reconnect(self) -> bool:

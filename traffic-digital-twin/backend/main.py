@@ -53,6 +53,7 @@ import math
 import re
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -65,9 +66,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from analytics import TrafficAnalytics, VehicleState
+from analytics import TrafficAnalytics, VehicleState, set_speed_debug, speed_debug_status
 from transform import PerspectiveTransformer, CALIBRATION_PATH
 import roi_manager
+import metrics
 
 SPEED_SCALE_PATH = Path(__file__).resolve().parent / "speed_scale.json"
 
@@ -78,8 +80,8 @@ def _load_speed_scale(cam_key: str) -> float:
         if SPEED_SCALE_PATH.exists():
             data = json.loads(SPEED_SCALE_PATH.read_text(encoding="utf-8"))
             return float(data.get(cam_key, {}).get("speed_scale", 1.0))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("speed_scale 로드 실패 (기본 1.0 사용): %s", exc)
     return 1.0
 
 
@@ -92,7 +94,6 @@ def _save_speed_scale(cam_key: str, scale: float, converged: bool) -> None:
                 data = json.loads(SPEED_SCALE_PATH.read_text(encoding="utf-8"))
             except Exception:
                 pass
-        from datetime import datetime, timezone
         data[cam_key] = {
             "speed_scale": scale,
             "converged": converged,
@@ -108,21 +109,32 @@ from config import (
     CAPTURE_INTERVAL_MS,
     CAPTURE_QUALITY,
     CAPTURE_WIDTH,
+    CONGESTION_EPS_M,
     FPS,
+    HISTORY_RETENTION_DAYS,
+    HISTORY_SAMPLE_S,
+    HLS_REFRESH_INTERVAL,
     ITS_API_KEY,
     ITS_BASE_URL,
+    ITS_POLL_INTERVAL,
     ITS_TRAFFIC_URL,
     JPEG_QUALITY,
     MAX_IN_FLIGHT,
     RUNTIME_PROFILE_NAME,
     VEHICLE_CLASSES,
 )
+from congestion import compute_clusters
+from history import HistoryStore, SnapshotRow, retention_cutoff
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 analytics    = TrafficAnalytics()
 _transformer = PerspectiveTransformer()
+# 실행 중 자동 측정 수집기 — make dev로 실행 후 카메라를 보면 자동으로 누적되고
+# history_sampler_loop(30s)가 backend/eval_*.csv + eval_summary.json 으로 flush.
+# GET /eval/report 로 즉시 스냅샷, POST /eval/reset 로 초기화.
+_metrics     = metrics.LiveMetrics()
 _clients: set[WebSocket] = set()
 
 _camera_queue: asyncio.Queue = asyncio.Queue()
@@ -132,6 +144,19 @@ _detect_clients: int = 0   # ws/detect 활성 연결 수 — live_loop 브로드
 
 # 현재 선택된 카메라 정보 (lat, lon, name, cctvurl)
 _current_cam: dict | None = None
+
+# 라이브 시청 활성 여부 — 프론트가 (카메라 선택 × 페이지 visible) 상태를 보고함.
+# False면 live_loop 가 YOLO/broadcast 를 스킵해 미시청 시 GPU 낭비를 막는다.
+# (백그라운드 모니터는 이 플래그와 무관하게 상시 동작)
+_live_viewer_active: bool = False
+
+# ── History 저장 & 정체 클러스터 ([B]/[C]) ─────────────────────────────
+_history = HistoryStore(Path(__file__).resolve().parent / "history.sqlite")
+# 라이브 카메라의 최신 FrameAnalytics 캐시 (샘플러가 읽어 저장).
+# _broadcast 에서 부작용 없이 갱신 — 기존 _latest_frame_jpeg 와 동일 패턴.
+_latest_live_analytics: dict | None = None
+# 직전 broadcast 한 클러스터 시그니처 — 변경 시에만 재전송.
+_last_cluster_sig: str | None = None
 _cam_version: int = 0
 
 # MJPEG 스트림용 최신 프레임 버퍼
@@ -151,15 +176,18 @@ _cctv_cache: TTLCache = TTLCache(maxsize=50, ttl=300)
 # ITS 구간속도 (5분 주기 폴링) — None이면 데이터 없음
 _its_speed_kph: float | None = None
 
+# 현재 스트림 실제 FPS — MJPEG 슬립 간격과 live_loop target_interval에 반영
+_stream_fps: float = float(FPS)
+
 
 def _safe_tid(tracker_id_arr, idx: int, fallback: int) -> int:
     """BoT-SORT가 미확정 트랙에 np.nan을 반환할 때 ValueError 방지."""
-    if tracker_id_arr is None:
+    if tracker_id_arr is None or idx >= len(tracker_id_arr):
         return fallback
     try:
         v = int(tracker_id_arr[idx])
         return fallback if math.isnan(float(v)) else v
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, IndexError):
         return fallback
 
 
@@ -304,7 +332,9 @@ def _build_vehicles(
     frame_wh: (width, height) — 프레임 범위 밖으로 Kalman 예측된 ghost 트랙 제거용.
     """
     fw, fh = frame_wh if frame_wh else (float("inf"), float("inf"))
-    vehicles: list[VehicleState] = []
+
+    # 1단계: ghost track 제거 + 유효 항목 수집
+    valid: list[tuple] = []
     for i in range(len(tracked)):
         xyxy     = tracked.xyxy[i].tolist()
         class_id = int(tracked.class_id[i])
@@ -316,8 +346,21 @@ def _build_vehicles(
         # Kalman 예측으로 프레임 밖으로 이탈한 ghost 트랙 제거
         if gx < -fw * 0.1 or gx > fw * 1.1 or gy < -fh * 0.1 or gy > fh * 1.1:
             continue
-        lat, lon = _transformer.pixel_to_gps(gx, gy)
-        x_m, y_m = _transformer.pixel_to_meter(gx, gy)
+        valid.append((xyxy, class_id, track_id, cx, cy, gx, gy))
+
+    if not valid:
+        return []
+
+    # 2단계: 배치 homography — cv2.perspectiveTransform 1회 호출
+    pts = [(v[5], v[6]) for v in valid]
+    gps_coords   = _transformer.batch_pixel_to_gps(pts)
+    meter_coords = _transformer.batch_pixel_to_meter(pts)
+
+    # 3단계: VehicleState 조립
+    vehicles: list[VehicleState] = []
+    for (xyxy, class_id, track_id, cx, cy, gx, gy), (lat, lon), (x_m, y_m) in zip(
+        valid, gps_coords, meter_coords
+    ):
         vehicles.append(VehicleState(
             track_id=track_id,
             class_name=VEHICLE_CLASSES.get(class_id, "unknown"),
@@ -329,6 +372,249 @@ def _build_vehicles(
     return vehicles
 
 
+# ── 백그라운드 멀티-카메라 모니터 ──────────────────────────────────────
+from dataclasses import dataclass as _dc, field as _field
+
+
+@_dc
+class _BgCamState:
+    cam_key:       str
+    name:          str
+    name_ko:       str
+    url:           str
+    lat:           float
+    lon:           float
+    status:        str   = "loading"   # loading / normal / busy / congested / error
+    vehicle_count: int   = 0
+    class_counts:  dict  = _field(default_factory=dict)
+    updated_at:    float = 0.0
+    _task:         object = _field(default=None, repr=False)   # asyncio.Task
+
+
+class BackgroundMonitor:
+    """N개 CCTV를 백그라운드에서 저속(5 s) 탐지하여 WS로 상태 브로드캐스트.
+
+    - 각 카메라는 독립 asyncio.Task로 실행 (독립 VideoStream, 공유 detector)
+    - detector.detect()는 내부 threading.Lock으로 직렬화되므로 GPU 충돌 없음
+    - B(클러스터링) / C(히스토리 저장) / D(Re-ID) 확장을 위한 훅 포함
+    """
+    POLL_S            = 8.0   # 캡처 주기 (초) — CPU 부하 절충
+    THRESH_BUSY       = 3     # > 3 → busy
+    THRESH_CONGESTED  = 6     # > 6 → congested
+
+    def __init__(self) -> None:
+        self._cams: dict[str, _BgCamState] = {}
+        self._lock = asyncio.Lock()
+
+    # ── 공개 인터페이스 ────────────────────────────────────────────────
+
+    async def add(self, cam_key: str, name: str, name_ko: str,
+                  url: str, lat: float, lon: float, detector) -> None:
+        async with self._lock:
+            if cam_key in self._cams:
+                return
+            state = _BgCamState(cam_key=cam_key, name=name, name_ko=name_ko,
+                                url=url, lat=lat, lon=lon)
+            state._task = asyncio.create_task(
+                self._loop(cam_key, state, detector),
+                name=f"bg-monitor-{cam_key}",
+            )
+            self._cams[cam_key] = state
+        await self._emit()
+
+    async def remove(self, cam_key: str) -> None:
+        async with self._lock:
+            state = self._cams.pop(cam_key, None)
+            if state and state._task:
+                state._task.cancel()
+        await self._emit()
+
+    def is_monitored(self, cam_key: str) -> bool:
+        return cam_key in self._cams
+
+    def snapshot(self) -> dict:
+        return {
+            k: {
+                "name":          s.name,
+                "name_ko":       s.name_ko,
+                "lat":           s.lat,
+                "lon":           s.lon,
+                "status":        s.status,
+                "vehicle_count": s.vehicle_count,
+                "class_counts":  s.class_counts,
+                "updated_at":    s.updated_at,
+            }
+            for k, s in self._cams.items()
+        }
+
+    # ── 확장 훅 (B: 클러스터링, C: 히스토리 저장 시 오버라이드) ──────────
+    async def on_frame_result(self, cam_key: str, state: "_BgCamState",
+                              vehicle_count: int, class_counts: dict) -> None:
+        """탐지 결과가 나올 때마다 호출. 하위 기능에서 오버라이드 가능."""
+
+    # ── 내부 ──────────────────────────────────────────────────────────
+
+    def _classify(self, n: int) -> str:
+        if n > self.THRESH_CONGESTED:
+            return "congested"
+        if n > self.THRESH_BUSY:
+            return "busy"
+        return "normal"
+
+    async def _emit(self) -> None:
+        await _broadcast({"type": "background_status", "cameras": self.snapshot()})
+
+    async def _loop(self, cam_key: str, state: _BgCamState, detector) -> None:
+        from detector import VideoStream as _VS
+        stream = _VS()
+        prev_sig: tuple | None = None
+        try:
+            await asyncio.to_thread(stream.switch_to, state.url)
+            while True:
+                try:
+                    _, frame = stream.read_frame()
+                    if frame is None:
+                        ok = await stream.reconnect()
+                        if not ok:
+                            state.status = "error"
+                            await self._emit()
+                            prev_sig = None
+                        await asyncio.sleep(self.POLL_S)
+                        continue
+
+                    dets = await asyncio.to_thread(detector.detect, frame)
+
+                    cls_cnt: dict[str, int] = {}
+                    if dets.class_id is not None:
+                        for cid in dets.class_id:
+                            cn = VEHICLE_CLASSES.get(int(cid), "unknown")
+                            cls_cnt[cn] = cls_cnt.get(cn, 0) + 1
+
+                    n = len(dets)
+                    state.vehicle_count = n
+                    state.class_counts  = cls_cnt
+                    state.status        = self._classify(n)
+                    state.updated_at    = time.time()
+
+                    await self.on_frame_result(cam_key, state, n, cls_cnt)
+                    new_sig = (state.status, state.vehicle_count)
+                    if new_sig != prev_sig:
+                        await self._emit()
+                        prev_sig = new_sig
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("BG monitor [%s] error: %s", cam_key, exc)
+                    state.status = "error"
+                    await self._emit()
+                    prev_sig = None
+
+                await asyncio.sleep(self.POLL_S)
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("BG monitor [%s] startup error: %s", cam_key, exc)
+            state.status = "error"
+        finally:
+            stream.release()
+
+
+_bg_monitor = BackgroundMonitor()
+
+
+# ── History 샘플러 + 정체 클러스터 ([B]/[C]) ──────────────────────────
+def _collect_snapshot_rows(now: float) -> list[SnapshotRow]:
+    """현 시점 bg 카메라 전체 + 라이브 카메라 1대를 SnapshotRow 리스트로."""
+    rows: list[SnapshotRow] = []
+
+    # 백그라운드 모니터 카메라들 (개수만, 속도 없음)
+    for cam_key, s in _bg_monitor.snapshot().items():
+        if s.get("status") in ("loading", "error"):
+            continue
+        rows.append(SnapshotRow(
+            ts=now, cam_key=cam_key,
+            name=s.get("name", ""), name_ko=s.get("name_ko", ""),
+            lat=s.get("lat", 0.0), lon=s.get("lon", 0.0),
+            source="bg",
+            vehicle_count=int(s.get("vehicle_count", 0)),
+            class_counts=json.dumps(s.get("class_counts", {})),
+            status=s.get("status", "normal"),
+            avg_speed_kph=None,
+        ))
+
+    # 라이브 카메라 (FrameAnalytics 캐시 — 평균 속도 포함)
+    fa, cam = _latest_live_analytics, _current_cam
+    if fa is not None and cam is not None and cam.get("cctvurl"):
+        live_key = roi_manager.camera_key(cam["cctvurl"])
+        # 같은 카메라가 bg 로도 모니터링 중이면 중복 저장 방지
+        if not _bg_monitor.is_monitored(live_key):
+            cnt = int(fa.get("vehicle_count", 0))
+            rows.append(SnapshotRow(
+                ts=now, cam_key=live_key,
+                name=cam.get("name", ""), name_ko=cam.get("name", ""),
+                lat=cam.get("lat", 0.0), lon=cam.get("lon", 0.0),
+                source="live",
+                vehicle_count=cnt,
+                class_counts=json.dumps(fa.get("class_counts", {})),
+                status=_bg_monitor._classify(cnt),
+                avg_speed_kph=fa.get("avg_speed_kph"),
+            ))
+    return rows
+
+
+async def _broadcast_clusters_if_changed() -> None:
+    """bg 스냅샷으로 정체 클러스터 1회 계산 → 변경 시에만 브로드캐스트."""
+    global _last_cluster_sig
+    clusters = compute_clusters(_bg_monitor.snapshot(), eps_m=CONGESTION_EPS_M)
+    sig = json.dumps(
+        [(c["id"], c["severity"], c["camera_count"]) for c in clusters],
+        sort_keys=True,
+    )
+    if sig == _last_cluster_sig:
+        return
+    _last_cluster_sig = sig
+    await _broadcast({"type": "congestion_clusters", "clusters": clusters})
+
+
+async def history_sampler_loop() -> None:
+    """단일 주기 샘플러 — bg+live 스냅샷 누적 저장 + 정체 클러스터 갱신.
+
+    detect 루프와 분리된 독립 주기(HISTORY_SAMPLE_S). 매 틱:
+      1) 모든 모니터 카메라 + 라이브 1대를 batched INSERT (1 트랜잭션)
+      2) 같은 스냅샷으로 클러스터 1회 계산 → 변경 시 broadcast
+      3) 보존 기간 경과 행 prune (틱마다 가벼운 DELETE)
+    """
+    prune_every = max(1, int(3600 / HISTORY_SAMPLE_S))  # ≈1시간마다
+    tick = 0
+    logger.info("History 샘플러 시작 (주기 %ds, 보존 %d일)",
+                HISTORY_SAMPLE_S, HISTORY_RETENTION_DAYS)
+    while True:
+        try:
+            now = time.time()
+            rows = _collect_snapshot_rows(now)
+            if rows:
+                await asyncio.to_thread(_history.record_many, rows)
+            await _broadcast_clusters_if_changed()
+
+            # 측정 자동 flush — 프레임이 처리됐을 때만 eval_*.csv + eval_summary.json 갱신
+            if getattr(_metrics, "_frames", 0) > 0:
+                await asyncio.to_thread(_metrics.report)
+
+            tick += 1
+            if tick % prune_every == 0:
+                cutoff = retention_cutoff(HISTORY_RETENTION_DAYS, now)
+                deleted = await asyncio.to_thread(_history.prune, cutoff)
+                if deleted:
+                    logger.info("History prune: %d개 행 삭제", deleted)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("History 샘플러 오류: %s", exc)
+        await asyncio.sleep(HISTORY_SAMPLE_S)
+
+
 # ── 앱 생명주기 ───────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -338,14 +624,21 @@ async def lifespan(app: FastAPI):
     stream   = VideoStream()
     app.state.stream   = stream
     app.state.detector = detector
+    _metrics.set_context(
+        backend=detector.tracker_info.get("backend", ""),
+        tracker=detector.tracker_info.get("tracker", ""),
+    )
     task         = asyncio.create_task(live_loop(detector, stream))
     refresh_task = asyncio.create_task(hls_refresh_loop(stream))
     its_task     = asyncio.create_task(_its_speed_poll_loop())
+    hist_task    = asyncio.create_task(history_sampler_loop())
 
     yield
     task.cancel()
     refresh_task.cancel()
     its_task.cancel()
+    hist_task.cancel()
+    _history.close()
     if hasattr(app.state, "stream"):
         app.state.stream.release()
 
@@ -376,28 +669,56 @@ async def ws_endpoint(ws: WebSocket):
 
 
 # ── CCTV 이름 한영 병기 ───────────────────────────────────────────────
-def _korname_to_en(name: str) -> str:
-    """ITS CCTV 한국어 이름에서 영어 약칭을 파싱해 괄호로 병기한다."""
-    en_parts: list[str] = []
-
+def _en_road_parts(name: str) -> list[str]:
+    """도로명 영어 약칭 (국도/지방도/고속) — 두 변환 함수의 공통 코어."""
+    parts: list[str] = []
     m = re.search(r'국도\s*(\d+)\s*호선?', name)
     if m:
-        en_parts.append(f"Nat'l Rt.{m.group(1)}")
-
+        parts.append(f"National Route {m.group(1)}")
     m = re.search(r'지방도\s*(\d+)\s*호?', name)
     if m:
-        en_parts.append(f"Prov.Rt.{m.group(1)}")
-
+        parts.append(f"Provincial Route {m.group(1)}")
     if re.search(r'고속(도로|국도)', name):
-        en_parts.append("Expwy")
+        parts.append("Expressway")
+    return parts
 
+
+def _en_dir_parts(name: str) -> list[str]:
+    """방향 영어 약칭 (상행/하행/양방향) — 두 변환 함수의 공통 코어."""
     if '상행' in name:
-        en_parts.append("NB↑")
-    elif '하행' in name:
-        en_parts.append("SB↓")
-    elif '양방향' in name:
-        en_parts.append("Both↕")
+        return ["NB↑"]
+    if '하행' in name:
+        return ["SB↓"]
+    if '양방향' in name:
+        return ["Both↕"]
+    return []
 
+
+def _en_only_name(name: str) -> str:
+    """ITS CCTV 한국어 이름에서 영어만으로 구성된 약칭을 반환한다.
+    인식 가능한 패턴이 없으면 빈 문자열 반환 (프론트엔드 fallback 처리)."""
+    en_parts: list[str] = _en_road_parts(name)
+
+    # ASCII 위치 힌트 추출 (IC, JC, TG, SA — 한국 도로명에 포함된 영어 약어)
+    seen: set[str] = set()
+    for hint in re.findall(r'\b(IC|JC|TG|SA)\b', name, re.IGNORECASE):
+        hu = hint.upper()
+        if hu not in seen:
+            seen.add(hu)
+            en_parts.append(hu)
+
+    # 구간 번호 (예: 1-1구간, 2구간)
+    m = re.search(r'(\d+[-–]\d+)\s*구간', name)
+    if m:
+        en_parts.append(f"Sec {m.group(1)}")
+
+    en_parts.extend(_en_dir_parts(name))
+    return " ".join(en_parts)  # 패턴 없으면 빈 문자열
+
+
+def _korname_to_en(name: str) -> str:
+    """ITS CCTV 한국어 이름에 영어 약칭을 괄호로 병기한다."""
+    en_parts = _en_road_parts(name) + _en_dir_parts(name)
     if not en_parts:
         return name
     return f"{name} ({' '.join(en_parts)})"
@@ -436,11 +757,17 @@ async def get_cctvs(
                     lon = float(item.get("coordx") or 0)
                     if not (lat and lon):
                         continue
-                    url  = item.get("cctvurl", "")
-                    name = _korname_to_en(item.get("cctvname", ""))
+                    url     = item.get("cctvurl", "")
+                    name_ko = item.get("cctvname", "")
+                    name    = _korname_to_en(name_ko)
+                    name_en = _en_only_name(name_ko)
+                    cam_key = roi_manager.camera_key(url) if url else None
                     result.append({
                         "id":      url or name,
                         "name":    name,
+                        "name_ko": name_ko,
+                        "name_en": name_en,
+                        "cam_key": cam_key,
                         "lat":     lat,
                         "lon":     lon,
                         "cctvurl": url,
@@ -449,12 +776,109 @@ async def get_cctvs(
                     })
                 except (ValueError, TypeError):
                     continue
+            # 동일 name_en 중복 구분: 위도 순 정렬 후 (1)(2)... 부여
+            _name_buckets: dict[str, list] = {}
+            for item in result:
+                key = item["name_en"]
+                if key:
+                    _name_buckets.setdefault(key, []).append(item)
+            for _key, _items in _name_buckets.items():
+                if len(_items) > 1:
+                    _items.sort(key=lambda x: x.get("lat", 0))
+                    for _idx, _item in enumerate(_items, 1):
+                        _item["name_en"] = f"{_key} ({_idx})"
+
             logger.info("CCTV 조회 완료: %d개 (캐시 저장)", len(result))
             _cctv_cache[cache_key] = result
             return result
     except Exception as e:
         logger.warning("CCTV 목록 조회 실패: %s", e)
         return []
+
+
+# ── 백그라운드 모니터링 엔드포인트 ────────────────────────────────────
+class _BgAddBody(BaseModel):
+    cam_key: str
+    name:    str   = ""
+    name_ko: str   = ""
+    url:     str
+    lat:     float = 0.0
+    lon:     float = 0.0
+
+
+@app.post("/background/add")
+async def background_add(body: _BgAddBody, request: Request):
+    """카메라를 백그라운드 모니터링 목록에 추가."""
+    await _bg_monitor.add(
+        cam_key = body.cam_key,
+        name    = body.name or body.cam_key,
+        name_ko = body.name_ko or body.name or body.cam_key,
+        url     = body.url,
+        lat     = body.lat,
+        lon     = body.lon,
+        detector= request.app.state.detector,
+    )
+    return {"ok": True}
+
+
+@app.post("/background/remove/{cam_key}")
+async def background_remove(cam_key: str):
+    """카메라를 백그라운드 모니터링 목록에서 제거."""
+    await _bg_monitor.remove(cam_key)
+    return {"ok": True}
+
+
+@app.get("/background/status")
+async def background_status_endpoint():
+    """현재 백그라운드 모니터링 중인 카메라들의 상태 반환."""
+    return _bg_monitor.snapshot()
+
+
+# ── 히스토리 분석 엔드포인트 ([C]) ────────────────────────────────────
+@app.get("/history/cameras")
+async def history_cameras():
+    """기록이 있는 카메라 목록 (드롭다운용)."""
+    return await asyncio.to_thread(_history.cameras)
+
+
+@app.get("/history/series")
+async def history_series(
+    cam_key: str = Query(...),
+    hours: float = Query(24.0),
+    bucket_s: int = Query(300),
+):
+    """시간 버킷별 평균 차량수 / 평균 속도 시계열."""
+    since = time.time() - hours * 3600.0
+    return await asyncio.to_thread(_history.series, cam_key, since, bucket_s)
+
+
+@app.get("/history/peak")
+async def history_peak(cam_key: str = Query(...), hours: float = Query(24.0)):
+    """기간 내 피크타임(최대 차량수 시점)."""
+    since = time.time() - hours * 3600.0
+    return await asyncio.to_thread(_history.peak, cam_key, since) or {}
+
+
+@app.get("/history/export.csv")
+async def history_export_csv(cam_key: str = Query(...), hours: float = Query(24.0)):
+    """기간 내 raw 스냅샷을 CSV 로 내보내기."""
+    since = time.time() - hours * 3600.0
+    rows = await asyncio.to_thread(_history.export_rows, cam_key, since)
+    lines = ["timestamp_iso,ts,source,vehicle_count,status,avg_speed_kph"]
+    for r in rows:
+        iso = datetime.fromtimestamp(r["ts"], tz=timezone.utc).isoformat()
+        spd = "" if r["avg_speed_kph"] is None else r["avg_speed_kph"]
+        lines.append(
+            f'{iso},{r["ts"]:.1f},{r["source"]},{r["vehicle_count"]},'
+            f'{r["status"]},{spd}'
+        )
+    csv = "\n".join(lines)
+    fname = f"traffic_{cam_key[:8]}_{int(time.time())}.csv"
+    return Response(
+        content=csv,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 # ── 카메라 전환 ───────────────────────────────────────────────────────
@@ -705,7 +1129,10 @@ async def ws_detect(ws: WebSocket):
             # GPS 변환 + VehicleState 생성
             vehicles = _build_vehicles(tracked, frame_wh=(fw, fh))
             fid += 1
-            result = analytics.update(fid, fid / FPS * 1000, vehicles, in_cnt, out_cnt, in_ids, out_ids)
+            # 브라우저 캔버스 프레임은 실시간 도착 → 벽시계를 속도 시간축으로 사용
+            # (합성 fid/FPS 는 처리 지연 시 dt 과소계산 → 속도 0 버그 원인)
+            result = analytics.update(fid, time.monotonic() * 1000, vehicles, in_cnt, out_cnt, in_ids, out_ids)
+            _metrics.add_frame(result.vehicles)  # 브라우저 경로: 추적/속도/탐지 통계 누적
             await _broadcast(_inject_its_speed(result.to_dict()))
             await ws.send_bytes(ann_bytes)
 
@@ -823,7 +1250,6 @@ async def save_calibration(body: CalibBody):
             data = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
         except Exception:
             pass
-    from datetime import datetime, timezone
     data[cam_key] = {
         "pixel_pts": body.pixel_pts,
         "gps_pts":   body.gps_pts,
@@ -915,12 +1341,13 @@ async def video_stream():
         last_sent: bytes | None = None
         while True:
             jpeg = _latest_frame_jpeg
+            sleep_s = 1.0 / max(_stream_fps, 1.0)
             if jpeg is None or jpeg is last_sent:
-                await asyncio.sleep(0.04)
+                await asyncio.sleep(sleep_s)
                 continue
             last_sent = jpeg
             yield boundary + jpeg + b"\r\n"
-            await asyncio.sleep(0.04)  # 최대 25 fps
+            await asyncio.sleep(sleep_s)
 
     return StreamingResponse(
         generate(),
@@ -938,12 +1365,13 @@ async def video_stream_yolo():
         last_sent: bytes | None = None
         while True:
             jpeg = _latest_annotated_jpeg
+            sleep_s = 1.0 / max(_stream_fps, 1.0)
             if jpeg is None or jpeg is last_sent:
-                await asyncio.sleep(0.04)
+                await asyncio.sleep(sleep_s)
                 continue
             last_sent = jpeg
             yield boundary + jpeg + b"\r\n"
-            await asyncio.sleep(0.04)
+            await asyncio.sleep(sleep_s)
 
     return StreamingResponse(
         generate(),
@@ -966,6 +1394,82 @@ async def nearby_nodes(
         return {"nodes": nodes}
     except FileNotFoundError:
         return {"nodes": []}
+
+
+# ── 카메라 정지 ──────────────────────────────────────────────────────
+@app.post("/stop-camera")
+async def stop_camera():
+    """프론트엔드 카메라 패널 종료 시 스트림 해제 + YOLO 처리 중지."""
+    global _current_cam, _latest_frame_jpeg, _latest_annotated_jpeg
+    stream = getattr(app.state, "stream", None)
+    if stream:
+        await asyncio.to_thread(stream.release)
+    det = getattr(app.state, "detector", None)
+    if det is not None:
+        det.reset_tracker()
+    _current_cam = None
+    _latest_frame_jpeg = None
+    _latest_annotated_jpeg = None
+    _set_viewer_active(False)
+    logger.info("카메라 스트림 해제 (프론트엔드 요청)")
+    return {"ok": True}
+
+
+# ── 라이브 시청 상태 ──────────────────────────────────────────────────
+class _ViewerState(BaseModel):
+    active: bool
+
+
+def _set_viewer_active(active: bool) -> None:
+    global _live_viewer_active
+    if _live_viewer_active == active:
+        return
+    _live_viewer_active = active
+    if not active:
+        # 미시청 전환 → 재개 시 깨끗한 트래커 보장
+        det = getattr(app.state, "detector", None)
+        if det is not None:
+            det.reset_tracker()
+    logger.info("라이브 시청 상태: %s", "active" if active else "inactive")
+
+
+@app.post("/viewer-active")
+async def viewer_active(body: _ViewerState):
+    """프론트가 (카메라 선택 × 페이지 visible) 상태를 보고 → 미시청 시 라이브 YOLO 중단."""
+    _set_viewer_active(body.active)
+    return {"ok": True}
+
+
+# ── 속도 진단 토글 (브라우저에서 켜고 끄기) ──────────────────────────
+@app.get("/speed-debug/{state}")
+async def speed_debug_toggle(state: str):
+    """state=on|off|status. 브라우저에서 http://localhost:8000/speed-debug/on 으로 즉시 토글.
+
+    on  → backend/speed_debug.log 에 per-frame 속도 진단 기록 시작
+    off → 기록 중지
+    status → 현재 상태/파일 크기 확인
+    """
+    if state in ("on", "off"):
+        path = set_speed_debug(state == "on")
+        logger.info("속도 진단 로깅 %s (%s)", state, path)
+    elif state != "status":
+        return {"error": "state must be on|off|status"}
+    return speed_debug_status()
+
+
+# ── 측정 리포트 (실행 중 자동 수집) ──────────────────────────────────
+@app.get("/eval/report")
+async def eval_report():
+    """현재까지 누적된 측정값을 집계해 backend/eval_*.csv + eval_summary.json 으로
+    저장하고 JSON(markdown 표 포함)으로 반환. 카메라를 보는 동안 자동 누적됨."""
+    return await asyncio.to_thread(_metrics.report)
+
+
+@app.post("/eval/reset")
+async def eval_reset():
+    """측정 누적값 초기화 (새 실험 시작)."""
+    _metrics.reset()
+    return {"ok": True}
 
 
 # ── 헬스체크 ──────────────────────────────────────────────────────────
@@ -1024,6 +1528,11 @@ def _inject_its_speed(payload: dict) -> dict:
 
 # ── 브로드캐스트 헬퍼 ─────────────────────────────────────────────────
 async def _broadcast(payload: dict) -> None:
+    # FrameAnalytics(라이브 카메라) 최신값을 캐시 — I/O 없는 메모리 캡처만.
+    # 실제 DB 저장은 history_sampler_loop 가 주기적으로 담당한다.
+    if "frame_id" in payload:
+        global _latest_live_analytics
+        _latest_live_analytics = payload
     if not _clients:
         return
     msg = json.dumps(payload)
@@ -1043,8 +1552,12 @@ async def _safe_send(ws: WebSocket, msg: str) -> None:
 # ════════════════════════════════════════════════════════════════════════
 # LIVE 파이프라인 (서버사이드 HLS 직접 처리)
 # ════════════════════════════════════════════════════════════════════════
-async def _refresh_stream_url(stream: "VideoStream") -> None:
-    """ITS API에서 현재 카메라 URL을 즉시 갱신. 토큰 만료 복구용."""
+async def _refresh_hls_url_from_its(stream: "VideoStream", *, force: bool) -> None:
+    """ITS API에서 현재 카메라의 신선한 HLS URL을 조회해 live_loop 큐에 투입.
+
+    force=True : 토큰 만료 긴급 복구 — URL 동일 여부 무관하게 갱신.
+    force=False: 주기 갱신 — 기존 stream.url과 다를 때만 갱신.
+    """
     cam = _current_cam
     if cam is None or not cam.get("name"):
         return
@@ -1055,6 +1568,7 @@ async def _refresh_stream_url(stream: "VideoStream") -> None:
         "minY": str(lat - 0.002), "maxY": str(lat + 0.002),
         "getType": "json",
     }
+    label = "긴급 갱신 (토큰 만료)" if force else "갱신"
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(ITS_BASE_URL, params=params)
@@ -1063,8 +1577,8 @@ async def _refresh_stream_url(stream: "VideoStream") -> None:
         for item in items:
             if item.get("cctvname") == name:
                 new_url = item.get("cctvurl", "")
-                if new_url:
-                    logger.info("HLS URL 긴급 갱신 (토큰 만료): %s", name)
+                if new_url and (force or new_url != stream.url):
+                    logger.info("HLS URL %s: %s", label, name)
                     _current_cam["cctvurl"] = new_url
                     await _camera_queue.put({
                         "url":          new_url,
@@ -1082,7 +1596,12 @@ async def _refresh_stream_url(stream: "VideoStream") -> None:
                     })
                 break
     except Exception as e:
-        logger.warning("HLS URL 긴급 갱신 실패: %s", e)
+        logger.warning("HLS URL %s 실패: %s", label, e)
+
+
+async def _refresh_stream_url(stream: "VideoStream") -> None:
+    """ITS API에서 현재 카메라 URL을 즉시 갱신. 토큰 만료 복구용."""
+    await _refresh_hls_url_from_its(stream, force=True)
 
 
 async def live_loop(detector, stream) -> None:
@@ -1092,6 +1611,7 @@ async def live_loop(detector, stream) -> None:
     target_interval = 1.0 / FPS
     skip_budget    = 0
     _reconnect_fails = 0  # 연속 reconnect 실패 횟수
+    global _stream_fps
 
     logger.info("Live 루프 대기 중 — 지도에서 CCTV를 클릭하여 스트림을 시작하세요")
 
@@ -1124,8 +1644,12 @@ async def live_loop(detector, stream) -> None:
                 analytics.cam_lon = snap_lon
                 tracker = VehicleTracker()
                 analytics.reset()
+                _metrics.set_context(source=cam.get("name", ""))
                 skip_budget = 0
                 _reconnect_fails = 0
+                _stream_fps = stream.fps or FPS
+                target_interval = 1.0 / _stream_fps
+                logger.info("스트림 FPS: %.1f (target_interval=%.3fs)", _stream_fps, target_interval)
 
                 # 수동으로 저장된 ROI만 적용 (auto-estimate는 탐지 정확도를 해칠 수 있어 자동 적용 안 함)
                 cam_url = cam["url"]
@@ -1223,6 +1747,13 @@ async def live_loop(detector, stream) -> None:
                     await _refresh_stream_url(stream)
             continue
 
+        # 라이브 미시청 시: 스트림만 keep-alive(위 read_frame 으로 수행됨),
+        # YOLO·자동캘리브·JPEG 인코딩·broadcast 모두 스킵해 GPU/CPU 낭비 차단.
+        # _clients 가 비면(브라우저 종료) visibilitychange 없이도 자동 정지.
+        if not (_current_cam and _live_viewer_active and _clients):
+            await asyncio.sleep(0.5)
+            continue
+
         # 차선 감지 자동 캘리브레이션 (수동 캘리브 없을 때, 최초 N프레임 시도)
         if _auto_calib_attempts > 0 and frame is not None:
             _auto_calib_attempts -= 1
@@ -1269,7 +1800,7 @@ async def live_loop(detector, stream) -> None:
 
         t0 = time.perf_counter()
         payload = await asyncio.to_thread(
-            _live_process, frame_id, frame, detector, tracker, stream.fps
+            _live_process, frame_id, frame, detector, tracker, stream.pos_msec
         )
         if payload:
             await _broadcast(payload)
@@ -1281,13 +1812,39 @@ async def live_loop(detector, stream) -> None:
             await asyncio.sleep(target_interval - elapsed)
 
 
-def _live_process(frame_id, frame, detector, tracker, fps: float = 30.0) -> dict | None:
+# ── 속도 계산용 실시간 타임라인 ───────────────────────────────────────
+# 프레임 PTS(CAP_PROP_POS_MSEC) delta를 우선 사용하고, PTS가 0/비단조(카메라 전환,
+# 미지원 스트림)면 벽시계 delta로 폴백하여 단조 증가하는 ms 타임라인을 만든다.
+# 기존 frame_id/fps 합성값은 HLS 드롭/버퍼링 시 dt를 과소계산 → 속도 과대추정 →
+# MAX_REASONABLE_KPH 가드에 걸려 0으로 방치되는 버그의 원인이었다.
+_spd_pts_prev:  float | None = None
+_spd_wall_prev: float | None = None
+_spd_clock_ms:  float = 0.0
+
+
+def _speed_timestamp_ms(pos_msec: float) -> float:
+    global _spd_pts_prev, _spd_wall_prev, _spd_clock_ms
+    now = time.monotonic() * 1000.0
+    if _spd_pts_prev is None:
+        _spd_pts_prev, _spd_wall_prev = pos_msec, now
+        return _spd_clock_ms
+    d_pts = pos_msec - _spd_pts_prev
+    d_wall = now - _spd_wall_prev
+    # PTS가 합리적으로 전진(0~10s)했으면 PTS delta, 아니면 벽시계 delta
+    _spd_clock_ms += d_pts if 0.0 < d_pts < 10000.0 else max(0.0, d_wall)
+    _spd_pts_prev, _spd_wall_prev = pos_msec, now
+    return _spd_clock_ms
+
+
+def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> dict | None:
     global _frame_count, _latest_annotated_jpeg
 
     h, w = frame.shape[:2]
-    timestamp_ms = frame_id / fps * 1000  # 처리 지연 무관, 프레임 번호 기반
+    timestamp_ms = _speed_timestamp_ms(pos_msec)  # 실시간 타임라인 (PTS 우선)
 
+    _t0 = time.perf_counter()
     tracked = detector.track(frame)
+    _track_ms = (time.perf_counter() - _t0) * 1000.0
     tracked, in_cnt, out_cnt, in_ids, out_ids = tracker.update(tracked, (w, h))
 
     # YOLO annotated 프레임 생성 → /video-stream-yolo 버퍼
@@ -1307,64 +1864,31 @@ def _live_process(frame_id, frame, detector, tracker, fps: float = 30.0) -> dict
     except Exception:
         pass
 
+    _t0 = time.perf_counter()
     vehicles = _build_vehicles(tracked, frame_wh=(w, h))
+    _transform_ms = (time.perf_counter() - _t0) * 1000.0
     _frame_count += 1
+    _t0 = time.perf_counter()
     result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt, in_ids, out_ids)
+    _analytics_ms = (time.perf_counter() - _t0) * 1000.0
+    _metrics.add_frame(result.vehicles, _track_ms, _transform_ms, _analytics_ms)
     return _inject_its_speed(result.to_dict())
 
 
 # ── ITS 구간속도 폴링 ─────────────────────────────────────────────────
 async def _its_speed_poll_loop() -> None:
-    """5분(API 집계주기)마다 ITS 구간속도 갱신. 카메라 선택 시에만 실제 조회."""
+    """ITS_POLL_INTERVAL(기본 5분)마다 ITS 구간속도 갱신. 카메라 선택 시에만 실제 조회."""
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(ITS_POLL_INTERVAL)
         await _update_its_speed()
 
 
 # ── HLS URL 자동 갱신 (서버사이드 live_loop 용) ───────────────────────
 async def hls_refresh_loop(stream) -> None:
-    """ITS HLS 토큰 만료 전 URL 갱신 (30분마다)."""
-    REFRESH_INTERVAL = 1800
+    """ITS HLS 토큰 만료 전 URL 갱신 (HLS_REFRESH_INTERVAL, 기본 30분)."""
     while True:
-        await asyncio.sleep(REFRESH_INTERVAL)
-        cam = _current_cam
-        if cam is None or not cam.get("name"):
-            continue
-        lat, lon, name = cam["lat"], cam["lon"], cam["name"]
-        params = {
-            "apiKey": ITS_API_KEY, "type": "its", "cctvType": "1",
-            "minX": str(lon - 0.002), "maxX": str(lon + 0.002),
-            "minY": str(lat - 0.002), "maxY": str(lat + 0.002),
-            "getType": "json",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                resp = await client.get(ITS_BASE_URL, params=params)
-                resp.raise_for_status()
-                items = _parse_its_items(resp.json())
-            for item in items:
-                if item.get("cctvname") == name:
-                    new_url = item.get("cctvurl", "")
-                    if new_url and new_url != stream.url:
-                        logger.info("HLS URL 갱신: %s", name)
-                        await _camera_queue.put({
-                            "url":          new_url,
-                            "lat":          lat,
-                            "lon":          lon,
-                            "name":         name,
-                            "snap_lat":     cam.get("snap_lat", lat),
-                            "snap_lon":     cam.get("snap_lon", lon),
-                            "road_width_m": cam.get("road_width_m"),
-                            "is_oneway":    cam.get("is_oneway"),
-                            "road_bearing": cam.get("road_bearing"),
-                            "name_bearing": cam.get("name_bearing"),
-                            "road_pts":     cam.get("road_pts"),
-                            "snap_along_m": cam.get("snap_along_m"),
-                        })
-                        _current_cam["cctvurl"] = new_url
-                    break
-        except Exception as e:
-            logger.warning("HLS URL 갱신 실패: %s", e)
+        await asyncio.sleep(HLS_REFRESH_INTERVAL)
+        await _refresh_hls_url_from_its(stream, force=False)
 
 
 # ── 진입점 ────────────────────────────────────────────────────────────

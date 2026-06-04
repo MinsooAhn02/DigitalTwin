@@ -5,9 +5,10 @@ import CalibrationMode, { CALIB_COLORS } from "./CalibrationMode";
 import { useLang } from "../i18n/index.jsx";
 
 const PANEL_W = 720;
-const MJPEG_URL      = "http://localhost:8000/video-stream";
-const MJPEG_YOLO_URL = "http://localhost:8000/video-stream-yolo";
-const HLS_PROXY = (url) => `http://localhost:8000/hls-proxy?url=${encodeURIComponent(url)}`;
+const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const MJPEG_URL      = `${API_BASE}/video-stream`;
+const MJPEG_YOLO_URL = `${API_BASE}/video-stream-yolo`;
+const HLS_PROXY = (url) => `${API_BASE}/hls-proxy?url=${encodeURIComponent(url)}`;
 const DEFAULT_RUNTIME_CONFIG = {
   captureIntervalMs: 33,
   captureWidth: 640,
@@ -123,7 +124,7 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
   const [roiState, setRoiState]           = useState(null);
 
   useEffect(() => {
-    fetch("http://localhost:8000/runtime-config")
+    fetch(`${API_BASE}/runtime-config`)
       .then((r) => r.json())
       .then((config) => setRuntimeConfig({ ...DEFAULT_RUNTIME_CONFIG, ...config }))
       .catch(() => setRuntimeConfig(DEFAULT_RUNTIME_CONFIG));
@@ -172,7 +173,7 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
         networkErrCount = 0;
         if (d.type === Hls.ErrorTypes.NETWORK_ERROR) {
           fetch(
-            `http://localhost:8000/cctv-refresh?name=${encodeURIComponent(cctv.name || "")}&lat=${cctv.lat}&lon=${cctv.lon}`
+            `${API_BASE}/cctv-refresh?name=${encodeURIComponent(cctv.name || "")}&lat=${cctv.lat}&lon=${cctv.lon}`
           )
             .then((r) => r.json())
             .then(({ cctvurl }) => {

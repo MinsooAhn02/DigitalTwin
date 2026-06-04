@@ -10,7 +10,7 @@
 
 import { useMemo } from "react";
 import { PathLayer } from "@deck.gl/layers";
-import { DIRECTION_COLORS } from "../utils/colorMap";
+import { getVehicleColor } from "../utils/colorMap";
 
 const MAX_TRAIL_LENGTH = 60;   // 최대 60 프레임(약 2초) 궤적 유지
 
@@ -39,9 +39,8 @@ export function updateTrailMap(prev, vehicles) {
 
 /**
  * @param {Map<number, {path, direction}>} trailMap
- * @param {Array} vehicles
  */
-export function useTrailLayer(trailMap, vehicles) {
+export function useTrailLayer(trailMap) {
   return useMemo(() => {
     const data = [...trailMap.entries()].map(([id, t]) => ({
       id,
@@ -54,8 +53,8 @@ export function useTrailLayer(trailMap, vehicles) {
       data,
       getPath:      (d) => d.path,
       getColor:     (d) => {
-        const base = DIRECTION_COLORS[d.direction] ?? DIRECTION_COLORS.Unknown;
-        return [base[0], base[1], base[2], 130];   // 반투명 궤적
+        const [r, g, b] = getVehicleColor(d.direction);
+        return [r, g, b, 130];   // 반투명 궤적
       },
       getWidth:     2,
       widthUnits:   "pixels",
@@ -63,5 +62,5 @@ export function useTrailLayer(trailMap, vehicles) {
       capRounded:   true,
       updateTriggers: { getColor: [...trailMap.values()].map((t) => t.direction) },
     });
-  }, [trailMap, vehicles]);
+  }, [trailMap]);
 }

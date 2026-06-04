@@ -7,7 +7,10 @@ import ClassBarChart  from "./components/ClassBarChart";
 import VehicleTable   from "./components/VehicleTable";
 import CounterPanel  from "./components/CounterPanel";
 import CctvPlayer    from "./components/CctvPlayer";
+import HistoryPanel  from "./components/HistoryPanel";
 import { useLang }   from "./i18n/index.jsx";
+
+const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
 const INITIAL_VIEW = {
   longitude: 127.0386,
@@ -32,7 +35,7 @@ function trailReducer(state, vehicles) {
 }
 
 export default function App() {
-  const { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo } = useWebSocket();
+  const { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo, backgroundStatus, congestionClusters } = useWebSocket();
   const { t, lang, setLang } = useLang();
   const [trailMap, dispatchTrail]         = useReducer(trailReducer, new Map());
   const [cctvList, setCctvList]           = useState([]);
@@ -47,6 +50,8 @@ export default function App() {
   const [snapNodes, setSnapNodes]         = useState([]);
   const [calibTabActive, setCalibTabActive] = useState(false);
   const [mapMode, setMapMode]             = useState("dark");
+  const [monitoredCams, setMonitoredCams] = useState(new Set());
+  const [sidebarTab, setSidebarTab]       = useState("live");  // "live" | "monitor"
   const switchDebounceRef                 = useRef(null);
   const switchTimeoutRef                  = useRef(null);
 
@@ -57,10 +62,26 @@ export default function App() {
     }
   }, [cameraReady]);
 
+  // 라이브 시청 상태(카메라 선택 × 페이지 visible)를 백엔드에 보고 →
+  // 미시청 시 라이브 YOLO 중단(GPU 절약). 백그라운드 모니터는 영향 없음.
+  useEffect(() => {
+    const report = () => {
+      const active = selectedCctv != null && document.visibilityState === "visible";
+      fetch(`${API_BASE}/viewer-active`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active }),
+      }).catch(() => {});
+    };
+    report();
+    document.addEventListener("visibilitychange", report);
+    return () => document.removeEventListener("visibilitychange", report);
+  }, [selectedCctv]);
+
   // 카메라 선택 시 주변 노드링크 노드 fetch (캘리브레이션 GPS 스냅용)
   useEffect(() => {
     if (!selectedCctv?.lat || !selectedCctv?.lon) { setSnapNodes([]); return; }
-    fetch(`http://localhost:8000/nodelink/nodes?lat=${selectedCctv.lat}&lon=${selectedCctv.lon}&radius_km=0.3`)
+    fetch(`${API_BASE}/nodelink/nodes?lat=${selectedCctv.lat}&lon=${selectedCctv.lon}&radius_km=0.3`)
       .then((r) => r.json())
       .then(({ nodes }) => setSnapNodes(nodes ?? []))
       .catch(() => setSnapNodes([]));
@@ -92,7 +113,7 @@ export default function App() {
 
   useEffect(() => {
     if (!cameraReadyInfo?.camera_key || !selectedCctv) return;
-    fetch(`http://localhost:8000/calibration/${cameraReadyInfo.camera_key}`)
+    fetch(`${API_BASE}/calibration/${cameraReadyInfo.camera_key}`)
       .then((r) => r.json())
       .then(({ calibration }) => {
         if (!calibration?.gps_pts) return;
@@ -125,15 +146,18 @@ export default function App() {
     if (activeData) dispatchTrail(vehicles);
   }, [activeData]);
 
+  const viewStateRef = useRef(viewState);
+  useEffect(() => { viewStateRef.current = viewState; }, [viewState]);
+
   const fetchCctvs = useCallback((vs) => {
-    const { minX, maxX, minY, maxY } = viewBbox(vs ?? viewState);
+    const { minX, maxX, minY, maxY } = viewBbox(vs ?? viewStateRef.current);
     setCctvLoading(true);
-    fetch(`http://localhost:8000/cctvs?minX=${minX}&maxX=${maxX}&minY=${minY}&maxY=${maxY}`)
+    fetch(`${API_BASE}/cctvs?minX=${minX}&maxX=${maxX}&minY=${minY}&maxY=${maxY}`)
       .then((r) => r.json())
       .then(setCctvList)
       .catch(() => {})
       .finally(() => setCctvLoading(false));
-  }, [viewState]);
+  }, []);
 
   useEffect(() => { fetchCctvs(INITIAL_VIEW); }, []);
 
@@ -143,7 +167,7 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [cctvList.length]);
 
-  const trailLayer = useTrailLayer(trailMap, vehicles);
+  const trailLayer = useTrailLayer(trailMap);
 
   const handleMapClick = useCallback((info) => {
     if (calMode !== "awaiting") return;
@@ -175,10 +199,10 @@ export default function App() {
     switchDebounceRef.current = setTimeout(() => {
       setSwitching(true);
       switchTimeoutRef.current = setTimeout(() => setSwitching(false), 10000);
-      fetch("http://localhost:8000/switch-camera", {
+      fetch(`${API_BASE}/switch-camera`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ cctvurl: cctv.cctvurl, lat: cctv.lat, lon: cctv.lon, name: cctv.name ?? "" }),
+        body:    JSON.stringify({ cctvurl: cctv.cctvurl, lat: cctv.lat, lon: cctv.lon, name: cctv.name_ko ?? cctv.name ?? "" }),
       }).catch(() => setSwitching(false));
     }, 300);
   }, [calMode]);
@@ -189,6 +213,32 @@ export default function App() {
     setSelectedCctv(updated);
     setCctvList((prev) => prev.map((c) => c.id === updated.id ? updated : c));
   }, [selectedCctv]);
+
+  const monitoredCamsRef = useRef(monitoredCams);
+  useEffect(() => { monitoredCamsRef.current = monitoredCams; }, [monitoredCams]);
+
+  const handleToggleMonitor = useCallback((c) => {
+    const camKey = c.cam_key;
+    if (!camKey || !c.cctvurl) return;
+    if (monitoredCamsRef.current.has(camKey)) {
+      fetch(`${API_BASE}/background/remove/${camKey}`, { method: "POST" }).catch(() => {});
+      setMonitoredCams((prev) => { const s = new Set(prev); s.delete(camKey); return s; });
+    } else {
+      fetch(`${API_BASE}/background/add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cam_key: camKey,
+          name:    c.name_en || c.name || c.id,
+          name_ko: c.name_ko || c.name || c.id,
+          url:     c.cctvurl,
+          lat:     c.lat ?? 0,
+          lon:     c.lon ?? 0,
+        }),
+      }).catch(() => {});
+      setMonitoredCams((prev) => new Set([...prev, camKey]));
+    }
+  }, []);
 
   const noCameraSelected = guideVisible && cctvList.length > 0 && !selectedCctv;
   return (
@@ -222,6 +272,8 @@ export default function App() {
           fovSnapLon={cameraReadyInfo?.snap_lon ?? selectedCctv?.lon ?? null}
           fovRoadPts={cameraReadyInfo?.road_pts ?? null}
           fovSnapAlongM={cameraReadyInfo?.snap_along_m ?? null}
+          backgroundStatus={backgroundStatus}
+          congestionClusters={congestionClusters}
         />
 
         {/* 연결 상태 칩 */}
@@ -245,22 +297,34 @@ export default function App() {
             border: "1px solid #fbbf24", whiteSpace: "nowrap",
           }}>
             <span style={{ color: "#fbbf24", fontSize: 15 }}>📷</span>
-            <span style={{ color: "#fde68a" }}>{selectedCctv.name || selectedCctv.id}</span>
-            <button onClick={() => setSelectedCctv(null)} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", padding: 0, marginLeft: 4, fontSize: 14 }}>✕</button>
+            <span style={{ color: "#fde68a" }}>{cctvDisplayName(selectedCctv, lang)}</span>
+            {selectedCctv.cam_key && selectedCctv.cctvurl && (
+              <button
+                onClick={() => handleToggleMonitor(selectedCctv)}
+                title={monitoredCams.has(selectedCctv.cam_key) ? t("app.stopMonitor") : t("app.monitor")}
+                style={{ background: "none", border: "none", cursor: "pointer", padding: "0 4px", fontSize: 13, opacity: 0.9 }}
+              >
+                <span style={{ color: monitoredCams.has(selectedCctv.cam_key) ? "#22c55e" : "#4b5563" }}>📡</span>
+              </button>
+            )}
+            <button onClick={() => { setSelectedCctv(null); fetch(`${API_BASE}/stop-camera`, { method: "POST" }).catch(() => {}); }} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", padding: 0, marginLeft: 2, fontSize: 14 }}>✕</button>
           </div>
         )}
 
-        {/* 카메라 미선택 안내 */}
+        {/* 카메라 미선택 안내 — 좌하단 작은 힌트 */}
         {noCameraSelected && (
           <div style={{
-            position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
-            background: "rgba(17,24,39,0.92)", padding: "18px 28px",
-            borderRadius: 12, fontSize: 14, backdropFilter: "blur(6px)",
-            border: "1px solid #374151", textAlign: "center", pointerEvents: "none",
+            position: "absolute", bottom: 60, left: 16,
+            background: "rgba(17,24,39,0.85)", padding: "8px 14px",
+            borderRadius: 8, fontSize: 12, backdropFilter: "blur(4px)",
+            border: "1px solid #374151", pointerEvents: "none",
+            display: "flex", alignItems: "center", gap: 8,
           }}>
-            <div style={{ fontSize: 28, marginBottom: 8 }}>📷</div>
-            <div style={{ color: "#f9fafb", fontWeight: 600, marginBottom: 4 }}>{t("app.clickCctv")}</div>
-            <div style={{ color: "#9ca3af", fontSize: 12 }}>{t("app.clickCctvSub")}</div>
+            <span style={{ fontSize: 16 }}>📷</span>
+            <div>
+              <div style={{ color: "#f9fafb", fontWeight: 600 }}>{t("app.clickCctv")}</div>
+              <div style={{ color: "#9ca3af", fontSize: 11, marginTop: 1 }}>{t("app.clickCctvSub")}</div>
+            </div>
           </div>
         )}
 
@@ -275,9 +339,6 @@ export default function App() {
             {t("app.switching")}
           </div>
         )}
-
-        {/* CCTV 검색 */}
-        <CctvSearch cctvList={cctvList} onSelect={handleCctvClick} viewState={viewState} />
 
         {/* CCTV 새로고침 버튼 */}
         <div style={{ position: "absolute", bottom: 56, right: 16, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -295,7 +356,7 @@ export default function App() {
           >
             {cctvLoading ? t("app.loading") : t("app.refreshCctv")}
           </button>
-          <div style={{ fontSize: 10, color: "#6b7280", textAlign: "center" }}>
+          <div style={{ fontSize: 11, color: "#9ca3af", textAlign: "center" }}>
             {t("app.nCameras", { n: cctvList.length })}
           </div>
         </div>
@@ -331,7 +392,10 @@ export default function App() {
 
         <CctvPlayer
           cctv={selectedCctv}
-          onClose={() => { setSelectedCctv(null); setCalMode(null); setPendingGps(null); }}
+          onClose={() => {
+            setSelectedCctv(null); setCalMode(null); setPendingGps(null);
+            fetch(`${API_BASE}/stop-camera`, { method: "POST" }).catch(() => {});
+          }}
           pendingGps={pendingGps}
           onNeedGps={() => { setPendingGps(null); setCalMode("awaiting"); }}
           onCancelGps={() => { setCalMode(null); setPendingGps(null); }}
@@ -341,131 +405,301 @@ export default function App() {
       </div>
 
       {/* 오른쪽: 사이드바 */}
-      <aside style={{
-        width: 360, display: "flex", flexDirection: "column", gap: 12,
-        padding: 16, background: "#111827",
-        borderLeft: "1px solid #1f2937", overflowY: "auto",
-      }}>
-        {/* 헤더: 타이틀 + 언어 토글 */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <h1 style={{ margin: 0, fontSize: 16, fontWeight: 700, letterSpacing: "-0.02em" }}>
-            {t("app.title")}
-          </h1>
-          <button
-            onClick={() => setLang(lang === "en" ? "ko" : "en")}
-            title={lang === "en" ? "한국어로 전환" : "Switch to English"}
-            style={{
-              background: "rgba(30,41,59,0.9)", border: "1px solid #334155",
-              borderRadius: 6, padding: "3px 10px", cursor: "pointer",
-              fontSize: 12, fontWeight: 700,
-              color: lang === "en" ? "#38bdf8" : "#fbbf24",
-            }}
-          >
-            {lang === "en" ? "KO" : "EN"}
-          </button>
+      <aside style={{ width: 360, display: "flex", flexDirection: "column", background: "#111827", borderLeft: "1px solid #1f2937" }}>
+        {/* 헤더 */}
+        <div style={{ padding: "14px 16px 0", flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+            <h1 style={{ margin: 0, fontSize: 15, fontWeight: 700, letterSpacing: "-0.02em" }}>{t("app.title")}</h1>
+            <button
+              onClick={() => setLang(lang === "en" ? "ko" : "en")}
+              title={lang === "en" ? "한국어로 전환" : "Switch to English"}
+              style={{ background: "rgba(30,41,59,0.9)", border: "1px solid #334155", borderRadius: 6, padding: "3px 10px", cursor: "pointer", fontSize: 12, fontWeight: 700, color: lang === "en" ? "#38bdf8" : "#fbbf24" }}
+            >
+              {lang === "en" ? "KO" : "EN"}
+            </button>
+          </div>
+
+          {/* 탭 바 */}
+          <div style={{ display: "flex", gap: 2, background: "#0f172a", borderRadius: 8, padding: 3, marginBottom: 12 }}>
+            {[
+              { key: "live",    label: t("tab.live") },
+              { key: "monitor", label: t("tab.background"), badge: monitoredCams.size || null },
+              { key: "history", label: t("tab.history") },
+            ].map(tab => (
+              <button key={tab.key} onClick={() => setSidebarTab(tab.key)}
+                style={{
+                  flex: 1, padding: "6px 0", borderRadius: 6, border: "none", cursor: "pointer",
+                  background: sidebarTab === tab.key ? "#1f2937" : "none",
+                  color: sidebarTab === tab.key ? "#f9fafb" : "#6b7280",
+                  fontSize: 12, fontWeight: sidebarTab === tab.key ? 600 : 400,
+                  position: "relative",
+                }}
+              >
+                {tab.label}
+                {tab.badge && (
+                  <span style={{ position: "absolute", top: 2, right: 6, background: "#3b82f6", color: "#fff", borderRadius: 999, fontSize: 9, padding: "1px 4px", fontWeight: 700 }}>
+                    {tab.badge}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <CounterPanel inCount={inCount} outCount={outCount} vehicleCount={vehicleCnt} />
+        {/* 탭 콘텐츠 */}
+        <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "0 16px 8px" }}>
 
-        {roadName && (
-          <Card label="도로 정보">
-            <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-              <div style={{ fontWeight: 600, color: "#e2e8f0", marginBottom: 4 }}>{roadName}</div>
-              <div style={{ display: "flex", gap: 16, color: "#94a3b8" }}>
-                {roadLanes != null && roadLanes > 0 && (
-                  <span>차로 <b style={{ color: "#e2e8f0" }}>{roadLanes}</b>개</span>
-                )}
-                {roadMaxSpd != null && roadMaxSpd > 0 && (
-                  <span>제한속도 <b style={{ color: "#fbbf24" }}>{roadMaxSpd}</b> km/h</span>
-                )}
-              </div>
-            </div>
-          </Card>
-        )}
+          {/* ── Live View 탭 ── */}
+          {sidebarTab === "live" && <>
+            <CounterPanel inCount={inCount} outCount={outCount} vehicleCount={vehicleCnt} />
 
-        {autoCalibInfo?.cam_h_m != null && (
-          <Card label="자동 캘리브레이션 추정값">
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 12, color: "#94a3b8" }}>
-              <span>카메라 높이</span>
-              <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.cam_h_m} m</b>
-              <span>도로 폭</span>
-              <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_width_m} m</b>
-              <span>근거리</span>
-              <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.near_m} m</b>
-              <span>원거리</span>
-              <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.far_m} m</b>
-              {autoCalibInfo.road_length_m != null && <>
-                <span>도로 가시거리</span>
-                <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_length_m} m</b>
-              </>}
-              <span>카메라 틸트</span>
-              <b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.pitch_deg}°</b>
-            </div>
-          </Card>
-        )}
-
-        {itsSpeed !== null && (
-          <Card label="ITS 구간속도 비교">
-            <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center", fontSize: 12 }}>
-              <div style={{ textAlign: "center" }}>
-                <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>측정 평균 (10분)</div>
-                <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>
-                  {ourAvgKph > 0 ? ourAvgKph.toFixed(1) : "—"}
-                </div>
-                {ourAvgKph > 0 && <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>}
-              </div>
-              <div style={{ color: "#374151", fontSize: 18 }}>vs</div>
-              <div style={{ textAlign: "center" }}>
-                <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>ITS 구간속도</div>
-                <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{itsSpeed.toFixed(1)}</div>
-                <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>
-              </div>
-              {speedErrPct !== null && ourAvgKph > 0 && (
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>오차</div>
-                  <div style={{
-                    fontWeight: 700, fontSize: 16,
-                    color: Math.abs(speedErrPct) < 10 ? "#34d399" : Math.abs(speedErrPct) < 20 ? "#fbbf24" : "#f87171",
-                  }}>
-                    {speedErrPct > 0 ? "+" : ""}{speedErrPct.toFixed(1)}%
+            {roadName && (
+              <CollapsibleCard label={t("app.roadInfo")}>
+                <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+                  <div style={{ fontWeight: 600, color: "#e2e8f0", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={roadName}>{roadName}</div>
+                  <div style={{ display: "flex", gap: 16, color: "#94a3b8" }}>
+                    {roadLanes != null && roadLanes > 0 && <span>{t("app.roadLanes", { n: roadLanes })}</span>}
+                    {roadMaxSpd != null && roadMaxSpd > 0 && (
+                      <span><b style={{ color: "#fbbf24" }}>{t("app.roadSpeedLimit", { n: roadMaxSpd })}</b></span>
+                    )}
                   </div>
                 </div>
-              )}
-            </div>
-            <div style={{ marginTop: 6, textAlign: "center", fontSize: 10, color: "#4b5563" }}>
-              보정 계수&nbsp;
-              <span style={{
-                color: scaleConverged ? "#34d399" : Math.abs(speedScale - 1) < 0.05 ? "#94a3b8" : "#fbbf24",
-                fontWeight: 700,
-              }}>
-                ×{speedScale.toFixed(3)}
-              </span>
-              &nbsp;
-              {scaleConverged
-                ? <span style={{ color: "#34d399" }}>✓ 수렴 (저장됨)</span>
-                : <span style={{ color: "#6b7280" }}>학습 중…</span>
-              }
-            </div>
-          </Card>
-        )}
+              </CollapsibleCard>
+            )}
 
-        <Card label={t("app.classDist")}>
-          <ClassBarChart classCounts={classCounts} />
-        </Card>
+            {autoCalibInfo?.cam_h_m != null && (
+              <CollapsibleCard label={t("app.autoCalib")} defaultOpen={false}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 12, color: "#94a3b8" }}>
+                  <span>{t("app.calibCamH")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.cam_h_m} m</b>
+                  <span>{t("app.calibRoadW")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_width_m} m</b>
+                  <span>{t("app.calibNear")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.near_m} m</b>
+                  <span>{t("app.calibFar")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.far_m} m</b>
+                  {autoCalibInfo.road_length_m != null && <>
+                    <span>{t("app.calibRoadLen")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_length_m} m</b>
+                  </>}
+                  <span>{t("app.calibTilt")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.pitch_deg}°</b>
+                </div>
+              </CollapsibleCard>
+            )}
 
-        <Card label={t("app.vehicleList")}>
-          <VehicleTable vehicles={vehicles} calibrated={isCalibrated} />
-        </Card>
+            {itsSpeed !== null && (
+              <CollapsibleCard label={t("app.itsCompare")} defaultOpen={false}>
+                <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center", fontSize: 12 }}>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsMeasured")}</div>
+                    <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{ourAvgKph > 0 ? ourAvgKph.toFixed(1) : "—"}</div>
+                    {ourAvgKph > 0 && <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>}
+                  </div>
+                  <div style={{ color: "#374151", fontSize: 18 }}>vs</div>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsSegment")}</div>
+                    <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{itsSpeed.toFixed(1)}</div>
+                    <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>
+                  </div>
+                  {speedErrPct !== null && ourAvgKph > 0 && (
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsError")}</div>
+                      <div style={{ fontWeight: 700, fontSize: 16, color: Math.abs(speedErrPct) < 10 ? "#34d399" : Math.abs(speedErrPct) < 20 ? "#fbbf24" : "#f87171" }}>
+                        {speedErrPct > 0 ? "+" : ""}{speedErrPct.toFixed(1)}%
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div style={{ marginTop: 6, textAlign: "center", fontSize: 10, color: "#4b5563" }}>
+                  {t("app.scaleFactor")}&nbsp;
+                  <span style={{ color: scaleConverged ? "#34d399" : Math.abs(speedScale - 1) < 0.05 ? "#94a3b8" : "#fbbf24", fontWeight: 700 }}>×{speedScale.toFixed(3)}</span>
+                  &nbsp;{scaleConverged ? <span style={{ color: "#34d399" }}>{t("app.scaleConverged")}</span> : <span style={{ color: "#6b7280" }}>{t("app.scaleLearning")}</span>}
+                </div>
+              </CollapsibleCard>
+            )}
+
+            <CollapsibleCard label={t("app.classDist")}>
+              <ClassBarChart classCounts={classCounts} />
+            </CollapsibleCard>
+
+            <CollapsibleCard label={t("app.vehicleList")}>
+              <VehicleTable vehicles={vehicles} calibrated={isCalibrated} />
+            </CollapsibleCard>
+          </>}
+
+          {/* ── Background 탭 ── */}
+          {sidebarTab === "monitor" && (
+            <MonitorPanel
+              monitoredCams={monitoredCams}
+              backgroundStatus={backgroundStatus}
+              cctvList={cctvList}
+              selectedCctv={selectedCctv}
+              lang={lang}
+              t={t}
+              onToggleMonitor={handleToggleMonitor}
+              onRemove={(camKey) => {
+                const c = cctvList.find((x) => x.cam_key === camKey);
+                if (c) handleToggleMonitor(c);
+                else {
+                  fetch(`${API_BASE}/background/remove/${camKey}`, { method: "POST" }).catch(() => {});
+                  setMonitoredCams((prev) => { const s = new Set(prev); s.delete(camKey); return s; });
+                }
+              }}
+            />
+          )}
+
+          {/* ── History 탭 ── */}
+          {sidebarTab === "history" && <HistoryPanel lang={lang} t={t} />}
+        </div>
+
+        {/* CctvSearch: 하단 고정 */}
+        <div style={{ padding: "10px 16px 14px", borderTop: "1px solid #1f2937", background: "#111827", flexShrink: 0 }}>
+          <CctvSearch cctvList={cctvList} onSelect={handleCctvClick} viewState={viewState} />
+        </div>
       </aside>
     </div>
   );
 }
 
-function Card({ children, label }) {
+function CollapsibleCard({ children, label, defaultOpen = true }) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
-    <div style={{ background: "#1f2937", borderRadius: 12, padding: 16 }}>
-      {label && <p style={{ margin: "0 0 8px", fontSize: 12, color: "#9ca3af" }}>{label}</p>}
-      {children}
+    <div style={{ background: "#1f2937", borderRadius: 12, overflow: "hidden" }}>
+      <button onClick={() => setOpen(v => !v)} style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        width: "100%", padding: "10px 16px", background: "none", border: "none",
+        cursor: "pointer", color: "#9ca3af", fontSize: 12, textAlign: "left",
+      }}>
+        <span>{label}</span>
+        <span style={{ fontSize: 9, color: "#4b5563" }}>{open ? "▲" : "▼"}</span>
+      </button>
+      {open && <div style={{ padding: "0 16px 14px" }}>{children}</div>}
+    </div>
+  );
+}
+
+const BG_STATUS_DOT = { normal: "#22c55e", busy: "#f97316", congested: "#ef4444", loading: "#9ca3af", error: "#6b7280" };
+
+function cctvDisplayName(c, lang) {
+  if (lang === "en") return c.name_en || (c.cam_key ? `CCTV ${c.cam_key.slice(0, 6)}` : c.id);
+  return c.name_ko || c.name || c.id;
+}
+
+function MonitorPanel({ monitoredCams, backgroundStatus, cctvList, selectedCctv, lang, t, onToggleMonitor, onRemove }) {
+  const [isAdding, setIsAdding] = useState(false);
+  const [addQuery, setAddQuery] = useState("");
+  const inputRef = useRef(null);
+
+  const addResults = useMemo(() => {
+    const q = addQuery.trim().toLowerCase();
+    const available = cctvList.filter(c => c.cam_key && c.cctvurl && !monitoredCams.has(c.cam_key));
+    if (!q) return available.slice(0, 6);
+    return available.filter(c => cctvDisplayName(c, lang).toLowerCase().includes(q)).slice(0, 6);
+  }, [cctvList, monitoredCams, addQuery, lang]);
+
+  useEffect(() => {
+    if (isAdding) setTimeout(() => inputRef.current?.focus(), 50);
+  }, [isAdding]);
+
+  const hasCams = monitoredCams.size > 0;
+
+  return (
+    <div style={{ background: "#1f2937", borderRadius: 12, padding: 14 }}>
+      {/* 헤더 */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: hasCams || isAdding ? 10 : 6 }}>
+        <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 600 }}>
+          {t("app.bgMonitor")}
+          {hasCams && <span style={{ color: "#6b7280", fontWeight: 400, marginLeft: 4 }}>({monitoredCams.size})</span>}
+        </span>
+        <div style={{ display: "flex", gap: 4 }}>
+          {/* 현재 보는 카메라 빠른 추가 */}
+          {selectedCctv?.cam_key && selectedCctv?.cctvurl && !monitoredCams.has(selectedCctv.cam_key) && (
+            <button
+              onClick={() => onToggleMonitor(selectedCctv)}
+              title={t("app.monitor")}
+              style={{ background: "rgba(34,197,94,0.12)", border: "1px solid #22c55e", borderRadius: 6, padding: "3px 8px", fontSize: 11, color: "#4ade80", cursor: "pointer" }}
+            >
+              📡 {t("app.monitor")}
+            </button>
+          )}
+          <button
+            onClick={() => { setIsAdding(v => !v); setAddQuery(""); }}
+            style={{ background: isAdding ? "transparent" : "rgba(59,130,246,0.12)", border: `1px solid ${isAdding ? "#4b5563" : "#3b82f6"}`, borderRadius: 6, padding: "3px 10px", fontSize: 11, color: isAdding ? "#9ca3af" : "#60a5fa", cursor: "pointer" }}
+          >
+            {isAdding ? t("calib.cancel") : `+ ${t("app.monitor")}`}
+          </button>
+        </div>
+      </div>
+
+      {/* 카메라 추가 검색 */}
+      {isAdding && (
+        <div style={{ marginBottom: hasCams ? 10 : 0 }}>
+          <div style={{ position: "relative", marginBottom: 4 }}>
+            <input
+              ref={inputRef}
+              value={addQuery}
+              onChange={e => setAddQuery(e.target.value)}
+              placeholder={t("cctv.search.placeholder")}
+              style={{
+                width: "100%", boxSizing: "border-box",
+                background: "#111827", border: "1px solid #374151",
+                borderRadius: 6, padding: "6px 28px 6px 10px",
+                fontSize: 12, color: "#f9fafb", outline: "none",
+              }}
+            />
+            <span style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: "#6b7280", fontSize: 12 }}>🔍</span>
+          </div>
+          <div style={{ borderRadius: 6, overflow: "hidden", border: "1px solid #374151" }}>
+            {addResults.length === 0
+              ? <div style={{ padding: "8px 10px", fontSize: 11, color: "#6b7280", background: "#111827" }}>{t("app.bgMonitorEmpty")}</div>
+              : addResults.map(c => (
+                <button key={c.id} onClick={() => onToggleMonitor(c)}
+                  style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    width: "100%", textAlign: "left", padding: "8px 10px",
+                    fontSize: 11, background: "#111827", border: "none",
+                    borderBottom: "1px solid #1f2937", color: "#d1d5db", cursor: "pointer",
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = "#1e293b"}
+                  onMouseLeave={e => e.currentTarget.style.background = "#111827"}
+                >
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    📷 {cctvDisplayName(c, lang)}
+                  </span>
+                  <span style={{ color: "#3b82f6", fontSize: 16, flexShrink: 0, marginLeft: 6, fontWeight: 700, lineHeight: 1 }}>+</span>
+                </button>
+              ))
+            }
+          </div>
+        </div>
+      )}
+
+      {/* 모니터링 중 목록 */}
+      {!hasCams && !isAdding && (
+        <div style={{ fontSize: 11, color: "#6b7280", textAlign: "center", paddingTop: 2 }}>
+          {t("app.bgMonitorEmpty")}
+        </div>
+      )}
+      {hasCams && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          {[...monitoredCams].map(camKey => {
+            const info = backgroundStatus[camKey];
+            const cam = cctvList.find(c => c.cam_key === camKey);
+            const dispName = lang === "en"
+              ? (info?.name || cam?.name_en || `CCTV ${camKey.slice(0, 6)}`)
+              : (info?.name_ko || cam?.name_ko || cam?.name || camKey);
+            const dotColor = BG_STATUS_DOT[info?.status] ?? "#9ca3af";
+            return (
+              <div key={camKey} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: dotColor, flexShrink: 0 }} />
+                <span style={{ flex: 1, color: "#d1d5db", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      title={dispName}>{dispName}</span>
+                <span style={{ color: "#9ca3af", flexShrink: 0, fontSize: 11 }}>
+                  {info ? t("app.bgVehicles", { n: info.vehicle_count ?? 0 }) : "…"}
+                </span>
+                <button onClick={() => onRemove(camKey)}
+                  style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", padding: 0, fontSize: 14, lineHeight: 1 }}
+                  title={t("app.stopMonitor")}>×</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -475,6 +709,9 @@ function CctvSearch({ cctvList, onSelect, viewState }) {
   const [open,    setOpen]    = useState(false);
   const [sortBy,  setSortBy]  = useState("name"); // "name" | "dist"
   const ref = useRef(null);
+  const { t, lang } = useLang();
+
+  const getDisplayName = (c) => cctvDisplayName(c, lang);
 
   const distKm = (c) => {
     if (!viewState || c.lat == null || c.lon == null) return Infinity;
@@ -486,11 +723,13 @@ function CctvSearch({ cctvList, onSelect, viewState }) {
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
     const filtered = q
-      ? cctvList.filter((c) => (c.name || c.id).toLowerCase().includes(q))
+      ? cctvList.filter((c) => getDisplayName(c).toLowerCase().includes(q))
       : [...cctvList];
     if (sortBy === "dist") return filtered.sort((a, b) => distKm(a) - distKm(b));
-    return filtered.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id, "ko"));
-  }, [query, cctvList, sortBy, viewState]);
+    return filtered.sort((a, b) =>
+      getDisplayName(a).localeCompare(getDisplayName(b), lang === "ko" ? "ko" : "en")
+    );
+  }, [query, cctvList, sortBy, viewState, lang]);
 
   useEffect(() => {
     const close = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
@@ -500,7 +739,7 @@ function CctvSearch({ cctvList, onSelect, viewState }) {
 
   const handleSelect = (c) => {
     onSelect(c);
-    setQuery(c.name || c.id);
+    setQuery(getDisplayName(c));
     setOpen(false);
   };
 
@@ -511,19 +750,19 @@ function CctvSearch({ cctvList, onSelect, viewState }) {
   });
 
   return (
-    <div ref={ref} style={{ position: "absolute", top: 12, right: 60, zIndex: 20, width: 260 }}>
+    <div ref={ref} style={{ position: "relative", width: "100%" }}>
       <div style={{ position: "relative" }}>
         <input
           value={query}
           onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
           onFocus={() => setOpen(true)}
           onKeyDown={(e) => { if (e.key === "Escape") setOpen(false); }}
-          placeholder="CCTV 검색…"
+          placeholder={t("cctv.search.placeholder")}
           style={{
             width: "100%", boxSizing: "border-box",
             background: "rgba(17,24,39,0.90)", border: "1px solid #374151",
             borderRadius: 8, padding: "7px 34px 7px 12px",
-            fontSize: 13, color: "#f9fafb", backdropFilter: "blur(4px)", outline: "none",
+            fontSize: 13, color: "#f9fafb", outline: "none",
           }}
         />
         <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: "#6b7280", pointerEvents: "none" }}>🔍</span>
@@ -531,18 +770,19 @@ function CctvSearch({ cctvList, onSelect, viewState }) {
 
       {open && results.length > 0 && (
         <div style={{
-          position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0,
+          position: "absolute", bottom: "calc(100% + 4px)", left: 0, right: 0,
           background: "rgba(17,24,39,0.97)", border: "1px solid #374151",
-          borderRadius: 8, overflow: "hidden", backdropFilter: "blur(8px)",
-          boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+          borderRadius: 8, overflow: "hidden",
+          boxShadow: "0 -8px 24px rgba(0,0,0,0.5)",
+          zIndex: 50,
         }}>
           <div style={{ display: "flex", gap: 4, padding: "6px 10px", borderBottom: "1px solid #1f2937", alignItems: "center" }}>
-            <span style={{ fontSize: 10, color: "#6b7280", marginRight: 4 }}>정렬</span>
-            <button style={btnStyle(sortBy === "name")} onClick={() => setSortBy("name")}>이름순</button>
-            <button style={btnStyle(sortBy === "dist")} onClick={() => setSortBy("dist")}>거리순</button>
-            <span style={{ marginLeft: "auto", fontSize: 10, color: "#4b5563" }}>{results.length}개</span>
+            <span style={{ fontSize: 10, color: "#6b7280", marginRight: 4 }}>{t("cctv.search.sort")}</span>
+            <button style={btnStyle(sortBy === "name")} onClick={() => setSortBy("name")}>{t("cctv.search.sortName")}</button>
+            <button style={btnStyle(sortBy === "dist")} onClick={() => setSortBy("dist")}>{t("cctv.search.sortDist")}</button>
+            <span style={{ marginLeft: "auto", fontSize: 10, color: "#4b5563" }}>{t("cctv.search.count", { n: results.length })}</span>
           </div>
-          <div style={{ maxHeight: 340, overflowY: "auto" }}>
+          <div style={{ maxHeight: 240, overflowY: "auto" }}>
             {results.map((c) => {
               const km = distKm(c);
               const distLabel = km < Infinity ? (km < 1 ? `${(km * 1000).toFixed(0)}m` : `${km.toFixed(1)}km`) : null;
@@ -560,7 +800,9 @@ function CctvSearch({ cctvList, onSelect, viewState }) {
                   onMouseEnter={(e) => (e.currentTarget.style.background = "#1f2937")}
                   onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
                 >
-                  <span><span style={{ color: "#fbbf24", marginRight: 6 }}>📷</span>{c.name || c.id}</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <span style={{ color: "#fbbf24", marginRight: 6 }}>📷</span>{getDisplayName(c)}
+                  </span>
                   {distLabel && <span style={{ color: "#4b5563", fontSize: 10, flexShrink: 0, marginLeft: 6 }}>{distLabel}</span>}
                 </button>
               );

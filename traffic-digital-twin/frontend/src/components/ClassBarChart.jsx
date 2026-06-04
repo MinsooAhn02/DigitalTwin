@@ -1,12 +1,13 @@
+import React, { useMemo } from "react";
 import { CLASS_COLORS } from "../utils/colorMap";
 import { useLang } from "../i18n/index.jsx";
 
 function toRgb([r, g, b]) { return `rgb(${r},${g},${b})`; }
 
-export default function ClassBarChart({ classCounts = {} }) {
+const ClassBarChart = React.memo(function ClassBarChart({ classCounts = {} }) {
   const { t } = useLang();
-  const entries = Object.entries(classCounts);
-  const total   = entries.reduce((s, [, n]) => s + n, 0);
+  const entries = useMemo(() => Object.entries(classCounts), [classCounts]);
+  const total   = useMemo(() => entries.reduce((s, [, n]) => s + n, 0), [entries]);
 
   if (total === 0) {
     return <p style={{ color: "#6b7280", fontSize: 12, textAlign: "center", padding: "12px 0" }}>{t("chart.noVehicles")}</p>;
@@ -20,7 +21,7 @@ export default function ClassBarChart({ classCounts = {} }) {
         return (
           <div key={cls}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-              <span style={{ fontSize: 11, color: "#d1d5db" }}>{cls}</span>
+              <span style={{ fontSize: 11, color: "#d1d5db" }}>{t(`class.${cls}`) || cls}</span>
               <span style={{ fontSize: 11, color: "#9ca3af" }}>{t("chart.unit", { n: cnt, pct })}</span>
             </div>
             <div style={{ height: 8, borderRadius: 4, background: "#374151", overflow: "hidden" }}>
@@ -31,4 +32,6 @@ export default function ClassBarChart({ classCounts = {} }) {
       })}
     </div>
   );
-}
+});
+
+export default ClassBarChart;

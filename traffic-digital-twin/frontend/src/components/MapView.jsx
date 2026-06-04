@@ -1,13 +1,22 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import DeckGL from "@deck.gl/react";
 import { ScatterplotLayer, TextLayer, PolygonLayer, IconLayer } from "@deck.gl/layers";
 import Map from "react-map-gl/maplibre";
-import { getVehicleColor } from "../utils/colorMap";
+import { getVehicleColor, getSeverityColor } from "../utils/colorMap";
 import { useLang } from "../i18n/index.jsx";
 
-function makeCameraIconUrl(selected) {
-  const stroke  = selected ? "#22d3ee" : "#fbbf24";
-  const bg      = selected ? "#0e3a44" : "#1a1200";
+const BG_STATUS_COLORS = {
+  selected:  { stroke: "#22d3ee", bg: "#0e3a44" },
+  normal:    { stroke: "#22c55e", bg: "#0a2210" },
+  busy:      { stroke: "#f97316", bg: "#2a1200" },
+  congested: { stroke: "#ef4444", bg: "#2a0000" },
+  loading:   { stroke: "#94a3b8", bg: "#1e293b" },
+  error:     { stroke: "#6b7280", bg: "#111111" },
+  default:   { stroke: "#64748b", bg: "#1e293b" },  // 비모니터링: 눈에 덜 띄는 슬레이트
+};
+
+function makeCameraIconUrl(status) {
+  const { stroke, bg } = BG_STATUS_COLORS[status] ?? BG_STATUS_COLORS.default;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
     <rect x="2" y="2" width="36" height="36" rx="8" fill="${bg}" stroke="${stroke}" stroke-width="2"/>
     <rect x="4" y="13" width="21" height="12" rx="3" fill="${stroke}" opacity="0.9"/>
@@ -19,8 +28,16 @@ function makeCameraIconUrl(selected) {
   </svg>`;
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
-const ICON_NORMAL   = makeCameraIconUrl(false);
-const ICON_SELECTED = makeCameraIconUrl(true);
+
+const CAMERA_ICONS = {
+  selected:  makeCameraIconUrl("selected"),
+  normal:    makeCameraIconUrl("normal"),
+  busy:      makeCameraIconUrl("busy"),
+  congested: makeCameraIconUrl("congested"),
+  loading:   makeCameraIconUrl("loading"),
+  error:     makeCameraIconUrl("error"),
+  default:   makeCameraIconUrl(null),
+};
 
 const MAP_STYLES = {
   dark:      "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
@@ -211,8 +228,14 @@ export default function MapView({
   fovSnapLon = null,
   fovRoadPts = null,
   fovSnapAlongM = null,
+  backgroundStatus = {},
+  congestionClusters = [],
 }) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
+  const cctvLabel = useCallback((d) => {
+    if (lang === "en") return d.name_en || (d.cam_key ? `CCTV ${d.cam_key.slice(0, 6)}` : String(d.id));
+    return d.name_ko || d.name || String(d.id);
+  }, [lang]);
   const showVehicles = viewState.zoom >= VEHICLE_MIN_ZOOM;
 
   const sorted = useMemo(
@@ -220,7 +243,7 @@ export default function MapView({
     [vehicles]
   );
 
-  const cctvHitLayer = new ScatterplotLayer({
+  const cctvHitLayer = useMemo(() => new ScatterplotLayer({
     id:           "cctvs-hit",
     data:         cctvList,
     getPosition:  (d) => [d.lon, d.lat],
@@ -230,39 +253,45 @@ export default function MapView({
     radiusUnits:  "pixels",
     pickable:     !calibrationMode,
     onClick:      ({ object }) => !calibrationMode && object && onCctvClick?.(object),
-  });
+  }), [cctvList, calibrationMode, onCctvClick]);
 
-  const cctvIconLayer = new IconLayer({
+  const cctvIconLayer = useMemo(() => new IconLayer({
     id:          "cctv-icons",
     data:        cctvList,
     getPosition: (d) => [d.lon, d.lat],
-    getIcon:     (d) => ({
-      url:    selectedCctv?.id === d.id ? ICON_SELECTED : ICON_NORMAL,
-      width:  40,
-      height: 40,
-    }),
+    getIcon:     (d) => {
+      let iconKey;
+      if (selectedCctv?.id === d.id) {
+        iconKey = "selected";
+      } else {
+        const bgInfo = d.cam_key ? backgroundStatus[d.cam_key] : null;
+        iconKey = bgInfo ? (bgInfo.status || "loading") : "default";
+      }
+      // anchorX/anchorY: 아이콘 하단-중앙을 GPS 좌표에 고정 → 위쪽으로 렌더링 (짤림 방지)
+      return { url: CAMERA_ICONS[iconKey] ?? CAMERA_ICONS.default, width: 40, height: 40, anchorX: 20, anchorY: 40 };
+    },
     getSize:        (d) => selectedCctv?.id === d.id ? 48 : 36,
     sizeUnits:      "pixels",
     getPixelOffset: [0, 0],
     pickable:       false,
-    updateTriggers: { getIcon: [selectedCctv?.id], getSize: [selectedCctv?.id] },
-  });
+    updateTriggers: { getIcon: [selectedCctv?.id, backgroundStatus], getSize: [selectedCctv?.id] },
+  }), [cctvList, selectedCctv?.id, backgroundStatus]);
 
-  const cctvLabelLayer = new TextLayer({
+  const cctvLabelLayer = useMemo(() => new TextLayer({
     id:             "cctv-labels",
     data:           cctvList,
     getPosition:    (d) => [d.lon, d.lat],
-    getText:        (d) => d.name || String(d.id),
+    getText:        (d) => cctvLabel(d),
     getSize:        (d) => selectedCctv?.id === d.id ? 13 : 11,
     getColor:       (d) => selectedCctv?.id === d.id ? [34, 211, 238, 255] : [253, 230, 138, 230],
-    getPixelOffset: [0, -30],
+    getPixelOffset: [0, -50],
     fontFamily:     '"Segoe UI", system-ui, sans-serif',
     fontWeight:     700,
     fontSettings:   { sdf: true, smoothing: 0.3 },
     outlineWidth:   3,
     outlineColor:   [0, 0, 0, 200],
-    updateTriggers: { getSize: [selectedCctv?.id], getColor: [selectedCctv?.id] },
-  });
+    updateTriggers: { getText: [lang], getSize: [selectedCctv?.id], getColor: [selectedCctv?.id] },
+  }), [cctvList, selectedCctv?.id, lang, cctvLabel]);
 
   const fovLayer = useMemo(() => {
     if (!selectedCctv) return null;
@@ -300,7 +329,7 @@ export default function MapView({
   const nodeOutline = mapMode === "satellite" ? [0, 0, 0, 230] : [80, 80, 80, 180];
   const parkedColor = mapMode === "light" ? [120, 120, 120, 160] : [80, 80, 80, 140];
 
-  const scatterLayer = new ScatterplotLayer({
+  const scatterLayer = useMemo(() => new ScatterplotLayer({
     id:           "vehicles",
     data:         sorted,
     getPosition:  (d) => [d.lon, d.lat],
@@ -312,11 +341,11 @@ export default function MapView({
     pickable:     true,
     radiusUnits:  "meters",
     radiusMinPixels: 3,
-    updateTriggers: { getFillColor: [vehicles, mapMode], getLineColor: mapMode },
-  });
+    updateTriggers: { getFillColor: [sorted, mapMode], getLineColor: mapMode },
+  }), [sorted, mapMode, nodeStroked, nodeOutline, parkedColor]);
 
   const labelColor = mapMode === "light" ? [30, 30, 30, 220] : [255, 255, 255, 200];
-  const textLayer = new TextLayer({
+  const textLayer = useMemo(() => new TextLayer({
     id:             "vehicle-labels",
     data:           sorted,
     getPosition:    (d) => [d.lon, d.lat],
@@ -326,10 +355,10 @@ export default function MapView({
     getPixelOffset: [0, -14],
     outlineWidth:   mapMode !== "dark" ? 2 : 0,
     outlineColor:   mapMode === "light" ? [255, 255, 255, 200] : [0, 0, 0, 180],
-    updateTriggers: { getText: vehicles, getColor: mapMode },
-  });
+    updateTriggers: { getText: sorted, getColor: mapMode },
+  }), [sorted, mapMode, labelColor]);
 
-  const snapNodeLayer = calibrationMode && snapNodes.length > 0
+  const snapNodeLayer = useMemo(() => calibrationMode && snapNodes.length > 0
     ? new ScatterplotLayer({
         id:           "snap-nodes",
         data:         snapNodes,
@@ -342,9 +371,9 @@ export default function MapView({
         stroked:      true,
         pickable:     true,
       })
-    : null;
+    : null, [calibrationMode, snapNodes]);
 
-  const snapNodeLabelLayer = calibrationMode && snapNodes.length > 0
+  const snapNodeLabelLayer = useMemo(() => calibrationMode && snapNodes.length > 0
     ? new TextLayer({
         id:             "snap-node-labels",
         data:           snapNodes,
@@ -357,9 +386,26 @@ export default function MapView({
         outlineColor:   [0, 0, 0, 200],
         pickable:       false,
       })
-    : null;
+    : null, [calibrationMode, snapNodes]);
 
-  const layers = [
+  // 정체 구간 클러스터 오버레이 ([B]) — 차량/카메라보다 아래(배경)에 깔림
+  const congestionLayer = useMemo(() => {
+    if (!congestionClusters || congestionClusters.length === 0) return null;
+    return new PolygonLayer({
+      id:           "congestion-clusters",
+      data:         congestionClusters,
+      getPolygon:   (d) => d.polygon,
+      getFillColor: (d) => getSeverityColor(d.severity, 70),
+      getLineColor: (d) => getSeverityColor(d.severity, 200),
+      lineWidthMinPixels: 2,
+      stroked:      true,
+      filled:       true,
+      pickable:     true,
+    });
+  }, [congestionClusters]);
+
+  const layers = useMemo(() => [
+    congestionLayer,
     ...(showVehicles ? extraLayers : []),
     fovLayer,
     cctvHitLayer,
@@ -368,13 +414,17 @@ export default function MapView({
     ...(showVehicles ? [scatterLayer, textLayer] : []),
     snapNodeLayer,
     snapNodeLabelLayer,
-  ].filter(Boolean);
+  ].filter(Boolean), [
+    congestionLayer, showVehicles, extraLayers, fovLayer,
+    cctvHitLayer, cctvIconLayer, cctvLabelLayer,
+    scatterLayer, textLayer, snapNodeLayer, snapNodeLabelLayer,
+  ]);
 
   return (
     <DeckGL
       viewState={viewState}
       onViewStateChange={({ viewState: vs }) => onViewStateChange(vs)}
-      controller
+      controller={{ maxZoom: 20 }}
       layers={layers}
       style={{ position: "relative", width: "100%", height: "100%", cursor: calibrationMode ? "crosshair" : "grab" }}
       onClick={calibrationMode ? onMapClick : undefined}
@@ -401,7 +451,7 @@ export default function MapView({
 
         if (d.node_id) {
           return {
-            html: `<b>📍 ${d.node_name || d.node_id}</b><br/><span style="color:#9ca3af;font-size:11px">클릭하면 이 노드 GPS 사용</span>`,
+            html: `<b>📍 ${d.node_name || d.node_id}</b><br/><span style="color:#9ca3af;font-size:11px">${t("map.nodeSnapHint")}</span>`,
             style: {
               background: "#111827", color: "#fbbf24",
               fontSize: "12px", borderRadius: "6px", padding: "8px",
@@ -409,9 +459,23 @@ export default function MapView({
           };
         }
 
+        if (d.severity) {
+          const sevColor = { minor: "#fbbf24", medium: "#f97316", severe: "#ef4444" }[d.severity];
+          return {
+            html: `<b style="color:${sevColor}">⚠ ${t(`congestion.${d.severity}`)}</b><br/>`
+              + `<span style="color:#9ca3af;font-size:11px">`
+              + `${t("congestion.cameras", { n: d.camera_count })} · ${t("congestion.vehicles", { n: d.total_vehicles })}`
+              + `</span>`,
+            style: {
+              background: "#111827", color: "#f9fafb",
+              fontSize: "12px", borderRadius: "6px", padding: "8px",
+            },
+          };
+        }
+
         if (d.id) {
           return {
-            html: `<b>📷 ${d.name || ""}</b><br/><span style="color:#9ca3af;font-size:11px">${t("map.clickHint")}</span>`,
+            html: `<b>📷 ${cctvLabel(d)}</b><br/><span style="color:#9ca3af;font-size:11px">${t("map.clickHint")}</span>`,
             style: {
               background: "#111827", color: "#fbbf24",
               fontSize: "12px", borderRadius: "6px", padding: "8px",

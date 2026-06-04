@@ -1,0 +1,188 @@
+{
+  "source": "[국도 48호선] 김포 천등교차로",
+  "inference_backend": "tensorrt",
+  "tracker": "BotSort",
+  "frames_processed": 756,
+  "elapsed_s": 455.3,
+  "latency_ms": {
+    "yolo_isolated": {
+      "n": 0
+    },
+    "track": {
+      "n": 756,
+      "mean": 29.072,
+      "median": 27.432,
+      "p95": 50.555,
+      "min": 12.346,
+      "max": 476.419
+    },
+    "transform": {
+      "n": 756,
+      "mean": 0.035,
+      "median": 0.033,
+      "p95": 0.098,
+      "min": 0.001,
+      "max": 0.306
+    },
+    "analytics": {
+      "n": 756,
+      "mean": 0.075,
+      "median": 0.064,
+      "p95": 0.185,
+      "min": 0.018,
+      "max": 0.455
+    },
+    "end_to_end": {
+      "n": 756,
+      "mean": 29.182,
+      "median": 27.505,
+      "p95": 50.79,
+      "min": 12.422,
+      "max": 476.541
+    }
+  },
+  "throughput_fps": 34.3,
+  "tracking": {
+    "frames_processed": 756,
+    "unique_tracks": 17,
+    "id_appearances": 28,
+    "mean_lifetime_frames": 63.06,
+    "median_lifetime_frames": 30.0,
+    "max_lifetime_frames": 249
+  },
+  "speed": {
+    "n": 379,
+    "mean": 22.856,
+    "median": 12.3,
+    "p95": 105.68,
+    "min": 1.8,
+    "max": 158.3,
+    "pct_moving_obs": 35.4,
+    "total_vehicle_obs": 1072
+  },
+  "detection_class_totals": {
+    "car": 1072
+  },
+  "speed_scale_snapshot": {
+    "16c3b5b2fa97": {
+      "speed_scale": 0.8464,
+      "converged": false,
+      "updated_at": "2026-05-26T13:21:51.429979+00:00"
+    },
+    "a7ae872573e5": {
+      "speed_scale": 0.9209,
+      "converged": false,
+      "updated_at": "2026-05-26T17:37:39.563858+00:00"
+    },
+    "39fc6e8b3c35": {
+      "speed_scale": 0.8867,
+      "converged": false,
+      "updated_at": "2026-05-26T17:42:43.627866+00:00"
+    },
+    "e9b6f2a8c07a": {
+      "speed_scale": 0.834,
+      "converged": false,
+      "updated_at": "2026-05-26T19:08:03.826323+00:00"
+    },
+    "e32baeb9d96f": {
+      "speed_scale": 0.9408,
+      "converged": false,
+      "updated_at": "2026-05-26T19:23:21.320173+00:00"
+    },
+    "07b316e15c06": {
+      "speed_scale": 1.0669,
+      "converged": false,
+      "updated_at": "2026-05-26T19:44:43.756311+00:00"
+    },
+    "04b4e098f43e": {
+      "speed_scale": 1.0123,
+      "converged": false,
+      "updated_at": "2026-05-26T19:54:51.552086+00:00"
+    },
+    "b43f280f5a50": {
+      "speed_scale": 0.934,
+      "converged": false,
+      "updated_at": "2026-05-26T20:07:01.814379+00:00"
+    },
+    "6d4848463ee7": {
+      "speed_scale": 2.2538,
+      "converged": false,
+      "updated_at": "2026-05-26T20:17:07.981238+00:00"
+    },
+    "a69c5c9e03cb": {
+      "speed_scale": 1.0604,
+      "converged": false,
+      "updated_at": "2026-05-26T20:52:55.908567+00:00"
+    },
+    "c102131b3499": {
+      "speed_scale": 0.8289,
+      "converged": false,
+      "updated_at": "2026-05-26T21:13:09.390261+00:00"
+    },
+    "6f3b763bb67c": {
+      "speed_scale": 0.5314,
+      "converged": false,
+      "updated_at": "2026-05-26T23:12:37.471908+00:00"
+    },
+    "7fb40b51536a": {
+      "speed_scale": 0.5103,
+      "converged": false,
+      "updated_at": "2026-05-26T23:37:54.730072+00:00"
+    },
+    "b8a3365d79bf": {
+      "speed_scale": 0.9498,
+      "converged": false,
+      "updated_at": "2026-05-27T00:41:09.986842+00:00"
+    },
+    "fa96971a90bb": {
+      "speed_scale": 1.531,
+      "converged": false,
+      "updated_at": "2026-05-27T00:51:21.550433+00:00"
+    },
+    "d7eb03c82162": {
+      "speed_scale": 0.9133,
+      "converged": false,
+      "updated_at": "2026-05-27T01:14:17.794684+00:00"
+    },
+    "dea0a63a1a76": {
+      "speed_scale": 0.8837,
+      "converged": false,
+      "updated_at": "2026-05-27T13:51:13.943317+00:00"
+    },
+    "382568ff4309": {
+      "speed_scale": 0.6867,
+      "converged": false,
+      "updated_at": "2026-05-27T20:52:32.512480+00:00"
+    },
+    "d11c4812bd06": {
+      "speed_scale": 0.7462,
+      "converged": false,
+      "updated_at": "2026-05-28T15:42:34.237959+00:00"
+    },
+    "a3a9d8cc9693": {
+      "speed_scale": 0.9579,
+      "converged": false,
+      "updated_at": "2026-05-28T15:52:40.303074+00:00"
+    },
+    "b2a29abae336": {
+      "speed_scale": 1.3716,
+      "converged": false,
+      "updated_at": "2026-05-31T14:55:40.275563+00:00"
+    },
+    "9ecba4c6cec5": {
+      "speed_scale": 0.7226,
+      "converged": false,
+      "updated_at": "2026-05-31T15:10:48.533306+00:00"
+    },
+    "d103faa16d32": {
+      "speed_scale": 0.8424,
+      "converged": false,
+      "updated_at": "2026-05-31T15:56:06.806950+00:00"
+    },
+    "4cb0d772dffe": {
+      "speed_scale": 0.8904,
+      "converged": false,
+      "updated_at": "2026-06-01T08:59:37.935325+00:00"
+    }
+  }
+}

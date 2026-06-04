@@ -1,12 +1,12 @@
 /**
- * useWebSocket.js — 실시간 WebSocket 데이터 수신 훅
+ * useWebSocket — real-time WebSocket data hook
  *
- * 반환값:
- *   frameData      : 최신 FrameAnalytics JSON (null 초기값)
- *   isConnected    : 연결 상태 boolean
- *   error          : 에러 메시지 string | null
- *   cameraReady    : 카메라 전환 완료 이벤트 카운터 (변경될 때마다 useEffect 트리거용)
- *   cameraReadyInfo: 최신 camera_ready 페이로드 { camera_key, roi, name }
+ * Returns:
+ *   frameData      : latest FrameAnalytics JSON (null initially)
+ *   isConnected    : connection state boolean
+ *   error          : error message string | null
+ *   cameraReady    : camera-switch completion event counter (triggers useEffect on change)
+ *   cameraReadyInfo: latest camera_ready payload { camera_key, roi, name }
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -47,8 +47,8 @@ export function useWebSocket() {
           setAutoCalibInfo(null); // 카메라 전환 시 이전 자동 캘리브 정보 초기화
           setCameraReady((n) => n + 1);
         } else if (data.type === "camera_error") {
-          setError(`카메라 전환 실패: ${data.message ?? ""}`);
-          setCameraReady((n) => n + 1); // 에러여도 로딩 상태 해제
+          setError(`Camera switch failed: ${data.message ?? ""}`);
+          setCameraReady((n) => n + 1); // release loading state even on error
         } else if (data.type === "auto_calibrated") {
           setCameraReadyInfo((prev) => {
             const base = prev ?? {};
@@ -84,7 +84,7 @@ export function useWebSocket() {
       }
     };
 
-    ws.onerror = () => setError("WebSocket 연결 오류");
+    ws.onerror = () => setError("WebSocket connection error");
 
     ws.onclose = () => {
       setIsConnected(false);

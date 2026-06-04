@@ -178,7 +178,7 @@ export default function CalibrationMode({
       const gpsRing = [...sorted, sorted[0]];
       onSaved(heading, gpsRing);
     } catch (err) {
-      setError(err.message ?? "저장 실패");
+      setError(err.message ?? "Save failed");
     } finally {
       setSaving(false);
     }

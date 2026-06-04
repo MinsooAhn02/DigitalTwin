@@ -312,21 +312,27 @@ export default function App() {
         )}
 
         {/* 카메라 미선택 안내 — 하단 중앙 힌트 */}
-        {noCameraSelected && (
-          <div style={{
-            position: "absolute", bottom: 24, left: "50%", transform: "translateX(-50%)",
-            background: "rgba(17,24,39,0.85)", padding: "8px 14px",
-            borderRadius: 8, fontSize: 12, backdropFilter: "blur(4px)",
-            border: "1px solid #374151", pointerEvents: "none",
-            display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap",
-          }}>
-            <span style={{ fontSize: 16 }}>📷</span>
-            <div>
-              <div style={{ color: "#f9fafb", fontWeight: 600 }}>{t("app.clickCctv")}</div>
-              <div style={{ color: "#9ca3af", fontSize: 11, marginTop: 1 }}>{t("app.clickCctvSub")}</div>
+        {noCameraSelected && (() => {
+          const isLight = mapMode === "light";
+          return (
+            <div style={{
+              position: "absolute", bottom: 24, left: "50%", transform: "translateX(-50%)",
+              background: isLight ? "rgba(255,255,255,0.92)" : "rgba(17,24,39,0.88)",
+              padding: "12px 20px",
+              borderRadius: 10, fontSize: 14, backdropFilter: "blur(6px)",
+              border: `1px solid ${isLight ? "#cbd5e1" : "#374151"}`,
+              boxShadow: isLight ? "0 2px 12px rgba(0,0,0,0.12)" : "0 2px 12px rgba(0,0,0,0.4)",
+              pointerEvents: "none",
+              display: "flex", alignItems: "center", gap: 10, whiteSpace: "nowrap",
+            }}>
+              <span style={{ fontSize: 22, filter: isLight ? "none" : "drop-shadow(0 0 4px #38bdf8)" }}>📷</span>
+              <div>
+                <div style={{ color: isLight ? "#0f172a" : "#f9fafb", fontWeight: 700, fontSize: 14 }}>{t("app.clickCctv")}</div>
+                <div style={{ color: isLight ? "#475569" : "#94a3b8", fontSize: 12, marginTop: 2 }}>{t("app.clickCctvSub")}</div>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* 카메라 전환 중 */}
         {switching && (
@@ -468,7 +474,7 @@ export default function App() {
             )}
 
             {autoCalibInfo?.cam_h_m != null && (
-              <CollapsibleCard label={t("app.autoCalib")} defaultOpen={false}>
+              <CollapsibleCard label={t("app.autoCalib")} defaultOpen={false} description={t("app.autoCalibDesc")}>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 12, color: "#94a3b8" }}>
                   <span>{t("app.calibCamH")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.cam_h_m} m</b>
                   <span>{t("app.calibRoadW")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_width_m} m</b>
@@ -483,7 +489,7 @@ export default function App() {
             )}
 
             {itsSpeed !== null && (
-              <CollapsibleCard label={t("app.itsCompare")} defaultOpen={false}>
+              <CollapsibleCard label={t("app.itsCompare")} defaultOpen={false} description={t("app.itsCompareDesc")}>
                 <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center", fontSize: 12 }}>
                   <div style={{ textAlign: "center" }}>
                     <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsMeasured")}</div>
@@ -556,19 +562,66 @@ export default function App() {
   );
 }
 
-function CollapsibleCard({ children, label, defaultOpen = true }) {
+function CollapsibleCard({ children, label, defaultOpen = true, description = null }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [infoOpen, setInfoOpen] = useState(false);
   return (
     <div style={{ background: "#1f2937", borderRadius: 12, overflow: "hidden" }}>
-      <button onClick={() => setOpen(v => !v)} style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        width: "100%", padding: "10px 16px", background: "none", border: "none",
-        cursor: "pointer", color: "#9ca3af", fontSize: 12, textAlign: "left",
-      }}>
-        <span>{label}</span>
-        <span style={{ fontSize: 9, color: "#4b5563" }}>{open ? "▲" : "▼"}</span>
-      </button>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px" }}>
+        <button onClick={() => setOpen(v => !v)} style={{
+          flex: 1, display: "flex", alignItems: "center", background: "none", border: "none",
+          cursor: "pointer", color: "#9ca3af", fontSize: 12, textAlign: "left", padding: 0,
+        }}>
+          <span>{label}</span>
+        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {description && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setInfoOpen(true); }}
+              style={{
+                background: "none", border: "1px solid #374151", borderRadius: "50%",
+                width: 16, height: 16, display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer", color: "#6b7280", fontSize: 10, padding: 0, lineHeight: 1,
+              }}
+              title="What is this?"
+            >ℹ</button>
+          )}
+          <button onClick={() => setOpen(v => !v)} style={{
+            background: "none", border: "none", cursor: "pointer",
+            color: "#4b5563", fontSize: 9, padding: 0,
+          }}>
+            {open ? "▲" : "▼"}
+          </button>
+        </div>
+      </div>
       {open && <div style={{ padding: "0 16px 14px" }}>{children}</div>}
+
+      {infoOpen && (
+        <div
+          onClick={() => setInfoOpen(false)}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+            zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "#1f2937", borderRadius: 12, padding: 20, maxWidth: 340, width: "90%",
+              border: "1px solid #374151", boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{label}</span>
+              <button
+                onClick={() => setInfoOpen(false)}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "#6b7280", fontSize: 16, padding: 0 }}
+              >×</button>
+            </div>
+            <p style={{ fontSize: 12, color: "#94a3b8", lineHeight: 1.7, margin: 0 }}>{description}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

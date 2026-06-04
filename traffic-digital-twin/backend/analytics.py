@@ -404,7 +404,7 @@ class TrafficAnalytics:
             dec = "stop" if self._speed_ema[tid] == 0.0 else "decay"
 
         v.speed_kph = round(self._speed_ema.get(tid, 0.0), 1)
-        v.is_speeding = v.speed_kph > self.speed_limit_kph
+        v.is_speeding = v.speed_kph > self.speed_limit_kph * 1.10
         self._spd_debug(tid, current_ts, dec, inst_dt, step_m, span, disp_m, raw, len(win))
 
     def _project_to_road_axis(self, vehicles: list[VehicleState]) -> None:

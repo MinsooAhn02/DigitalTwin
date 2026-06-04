@@ -54,10 +54,6 @@ class VehicleTracker:
             crossed_out_ids = set(int(tids[i]) for i in range(len(tids)) if crossed_out[i])
         return detections, self._in_count, self._out_count, crossed_in_ids, crossed_out_ids
 
-    def reset_counts(self) -> None:
-        self._in_count  = 0
-        self._out_count = 0
-
     @staticmethod
     def class_name(class_id: int) -> str:
         return VEHICLE_CLASSES.get(int(class_id), "unknown")

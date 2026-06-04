@@ -15,12 +15,14 @@ const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:8000/ws";
 const RECONNECT_DELAY_MS = 3000;
 
 export function useWebSocket() {
-  const [frameData,       setFrameData]       = useState(null);
-  const [isConnected,     setIsConnected]     = useState(false);
-  const [error,           setError]           = useState(null);
-  const [cameraReady,     setCameraReady]     = useState(0);
-  const [cameraReadyInfo, setCameraReadyInfo] = useState(null);
-  const [autoCalibInfo,   setAutoCalibInfo]   = useState(null); // 자동 캘리브 추정값
+  const [frameData,        setFrameData]        = useState(null);
+  const [isConnected,      setIsConnected]      = useState(false);
+  const [error,            setError]            = useState(null);
+  const [cameraReady,      setCameraReady]      = useState(0);
+  const [cameraReadyInfo,  setCameraReadyInfo]  = useState(null);
+  const [autoCalibInfo,    setAutoCalibInfo]    = useState(null);
+  const [backgroundStatus, setBackgroundStatus] = useState({});
+  const [congestionClusters, setCongestionClusters] = useState([]);
 
   const wsRef      = useRef(null);
   const retryTimer = useRef(null);
@@ -69,6 +71,10 @@ export function useWebSocket() {
             map_ft_curve_m: data.map_ft_curve_m ?? null,
             map_tf_curve_m: data.map_tf_curve_m ?? null,
           });
+        } else if (data.type === "background_status") {
+          setBackgroundStatus(data.cameras ?? {});
+        } else if (data.type === "congestion_clusters") {
+          setCongestionClusters(data.clusters ?? []);
         } else {
           // 일반 frame analytics 데이터
           setFrameData(data);
@@ -95,5 +101,5 @@ export function useWebSocket() {
     };
   }, [connect]);
 
-  return { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo };
+  return { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo, backgroundStatus, congestionClusters };
 }

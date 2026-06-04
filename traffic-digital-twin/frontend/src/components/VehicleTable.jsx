@@ -1,17 +1,19 @@
-import { useState, useMemo } from "react";
+import React, { useState, useMemo } from "react";
 import { useLang } from "../i18n/index.jsx";
 
-export default function VehicleTable({ vehicles = [], calibrated = false }) {
+const VehicleTable = React.memo(function VehicleTable({ vehicles = [], calibrated = false }) {
   const { t } = useLang();
   const [logOpen, setLogOpen] = useState(false);
 
   const speeds = useMemo(() => vehicles.map((v) => v.speed_kph).filter((s) => s > 0), [vehicles]);
-  const minSpd = speeds.length ? Math.min(...speeds).toFixed(1) : "—";
-  const maxSpd = speeds.length ? Math.max(...speeds).toFixed(1) : "—";
-  const avgSpd = speeds.length ? (speeds.reduce((a, b) => a + b, 0) / speeds.length).toFixed(1) : "—";
+  const { minSpd, maxSpd, avgSpd } = useMemo(() => ({
+    minSpd: speeds.length ? Math.min(...speeds).toFixed(1) : "—",
+    maxSpd: speeds.length ? Math.max(...speeds).toFixed(1) : "—",
+    avgSpd: speeds.length ? (speeds.reduce((a, b) => a + b, 0) / speeds.length).toFixed(1) : "—",
+  }), [speeds]);
 
   if (vehicles.length === 0) {
-    return <p style={{ color: "#6b7280", fontSize: 12, textAlign: "center", padding: "12px 0" }}>{t("chart.noVehicles")}</p>;
+    return <p style={{ color: "#9ca3af", fontSize: 12, textAlign: "center", padding: "12px 0" }}>{t("chart.noVehicles")}</p>;
   }
 
   return (
@@ -33,7 +35,7 @@ export default function VehicleTable({ vehicles = [], calibrated = false }) {
                   <span style={{ color: "#94a3b8" }}>#{v.track_id}</span> {v.class_name}
                 </td>
                 <td style={{ padding: "4px 4px", textAlign: "right", color: v.is_speeding ? "#f87171" : calibrated ? "#d1d5db" : "#fbbf24" }}
-                    title={!calibrated ? "캘리브레이션 미설정 — 근사값" : undefined}>
+                    title={!calibrated ? t("table.calibWarn") : undefined}>
                   {!calibrated && <span style={{ fontSize: 9, marginRight: 1 }}>~</span>}
                   {v.speed_kph?.toFixed(1)} <span style={{ color: "#4b5563" }}>km/h</span>
                 </td>
@@ -70,7 +72,7 @@ export default function VehicleTable({ vehicles = [], calibrated = false }) {
           }}>
             {[["min", minSpd], ["avg", avgSpd], ["max", maxSpd]].map(([label, val]) => (
               <div key={label} style={{ textAlign: "center" }}>
-                <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{label}</div>
+                <div style={{ color: "#9ca3af", fontSize: 11, marginBottom: 2 }}>{label}</div>
                 <div style={{ color: label === "max" ? "#f87171" : label === "min" ? "#34d399" : "#94a3b8", fontWeight: 700, fontSize: 14 }}>
                   {val}
                 </div>
@@ -82,4 +84,6 @@ export default function VehicleTable({ vehicles = [], calibrated = false }) {
       </div>
     </div>
   );
-}
+});
+
+export default VehicleTable;

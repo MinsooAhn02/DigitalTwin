@@ -71,7 +71,44 @@ from transform import PerspectiveTransformer, CALIBRATION_PATH
 import roi_manager
 import metrics
 
-SPEED_SCALE_PATH = Path(__file__).resolve().parent / "speed_scale.json"
+SPEED_SCALE_PATH    = Path(__file__).resolve().parent / "speed_scale.json"
+VEHICLE_CALIB_PATH  = Path(__file__).resolve().parent / "vehicle_calib.json"
+
+
+def _load_vehicle_calib(cam_key: str) -> dict | None:
+    """카메라별 저장된 vehicle scale model 로드. 없으면 None."""
+    try:
+        if VEHICLE_CALIB_PATH.exists():
+            data = json.loads(VEHICLE_CALIB_PATH.read_text(encoding="utf-8"))
+            entry = data.get(cam_key)
+            if entry and "B" in entry and "C" in entry:
+                return entry
+    except Exception as exc:
+        logger.debug("vehicle_calib 로드 실패: %s", exc)
+    return None
+
+
+def _save_vehicle_calib(cam_key: str, params: dict) -> None:
+    """vehicle scale model을 camera_key별로 JSON에 저장."""
+    try:
+        data: dict = {}
+        if VEHICLE_CALIB_PATH.exists():
+            try:
+                data = json.loads(VEHICLE_CALIB_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        B, C = float(params["B"]), float(params["C"])
+        data[cam_key] = {
+            **params,
+            "vp_y":       round(-C / B, 2),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        VEHICLE_CALIB_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.info("vehicle_calib 저장: key=%s B=%.5f vp_y=%.1f", cam_key, B, -C / B)
+    except Exception as exc:
+        logger.warning("vehicle_calib 저장 실패: %s", exc)
 
 
 def _load_speed_scale(cam_key: str) -> float:
@@ -899,6 +936,13 @@ async def switch_camera(body: CameraSwitch):
     analytics.speed_scale = _load_speed_scale(cam_key)
     logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
 
+    # Vehicle apparent-size scale model 복원
+    _transformer.reset_scale_obs(clear_model=True)
+    vc = _load_vehicle_calib(cam_key)
+    if vc:
+        _transformer.load_scale_params(vc)
+        logger.info("vehicle_calib 복원: B=%.5f C=%.3f (camera=%s)", vc["B"], vc["C"], cam_key)
+
     # BoT-SORT 내부 상태 리셋
     det = getattr(app.state, "detector", None)
     if det is not None:
@@ -1668,6 +1712,13 @@ async def live_loop(detector, stream) -> None:
                 analytics.speed_scale = _load_speed_scale(cam_key)
                 logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
 
+                # Vehicle apparent-size scale model 복원 (live_loop 경로)
+                _transformer.reset_scale_obs(clear_model=True)
+                _vc = _load_vehicle_calib(cam_key)
+                if _vc:
+                    _transformer.load_scale_params(_vc)
+                    logger.info("vehicle_calib 복원 (live_loop): B=%.5f (camera=%s)", _vc["B"], cam_key)
+
                 # 저장된 calibration 자동 적용
                 _manual_cal_loaded = False
                 if CALIBRATION_PATH.exists():
@@ -1872,7 +1923,30 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
     _t0 = time.perf_counter()
     vehicles = _build_vehicles(tracked, frame_wh=(w, h))
     _transform_ms = (time.perf_counter() - _t0) * 1000.0
+
+    # ── Vehicle apparent-size scale 관측 누적 ──────────────────────────
+    for v_state in vehicles:
+        x1, _, x2, y2 = v_state.bbox_xyxy
+        _transformer.accumulate_scale_obs(y2, x2 - x1, v_state.class_name, h, w)
+
     _frame_count += 1
+
+    # 10프레임마다 신규 관측 20개 이상이면 모델 재피팅 + 저장
+    if _frame_count % 10 == 0 and _transformer._scale_obs_since_fit >= 20 and _current_cam:
+        if _transformer.fit_scale_model():
+            new_p = _transformer.get_scale_params()
+            if new_p:
+                _ck = roi_manager.camera_key(_current_cam.get("cctvurl", ""))
+                # Drift 감지: 저장된 vp_y와 15% 이상 차이나면 경고 후 덮어쓰기
+                _saved_vc = _load_vehicle_calib(_ck)
+                if _saved_vc and _saved_vc.get("vp_y") and new_p["B"] != 0:
+                    _new_vp = -new_p["C"] / new_p["B"]
+                    _drift = abs(_new_vp - _saved_vc["vp_y"]) / max(_saved_vc["vp_y"], 1.0)
+                    if _drift > 0.15:
+                        logger.warning("vehicle_calib vp_y drift %.0f%% (%.1f→%.1f) — 새 모델로 갱신",
+                                       _drift * 100, _saved_vc["vp_y"], _new_vp)
+                _save_vehicle_calib(_ck, new_p)
+
     _t0 = time.perf_counter()
     result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt, in_ids, out_ids)
     _analytics_ms = (time.perf_counter() - _t0) * 1000.0

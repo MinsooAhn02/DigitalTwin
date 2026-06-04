@@ -40,6 +40,10 @@ class HardwareInfo:
     tensorrt_available: bool
 
 
+# 기본 추천 패밀리 — yolo26(최신, end-to-end NMS-free). yolov8도 picker에서 선택 가능.
+DEFAULT_FAMILY = "yolo26"
+
+
 @dataclass(frozen=True)
 class ModelOption:
     variant:    str
@@ -53,10 +57,12 @@ class ModelOption:
     fps_gpu:    int    # TensorRT 기준 예상 FPS
     fps_cpu:    int    # CPU only 예상 FPS
     export_min: int    # TensorRT 변환 소요 시간 (분)
+    family:     str = "yolov8"   # "yolov8" | "yolo26"
 
     @property
     def stem(self) -> str:
-        return f"yolov8{self.variant}"
+        # ultralytics 명명: yolov8m / yolo26m (yolo26는 'v' 없음)
+        return f"{self.family}{self.variant}"
 
     @property
     def pt_path(self) -> Path:
@@ -67,11 +73,17 @@ class ModelOption:
         return BACKEND_DIR / f"{self.stem}.engine"
 
 
+# yolo26 먼저(기본 추천 패밀리) → yolov8. 같은 variant letter가 두 패밀리에 존재하므로
+# 선택 토큰은 stem(예: "yolo26m")을 사용한다.
 MODEL_OPTIONS = [
-    ModelOption("n", "YOLOv8n", "Fastest",      "CPU 친화적 · 가벼운 데모용",         "CPU-friendly · lightweight demo",               0.0, "fast",      6,  50,  6, 1),
-    ModelOption("s", "YOLOv8s", "Balanced",     "중급 GPU 추천 · 속도·정확도 균형",   "Mid-range GPU · balanced speed & accuracy",     4.0, "balanced", 22,  45,  4, 2),
-    ModelOption("m", "YOLOv8m", "Accurate",     "높은 정확도 · 6 GB+ VRAM 필요",     "High accuracy · 6 GB+ VRAM required",           6.0, "quality",  52,  30,  2, 5),
-    ModelOption("x", "YOLOv8x", "Best accuracy","최고 정확도 · 고사양 GPU 전용",      "Best accuracy · high-end GPU only",             8.0, "quality", 131,  25,  1, 8),
+    ModelOption("n", "YOLO26n", "Fastest",      "CPU 친화적 · end-to-end",          "CPU-friendly · end-to-end",                     0.0, "fast",      6,  60,  9, 1, "yolo26"),
+    ModelOption("s", "YOLO26s", "Balanced",     "중급 GPU · 속도·정확도 균형",       "Mid-range GPU · balanced",                      4.0, "balanced", 26,  52,  6, 2, "yolo26"),
+    ModelOption("m", "YOLO26m", "Accurate",     "높은 정확도 · 6 GB+ VRAM",          "High accuracy · 6 GB+ VRAM",                    6.0, "quality",  55,  34,  3, 5, "yolo26"),
+    ModelOption("x", "YOLO26x", "Best accuracy","최고 정확도 · 고사양 GPU",          "Best accuracy · high-end GPU",                  8.0, "quality", 135,  27,  1, 8, "yolo26"),
+    ModelOption("n", "YOLOv8n", "Fastest",      "CPU 친화적 · 가벼운 데모용",         "CPU-friendly · lightweight demo",               0.0, "fast",      6,  50,  6, 1, "yolov8"),
+    ModelOption("s", "YOLOv8s", "Balanced",     "중급 GPU 추천 · 속도·정확도 균형",   "Mid-range GPU · balanced speed & accuracy",     4.0, "balanced", 22,  45,  4, 2, "yolov8"),
+    ModelOption("m", "YOLOv8m", "Accurate",     "높은 정확도 · 6 GB+ VRAM 필요",     "High accuracy · 6 GB+ VRAM required",           6.0, "quality",  52,  30,  2, 5, "yolov8"),
+    ModelOption("x", "YOLOv8x", "Best accuracy","최고 정확도 · 고사양 GPU 전용",      "Best accuracy · high-end GPU only",             8.0, "quality", 131,  25,  1, 8, "yolov8"),
 ]
 
 PROFILE_SETTINGS = {
@@ -280,21 +292,22 @@ def choose_with_gui(hw: HardwareInfo, recommended: str) -> str | None:
     BORDER_REC   = "#2a4a8c"
     BORDER_DEF   = "#2a2a3e"
 
-    selected  = {"variant": None, "use_cuda": None}
+    selected  = {"stem": None, "use_cuda": None}
     lang      = ["ko"]                             # mutable language cell
-    updatables: list[tuple] = []                   # (StringVar, callable → str)
+    updatables: list[tuple] = []                   # 정적 크롬 (StringVar, fn)
+    card_updatables: list[tuple] = []              # 현재 family 카드 (family 전환 시 교체)
 
     def _s(key: str, **kw) -> str:
         tmpl = STRINGS[lang[0]][key]
         return tmpl.format(**kw) if kw else tmpl
 
-    def _sv(fn) -> "tk.StringVar":
+    def _sv(fn, target: list | None = None) -> "tk.StringVar":
         sv = tk.StringVar(value=fn())
-        updatables.append((sv, fn))
+        (target if target is not None else updatables).append((sv, fn))
         return sv
 
     def refresh(*_) -> None:
-        for sv, fn in updatables:
+        for sv, fn in (*updatables, *card_updatables):
             sv.set(fn())
 
     root = tk.Tk()
@@ -375,24 +388,38 @@ def choose_with_gui(hw: HardwareInfo, recommended: str) -> str | None:
     tk.Label(outer, textvariable=model_lbl_sv, bg=BG, fg=C_SECONDARY,
              font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 5))
 
-    # ── 모델 카드 ──────────────────────────────────────────────────────
     color_map = {"green": C_GREEN, "yellow": C_YELLOW, "orange": C_ORANGE}
 
-    def pick(variant: str) -> None:
-        selected["variant"] = variant
+    def pick(stem: str) -> None:
+        selected["stem"] = stem
         selected["use_cuda"] = "true" if use_cuda_var.get() else "false"
         root.destroy()
 
-    def _bind_click(widget: "tk.Widget", variant: str) -> None:
-        widget.bind("<Button-1>", lambda _e, v=variant: pick(v))
+    def _bind_click(widget: "tk.Widget", stem: str) -> None:
+        widget.bind("<Button-1>", lambda _e, v=stem: pick(v))
         for child in widget.winfo_children():
-            _bind_click(child, variant)
+            _bind_click(child, stem)
 
-    for option in MODEL_OPTIONS:
+    # ── 모델 패밀리 탭 (먼저 family 선택 → 해당 family 변형만 표시) ────────
+    # 8개 카드를 한 화면에 쌓으면 넘치므로, family를 탭으로 먼저 고르고
+    # 그 family의 4개 변형만 보여준다.
+    FAMILIES = [f for f in ("yolo26", "yolov8")
+                if any(o.family == f for o in MODEL_OPTIONS)]
+    FAMILY_LABELS = {"yolo26": "YOLO26  (latest)", "yolov8": "YOLOv8"}
+    active_family = [select_option(recommended).family]
+
+    tab_row = tk.Frame(outer, bg=BG)
+    tab_row.pack(fill="x", pady=(0, 8))
+    tab_btns: dict[str, "tk.Button"] = {}
+
+    cards_container = tk.Frame(outer, bg=BG)
+    cards_container.pack(fill="x")
+
+    def _build_one_card(option) -> None:
         has_engine = option.engine_path.exists()
         has_pt     = option.pt_path.exists()
         is_inst    = has_engine or has_pt
-        is_rec     = option.variant == recommended
+        is_rec     = option.stem == recommended
 
         if is_inst and is_rec:
             card_bg, border = CARD_BOTH,    BORDER_REC
@@ -403,12 +430,11 @@ def choose_with_gui(hw: HardwareInfo, recommended: str) -> str | None:
         else:
             card_bg, border = CARD_DEFAULT, BORDER_DEF
 
-        border_f = tk.Frame(outer, bg=border, padx=1, pady=1)
+        border_f = tk.Frame(cards_container, bg=border, padx=1, pady=1)
         border_f.pack(fill="x", pady=3)
         card = tk.Frame(border_f, bg=card_bg, padx=13, pady=9, cursor="hand2")
         card.pack(fill="both")
 
-        # 상단 행: 모델명 + 상태 배지
         row_top = tk.Frame(card, bg=card_bg)
         row_top.pack(fill="x")
 
@@ -424,30 +450,60 @@ def choose_with_gui(hw: HardwareInfo, recommended: str) -> str | None:
             badge_key, badge_c = "badge_pt",     C_YELLOW
         else:
             badge_key, badge_c = "badge_dl",     C_ORANGE
-        badge_sv = _sv(lambda k=badge_key, o=option: _s(k, mb=o.size_mb))
+        badge_sv = _sv(lambda k=badge_key, o=option: _s(k, mb=o.size_mb), card_updatables)
         tk.Label(row_top, textvariable=badge_sv, bg=card_bg, fg=badge_c,
                  font=("Segoe UI", 9, "bold")).pack(side="right")
 
-        # 설명 (언어 전환)
-        note_sv = _sv(lambda o=option: o.note if lang[0] == "ko" else o.note_en)
+        note_sv = _sv(lambda o=option: o.note if lang[0] == "ko" else o.note_en, card_updatables)
         tk.Label(card, textvariable=note_sv, bg=card_bg, fg=C_SECONDARY,
                  font=("Segoe UI", 9)).pack(anchor="w", pady=(1, 0))
 
-        # 하단 행: FPS + 셋업 시간
         row_bot = tk.Frame(card, bg=card_bg)
         row_bot.pack(fill="x", pady=(5, 0))
 
-        fps_sv = _sv(lambda o=option: _fps_line(o, hw, use_cuda_var.get(), lang[0]))
+        fps_sv = _sv(lambda o=option: _fps_line(o, hw, use_cuda_var.get(), lang[0]), card_updatables)
         tk.Label(row_bot, textvariable=fps_sv,
                  bg=card_bg, fg=C_PRIMARY, font=("Segoe UI", 9)).pack(side="left")
 
         _, setup_hint = _setup_line(option, hw, lang[0])
-        setup_sv = _sv(lambda o=option: _setup_line(o, hw, lang[0])[0])
+        setup_sv = _sv(lambda o=option: _setup_line(o, hw, lang[0])[0], card_updatables)
         tk.Label(row_bot, textvariable=setup_sv,
                  bg=card_bg, fg=color_map[setup_hint],
                  font=("Segoe UI", 9)).pack(side="right")
 
-        _bind_click(card, option.variant)
+        _bind_click(card, option.stem)
+
+    def _build_cards() -> None:
+        for ch in cards_container.winfo_children():
+            ch.destroy()
+        card_updatables.clear()
+        for option in MODEL_OPTIONS:
+            if option.family == active_family[0]:
+                _build_one_card(option)
+        refresh()                     # 새 카드 텍스트를 현재 lang/cuda로 동기화
+        root.update_idletasks()       # 창 높이 재계산
+
+    def _style_tabs() -> None:
+        for fam, btn in tab_btns.items():
+            on = fam == active_family[0]
+            btn.configure(bg="#1c3a5c" if on else "#16162a",
+                          fg=C_BLUE if on else C_SECONDARY)
+
+    def switch_family(fam: str) -> None:
+        active_family[0] = fam
+        _style_tabs()
+        _build_cards()
+
+    for fam in FAMILIES:
+        b = tk.Button(tab_row, text=FAMILY_LABELS.get(fam, fam),
+                      command=lambda f=fam: switch_family(f),
+                      relief="flat", bd=0, padx=18, pady=6, cursor="hand2",
+                      font=("Segoe UI", 10, "bold"),
+                      activebackground="#2a4a70", activeforeground=C_PRIMARY)
+        b.pack(side="left", padx=(0, 6))
+        tab_btns[fam] = b
+    _style_tabs()
+    _build_cards()
 
     # ── 추천 버튼 ─────────────────────────────────────────────────────
     rec_option = select_option(recommended)
@@ -480,7 +536,7 @@ def choose_with_gui(hw: HardwareInfo, recommended: str) -> str | None:
 
     if selected["use_cuda"] is not None:
         os.environ["YOLO_USE_CUDA"] = selected["use_cuda"]
-    return selected["variant"]
+    return selected["stem"]
 
 
 def choose_with_console(hw: HardwareInfo, recommended: str) -> str:
@@ -513,7 +569,7 @@ def choose_with_console(hw: HardwareInfo, recommended: str) -> str:
     for idx, option in enumerate(MODEL_OPTIONS, 1):
         has_engine = option.engine_path.exists()
         has_pt     = option.pt_path.exists()
-        is_rec     = option.variant == recommended
+        is_rec     = option.stem == recommended
 
         if has_engine:
             status = f"{GR}✓ ENGINE READY{R}"
@@ -548,16 +604,28 @@ def choose_with_console(hw: HardwareInfo, recommended: str) -> str:
     if choice.isdigit():
         idx = int(choice) - 1
         if 0 <= idx < len(MODEL_OPTIONS):
-            return MODEL_OPTIONS[idx].variant
-    variants = {o.variant for o in MODEL_OPTIONS}
-    return choice.lower() if choice.lower() in variants else recommended
+            return MODEL_OPTIONS[idx].stem
+    stems = {o.stem for o in MODEL_OPTIONS}
+    return choice.lower() if choice.lower() in stems else recommended
 
 
-def select_option(variant: str) -> ModelOption:
+def recommend_stem(hw: HardwareInfo) -> str:
+    """GPU 기준 변형 추천 + 기본 패밀리(yolo26) → 선택 토큰 stem (예: yolo26m)."""
+    return f"{DEFAULT_FAMILY}{recommend_variant(hw)}"
+
+
+def select_option(token: str) -> ModelOption:
+    """stem(예: 'yolo26m') 우선 매칭, variant letter만 주면 기본 패밀리 우선."""
     for option in MODEL_OPTIONS:
-        if option.variant == variant:
+        if option.stem == token:
             return option
-    raise ValueError(f"Unknown YOLO model variant: {variant}")
+    for option in MODEL_OPTIONS:
+        if option.variant == token and option.family == DEFAULT_FAMILY:
+            return option
+    for option in MODEL_OPTIONS:
+        if option.variant == token:
+            return option
+    raise ValueError(f"Unknown YOLO model: {token}")
 
 
 def download_weights(option: ModelOption) -> None:
@@ -676,6 +744,7 @@ def write_profile(option: ModelOption, model_path: Path, hw: HardwareInfo) -> No
         {
             "model": model_path.name,
             "variant": option.variant,
+            "family": option.family,
             "cuda_enabled": os.getenv("YOLO_USE_CUDA", "true").lower() == "true"
             and hw.cuda_available,
             "tensorrt_enabled": model_path.suffix == ".engine",
@@ -688,7 +757,7 @@ def write_profile(option: ModelOption, model_path: Path, hw: HardwareInfo) -> No
 
 def main() -> int:
     hw = detect_hardware()
-    recommended = recommend_variant(hw)
+    recommended = recommend_stem(hw)
     selected = choose_with_gui(hw, recommended) or choose_with_console(hw, recommended)
     option = select_option(selected)
     model_path = export_engine(option, hw)

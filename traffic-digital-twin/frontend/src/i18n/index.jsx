@@ -4,6 +4,10 @@ const TRANSLATIONS = {
   en: {
     // ── App ──────────────────────────────────────────────────────────
     "app.title":          "🛣️ Traffic Digital Twin",
+    "lang.switchToKo":    "Switch to Korean",
+    "lang.switchToEn":    "Switch to English",
+    "error.cameraSwitch": "Camera switch failed: {{message}}",
+    "error.wsConnection": "WebSocket connection error",
     "app.connected":      "Live Connected",
     "app.reconnecting":   "Reconnecting…",
     "app.clickCctv":      "Click a CCTV camera on the map",
@@ -149,6 +153,10 @@ const TRANSLATIONS = {
   ko: {
     // ── App ──────────────────────────────────────────────────────────
     "app.title":          "🛣️ 교통 디지털 트윈",
+    "lang.switchToKo":    "한국어로 전환",
+    "lang.switchToEn":    "영어로 전환",
+    "error.cameraSwitch": "카메라 전환 실패: {{message}}",
+    "error.wsConnection": "WebSocket 연결 오류",
     "app.connected":      "실시간 연결 중",
     "app.reconnecting":   "재연결 중…",
     "app.clickCctv":      "지도에서 CCTV를 클릭하세요",

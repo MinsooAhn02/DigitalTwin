@@ -98,6 +98,7 @@ from config import (
     SPEED_STOP_SPAN_S,
     SPEED_SPIKE_FACTOR,
     SPEED_MIN_KPH,
+    SPEED_OUTLIER_MAD_K,
 )
 
 from utils import haversine_m
@@ -342,7 +343,13 @@ class TrafficAnalytics:
                 inst_dt = step_m = None
             elif inst_dt > 0:
                 raw_max_mps = (MAX_REASONABLE_KPH / 3.6) / max(self.speed_scale, 0.1)
-                if step_m > raw_max_mps * inst_dt * 1.5:
+                if step_m > raw_max_mps * inst_dt * 3.0:
+                    # ID-switch-level teleport: clear window to prevent corrupted regression slope
+                    win.clear()
+                    append = False
+                    self._spd_debug(tid, current_ts, "teleport_reset", inst_dt, step_m,
+                                    None, None, None, 0, force=True)
+                elif step_m > raw_max_mps * inst_dt * 1.5:
                     append = False               # ★ 이상치 샘플만 버림(윈도우 유지)
                     self._spd_debug(tid, current_ts, "outlier_skip", inst_dt, step_m,
                                     None, None, None, len(win), force=True)
@@ -456,8 +463,29 @@ class TrafficAnalytics:
         return "F"
 
     @staticmethod
+    def _reject_speed_outliers(speeds: list[float]) -> list[float]:
+        """MAD 기반 속도 outlier 제거 (한계3 A): 트랙 ID 스왑 등으로 튀는 샘플 차단.
+
+        |x − median| > K·1.4826·MAD 인 값을 제거. 샘플 <3이면 robust 추정 불가 → 원본.
+        ITS 없는 도로에서도 self-consistency로 이상치를 자체 검증한다.
+        """
+        n = len(speeds)
+        if n < 3:
+            return speeds
+        srt = sorted(speeds)
+        med = srt[n // 2] if n % 2 else (srt[n // 2 - 1] + srt[n // 2]) / 2.0
+        devs = sorted(abs(x - med) for x in speeds)
+        mad = devs[n // 2] if n % 2 else (devs[n // 2 - 1] + devs[n // 2]) / 2.0
+        if mad < 1e-6:
+            return speeds
+        thr = SPEED_OUTLIER_MAD_K * 1.4826 * mad   # 1.4826: MAD→정규 σ 환산
+        kept = [x for x in speeds if abs(x - med) <= thr]
+        return kept or speeds
+
+    @staticmethod
     def _avg_speed(vehicles: list[VehicleState]) -> float:
         s = [v.speed_kph for v in vehicles if v.speed_kph > 0]
+        s = TrafficAnalytics._reject_speed_outliers(s)
         return round(sum(s) / len(s), 1) if s else 0.0
 
     @staticmethod

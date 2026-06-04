@@ -41,6 +41,7 @@ from config import (
     YOLO_IOU,
     YOLO_MODEL,
     YOLO_MODEL_VARIANT,
+    YOLO_MODEL_FAMILY,
     VEHICLE_CLASSES,
     BYTE_TRACK_BUFFER,
     BYTE_TRACK_FPS,
@@ -54,7 +55,7 @@ VARIANT_PRIORITY = ("x", "l", "m", "s", "n")
 
 # YOLO가 연속으로 빈 결과를 반환할 때 이전 트랙을 유지하는 최대 detect 프레임 수
 # detect 2회 연속 miss = 최대 6프레임(~0.2초) 공백 방지
-_YOLO_MISS_GRACE: int = 2
+_YOLO_MISS_GRACE: int = 3
 
 # ── Tracker tier config ────────────────────────────────────────────────────
 _TRACKER_CONFIGS: dict[str, dict] = {
@@ -76,8 +77,10 @@ class ModelSelection:
 
 def _normalize_variant(value: str) -> str:
     value = (value or "").strip().lower()
-    if value.startswith("yolov8") and len(value) >= 7:
-        value = value[6]
+    for pref in ("yolov8", "yolo26", "yolo11"):
+        if value.startswith(pref) and len(value) > len(pref):
+            value = value[len(pref):]
+            break
     aliases = {"nano": "n", "small": "s", "medium": "m", "large": "l", "xlarge": "x"}
     return aliases.get(value, value[:1] if value else "")
 
@@ -106,7 +109,9 @@ def _candidate_stems() -> list[Path]:
     preferred = _normalize_variant(YOLO_MODEL_VARIANT)
     variants = [preferred] if preferred else []
     variants.extend(v for v in VARIANT_PRIORITY if v not in variants)
-    return [BACKEND_DIR / f"yolov8{v}" for v in variants]
+    # 패밀리 우선순위: 설정 family(기본 yolo26) → 나머지. 각 family×variant 조합을 시도.
+    fams = [YOLO_MODEL_FAMILY] + [f for f in ("yolo26", "yolov8") if f != YOLO_MODEL_FAMILY]
+    return [BACKEND_DIR / f"{family}{v}" for family in fams for v in variants]
 
 
 def _move_to_backend(src: Path, dst: Path) -> Path:
@@ -190,7 +195,7 @@ def resolve_model_selection() -> ModelSelection:
         return ModelSelection(pt_fallback, "pytorch", "weights")
 
     available = ", ".join(
-        sorted(p.name for p in BACKEND_DIR.glob("yolov8*") if p.is_file())
+        sorted(p.name for p in BACKEND_DIR.glob("yolo*") if p.is_file())
     ) or "none"
     raise FileNotFoundError(f"No YOLO model found in backend. Candidates: {available}")
 
@@ -222,7 +227,7 @@ def _build_tracker(tier: str, device: Any) -> Any:
         if tier == "cpu":
             tracker = ByteTrack(
                 track_thresh=YOLO_CONF,
-                match_thresh=0.5,   # 관대한 IoU 매칭 → Kalman 예측 벗어난 차도 재매칭
+                match_thresh=0.35,  # fast vehicles have IoU 0.3-0.4 between frames; 0.35 retains tracks
                 track_buffer=BYTE_TRACK_BUFFER,
                 frame_rate=BYTE_TRACK_FPS,
             )
@@ -332,11 +337,12 @@ class IDStabilizer:
     last known center 위치 기반 헝가리안 nearest-neighbor 매칭.
     """
 
-    def __init__(self, max_lost_frames: int = 90, max_dist_px: float = 80.0):
+    def __init__(self, max_lost_frames: int = 90, max_dist_px: float = 120.0):
         self._max_lost = max_lost_frames
         self._max_dist = max_dist_px
         self._prev_centers: dict[int, tuple[float, float]] = {}
-        self._lost: dict[int, list] = {}   # stable_id → [cx, cy, age]
+        self._velocities: dict[int, tuple[float, float]] = {}  # stable_id → (vx, vy) px/frame
+        self._lost: dict[int, list] = {}   # stable_id → [cx, cy, age, vx, vy]
         self._remap: dict[int, int] = {}   # raw_id → stable_id
         self._display_map: dict[int, int] = {}  # stable_id → compact sequential display_id
         self._next_display: int = 0
@@ -348,9 +354,12 @@ class IDStabilizer:
     ) -> sv.Detections:
         # 이전 프레임 활성 트랙을 매칭 루프 전에 lost로 이동
         # (루프 안에서 매칭되면 즉시 lost에서 제거)
-        for sid, pos in self._prev_centers.items():
-            self._lost.setdefault(sid, [pos[0], pos[1], 0])
-        self._prev_centers.clear()
+        # old_centers는 velocity 계산에 재사용하므로 clear 대신 새 dict 할당
+        old_centers = self._prev_centers
+        for sid, (prev_x, prev_y) in old_centers.items():
+            vx, vy = self._velocities.get(sid, (0.0, 0.0))
+            self._lost.setdefault(sid, [prev_x, prev_y, 0, vx, vy])
+        self._prev_centers = {}
 
         # 프레임 경계 근처에서 사라진 트랙은 화면 이탈로 간주 → 즉시 제거
         # (새로 진입하는 차량에 이탈 차량의 ID가 재할당되는 것을 방지)
@@ -365,6 +374,7 @@ class IDStabilizer:
             ]
             for sid in to_remove:
                 del self._lost[sid]
+                self._velocities.pop(sid, None)
                 self._remap = {r: s for r, s in self._remap.items() if s != sid}
 
         if len(dets) == 0 or dets.tracker_id is None:
@@ -418,6 +428,11 @@ class IDStabilizer:
                 used_stable.add(stable)
             stable_ids[i] = stable
 
+        # update velocity per active track; used for predicted position when they go lost
+        for sid, (cx, cy) in zip(stable_ids, centers):
+            if sid in old_centers:
+                prev_x, prev_y = old_centers[sid]
+                self._velocities[sid] = (cx - prev_x, cy - prev_y)
         self._age_lost()
         self._prev_centers = dict(zip(stable_ids, centers))
 
@@ -439,10 +454,15 @@ class IDStabilizer:
 
     def _find_lost(self, cx: float, cy: float, used: set[int]) -> int | None:
         best, best_dist = None, self._max_dist
-        for sid, (lx, ly, _) in self._lost.items():
+        for sid, entry in self._lost.items():
             if sid in used:
                 continue
-            d = math.hypot(cx - lx, cy - ly)
+            lx, ly, age = entry[0], entry[1], entry[2]
+            vx = entry[3] if len(entry) > 3 else 0.0
+            vy = entry[4] if len(entry) > 4 else 0.0
+            pred_x = lx + vx * age
+            pred_y = ly + vy * age
+            d = math.hypot(cx - pred_x, cy - pred_y)
             if d < best_dist:
                 best_dist, best = d, sid
         return best
@@ -452,11 +472,13 @@ class IDStabilizer:
             self._lost[sid][2] += 1
             if self._lost[sid][2] > self._max_lost:
                 del self._lost[sid]
+                self._velocities.pop(sid, None)
                 self._remap = {r: s for r, s in self._remap.items() if s != sid}
                 self._display_map.pop(sid, None)
 
     def reset(self) -> None:
         self._prev_centers.clear()
+        self._velocities.clear()
         self._lost.clear()
         self._remap.clear()
         self._display_map.clear()

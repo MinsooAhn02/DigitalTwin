@@ -73,6 +73,7 @@ import metrics
 
 SPEED_SCALE_PATH    = Path(__file__).resolve().parent / "speed_scale.json"
 VEHICLE_CALIB_PATH  = Path(__file__).resolve().parent / "vehicle_calib.json"
+CAMERA_POSE_PATH    = Path(__file__).resolve().parent / "camera_pose.json"
 
 
 def _load_vehicle_calib(cam_key: str) -> dict | None:
@@ -109,6 +110,44 @@ def _save_vehicle_calib(cam_key: str, params: dict) -> None:
         logger.info("vehicle_calib 저장: key=%s B=%.5f vp_y=%.1f", cam_key, B, -C / B)
     except Exception as exc:
         logger.warning("vehicle_calib 저장 실패: %s", exc)
+
+
+def _load_camera_pose(cam_key: str) -> dict | None:
+    """카메라별 저장된 road-model 포즈 로드. 없으면 None (Phase 12)."""
+    try:
+        if CAMERA_POSE_PATH.exists():
+            data = json.loads(CAMERA_POSE_PATH.read_text(encoding="utf-8"))
+            entry = data.get(cam_key)
+            if entry and "H_m" in entry and "pitch_deg" in entry:
+                return entry
+    except Exception as exc:
+        logger.debug("camera_pose 로드 실패: %s", exc)
+    return None
+
+
+def _save_camera_pose(cam_key: str, params: dict) -> None:
+    """road-model 포즈를 camera_key별 JSON에 저장 (다음 세션 prior 재사용)."""
+    try:
+        data: dict = {}
+        if CAMERA_POSE_PATH.exists():
+            try:
+                data = json.loads(CAMERA_POSE_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        prev = data.get(cam_key, {})
+        data[cam_key] = {
+            **params,
+            "n_updates":  int(prev.get("n_updates", 0)) + 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        CAMERA_POSE_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.info("camera_pose 저장: key=%s H=%.1f pitch=%.1f residual=%.1fpx",
+                    cam_key, params.get("H_m", 0), params.get("pitch_deg", 0),
+                    params.get("residual_px", -1))
+    except Exception as exc:
+        logger.warning("camera_pose 저장 실패: %s", exc)
 
 
 def _load_speed_scale(cam_key: str) -> float:
@@ -158,6 +197,9 @@ from config import (
     JPEG_QUALITY,
     MAX_IN_FLIGHT,
     RUNTIME_PROFILE_NAME,
+    SCALE_MIN_OBS,
+    SCALE_MIN_OBS_SPARSE,
+    SCALE_SPARSE_AFTER_FRAMES,
     VEHICLE_CLASSES,
 )
 from congestion import compute_clusters
@@ -177,6 +219,7 @@ _clients: set[WebSocket] = set()
 _camera_queue: asyncio.Queue = asyncio.Queue()
 
 _frame_count: int = 0
+_scale_switch_frame: int = 0   # 카메라 전환 시점의 _frame_count (적응형 min_obs 기준)
 _detect_clients: int = 0   # ws/detect 활성 연결 수 — live_loop 브로드캐스트 억제용
 
 # 현재 선택된 카메라 정보 (lat, lon, name, cctvurl)
@@ -656,7 +699,7 @@ async def history_sampler_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from detector import VehicleDetector, VideoStream
-    logger.info("YOLOv8 + BoT-SORT 모델 로드 중…")
+    logger.info("YOLO 모델 (YOLO26 기본) + BoxMOT 트래커 로드 중…")
     detector = await asyncio.to_thread(VehicleDetector)
     stream   = VideoStream()
     app.state.stream   = stream
@@ -929,8 +972,9 @@ class CameraSwitch(BaseModel):
 @app.post("/switch-camera")
 async def switch_camera(body: CameraSwitch):
     """클릭한 CCTV 정보 저장 + transformer 재보정 + BoT-SORT 리셋 + live_loop 스트림 전환."""
-    global _current_cam, _cam_version
+    global _current_cam, _cam_version, _scale_switch_frame
     _cam_version += 1
+    _scale_switch_frame = _frame_count   # 적응형 min_obs 기준 리셋
     analytics.reset()
     cam_key = roi_manager.camera_key(body.cctvurl)
     analytics.speed_scale = _load_speed_scale(cam_key)
@@ -942,6 +986,14 @@ async def switch_camera(body: CameraSwitch):
     if vc:
         _transformer.load_scale_params(vc)
         logger.info("vehicle_calib 복원: B=%.5f C=%.3f (camera=%s)", vc["B"], vc["C"], cam_key)
+
+    # Road-model 포즈 prior 복원 → solve_pose 초기값 seed (Phase 12)
+    _transformer.reset_pose(clear_prior=True)
+    cp = _load_camera_pose(cam_key)
+    if cp:
+        _transformer.load_pose_params(cp)
+        logger.info("camera_pose prior 복원: H=%.1f pitch=%.1f (camera=%s)",
+                    cp["H_m"], cp["pitch_deg"], cam_key)
 
     # BoT-SORT 내부 상태 리셋
     det = getattr(app.state, "detector", None)
@@ -1719,6 +1771,16 @@ async def live_loop(detector, stream) -> None:
                     _transformer.load_scale_params(_vc)
                     logger.info("vehicle_calib 복원 (live_loop): B=%.5f (camera=%s)", _vc["B"], cam_key)
 
+                # Road-model 포즈 prior 복원 → solve_pose 초기값 seed (Phase 12)
+                _transformer.reset_pose(clear_prior=True)
+                _cp = _load_camera_pose(cam_key)
+                if _cp:
+                    _transformer.load_pose_params(_cp)
+                    logger.info("camera_pose prior 복원 (live_loop): H=%.1f (camera=%s)",
+                                _cp["H_m"], cam_key)
+                global _scale_switch_frame
+                _scale_switch_frame = _frame_count   # 적응형 min_obs 기준 리셋
+
                 # 저장된 calibration 자동 적용
                 _manual_cal_loaded = False
                 if CALIBRATION_PATH.exists():
@@ -1830,14 +1892,26 @@ async def live_loop(detector, stream) -> None:
                 elif abs((used_bearing - bearing + 180) % 360 - 180) > 90:
                     # VP 반전 감지 → 갱신
                     analytics.road_bearing_deg = used_bearing
+                # 포즈 캘리브 성공 시 → camera_pose.json에 영속화(다음 세션 prior). Phase 12
+                if calib_info and calib_info.get("method") == "pose":
+                    _pp = _transformer.get_pose_params()
+                    if _pp:
+                        _save_camera_pose(
+                            roi_manager.camera_key(_current_cam.get("cctvurl", "")), _pp)
                 await _broadcast({
                     "type": "auto_calibrated",
                     "heading": used_bearing,
                     **(calib_info or {}),
                 })
             elif _auto_calib_attempts == 0:
-                logger.info("차선 감지 실패 — GPS 근사 캘리브레이션 유지 (road_width=%.1fm)",
-                            _auto_calib_road_width_m)
+                # 결정트리 3단계: 엣지 실패 + 저장 prior 있음 → prior 포즈 직접 적용. Phase 12
+                _h0, _w0 = frame.shape[:2]
+                if _transformer.apply_prior_pose(
+                    _auto_calib_road_width_m, analytics.road_bearing_deg or 0.0, (_w0, _h0)):
+                    logger.info("차선 감지 실패 — 저장 prior 포즈로 폴백 적용")
+                else:
+                    logger.info("차선 감지 실패 — GPS 근사 캘리브레이션 유지 (road_width=%.1fm)",
+                                _auto_calib_road_width_m)
 
         # MJPEG 스트림용 버퍼 업데이트 (모든 프레임, 탐지 여부 무관)
         global _latest_frame_jpeg
@@ -1931,9 +2005,13 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
 
     _frame_count += 1
 
-    # 10프레임마다 신규 관측 20개 이상이면 모델 재피팅 + 저장
-    if _frame_count % 10 == 0 and _transformer._scale_obs_since_fit >= 20 and _current_cam:
-        if _transformer.fit_scale_model():
+    # 10프레임마다 재피팅 — 적응형 최소관측수(한계2 C): 교통량 적으면 자동 하향.
+    _min_obs = (SCALE_MIN_OBS_SPARSE
+                if (_frame_count - _scale_switch_frame) > SCALE_SPARSE_AFTER_FRAMES
+                else SCALE_MIN_OBS)
+    if (_frame_count % 10 == 0 and _transformer._scale_obs_since_fit >= _min_obs
+            and _current_cam):
+        if _transformer.fit_scale_model(_min_obs):
             new_p = _transformer.get_scale_params()
             if new_p:
                 _ck = roi_manager.camera_key(_current_cam.get("cctvurl", ""))

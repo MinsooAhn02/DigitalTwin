@@ -311,14 +311,14 @@ export default function App() {
           </div>
         )}
 
-        {/* 카메라 미선택 안내 — 좌하단 작은 힌트 */}
+        {/* 카메라 미선택 안내 — 하단 중앙 힌트 */}
         {noCameraSelected && (
           <div style={{
-            position: "absolute", bottom: 60, left: 16,
+            position: "absolute", bottom: 24, left: "50%", transform: "translateX(-50%)",
             background: "rgba(17,24,39,0.85)", padding: "8px 14px",
             borderRadius: 8, fontSize: 12, backdropFilter: "blur(4px)",
             border: "1px solid #374151", pointerEvents: "none",
-            display: "flex", alignItems: "center", gap: 8,
+            display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap",
           }}>
             <span style={{ fontSize: 16 }}>📷</span>
             <div>
@@ -412,7 +412,7 @@ export default function App() {
             <h1 style={{ margin: 0, fontSize: 15, fontWeight: 700, letterSpacing: "-0.02em" }}>{t("app.title")}</h1>
             <button
               onClick={() => setLang(lang === "en" ? "ko" : "en")}
-              title={lang === "en" ? "한국어로 전환" : "Switch to English"}
+              title={lang === "en" ? t("lang.switchToKo") : t("lang.switchToEn")}
               style={{ background: "rgba(30,41,59,0.9)", border: "1px solid #334155", borderRadius: 6, padding: "3px 10px", cursor: "pointer", fontSize: 12, fontWeight: 700, color: lang === "en" ? "#38bdf8" : "#fbbf24" }}
             >
               {lang === "en" ? "KO" : "EN"}

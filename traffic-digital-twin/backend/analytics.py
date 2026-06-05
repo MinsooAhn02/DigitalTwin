@@ -191,7 +191,6 @@ class TrafficAnalytics:
         # 10분 분량 버퍼: ITS 5분 창 타이밍 불일치 흡수를 위해 2배 확보
         # analytics.update()가 ~10fps로 호출 → 6000샘플 ≈ 10분
         self._speed_samples: deque = deque(maxlen=6000)
-        self._stable_count: int = 0            # 연속 안정 갱신 횟수 (>= 3 이면 수렴 간주)
         self._overspeed_count: int = 0         # over-limit 스킵 누적 (진단용)
         self._spd_log_last: dict[int, float] = {}   # 트랙별 진단 로그 스로틀 타임스탬프
 
@@ -214,7 +213,6 @@ class TrafficAnalytics:
             self._gps_trace.clear()
             self._speed_samples.clear()
             self._spd_log_last.clear()
-            self._stable_count = 0
             # speed_scale은 reset하지 않음 — main.py에서 저장된 값을 복원함
 
     def update(
@@ -786,60 +784,38 @@ class TrafficAnalytics:
     def _class_counts(vehicles: list[VehicleState]) -> dict[str, int]:
         return dict(Counter(v.class_name for v in vehicles))
 
-    @property
-    def speed_scale_converged(self) -> bool:
-        """True이면 보정 계수가 수렴해 학습률이 크게 낮아진 상태."""
-        return self._stable_count >= 3
-
     def calibrate_from_its(self, its_speed_kph: float, window_s: float = 600.0) -> float | None:
-        """ITS 구간속도(its_speed_kph)와 측정 평균을 비교해 speed_scale 자동 보정.
+        """ITS 구간속도와 측정 평균을 비교해 speed_scale 자동 보정.
 
-        반환: 갱신된 speed_scale (샘플 부족·분산 과다 시 None)
-
-        window_s=600(10분): ITS 5분 집계 창이 우리 창에 포함되도록 2배 확보.
-        ITS API 업데이트 주기(5분)와 우리 폴링 타이밍이 맞지 않아도
-        10분 창 안에 ITS 집계 구간이 반드시 겹침.
-
-        속도 분산이 30% 초과(교통량 급변)이면 보정 스킵 — 과도기 데이터로
-        잘못된 방향으로 보정되는 것을 막기 위해.
+        ITS 구간속도는 ~1km 구간 평균이고 bbox 필터링 미적용으로 노이즈가 있으므로
+        alpha=0.99 (매우 느린 학습률)로 참고용 수준으로만 반영.
         """
         with self._lock:
             now = time.monotonic()
             recent = [s for s, t in self._speed_samples if now - t <= window_s]
-            if len(recent) < 50:  # 10분 창 기준 최소 샘플 수 상향
+            if len(recent) < 50:
                 return None
             our_avg = sum(recent) / len(recent)
             if our_avg < 3.0:
                 return None
 
-            # 교통량 급변 구간은 보정 스킵 (ITS 창과 우리 창이 같은 상황을 반영하지 않음)
             variance = sum((s - our_avg) ** 2 for s in recent) / len(recent)
-            cv = math.sqrt(variance) / our_avg  # 변동계수
-            if cv > 0.4:  # 40% 이상 분산 → 불안정 구간
+            cv = math.sqrt(variance) / our_avg
+            if cv > 0.4:
                 return None
 
             old_scale = self.speed_scale
             raw_target = old_scale * its_speed_kph / our_avg
             target = max(0.3, min(5.0, raw_target))
             if raw_target != target:
-                # 클램프 도달 = 호모그래피가 크게 어긋났을 가능성 → 무음 열화 방지
                 logger.warning(
                     "speed_scale 클램프 도달: raw=%.2f → %.2f "
                     "(our_avg=%.1f, ITS=%.1f — 보정/호모그래피 점검 권장)",
                     raw_target, target, our_avg, its_speed_kph,
                 )
 
-            # 수렴 여부에 따라 학습률 조정 (미수렴 시 0.5로 더 빠른 초기 수렴)
-            alpha = 0.95 if self.speed_scale_converged else 0.5
-            self.speed_scale = round(old_scale * alpha + target * (1 - alpha), 4)
-
-            # 변화율 1% 미만 → 안정, 그 이상 → 안정 카운트 리셋
-            change_ratio = abs(self.speed_scale - old_scale) / max(old_scale, 0.01)
-            if change_ratio < 0.01:
-                self._stable_count += 1
-            else:
-                self._stable_count = 0
-
+            # ITS 데이터 신뢰도 낮아 매우 느린 보정만 허용 (1회 폴링 최대 ~0.5% 변화)
+            self.speed_scale = round(old_scale * 0.99 + target * 0.01, 4)
             return self.speed_scale
 
     def _gc(self, active: set[int]) -> None:

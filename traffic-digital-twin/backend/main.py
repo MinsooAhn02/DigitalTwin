@@ -71,7 +71,136 @@ from transform import PerspectiveTransformer, CALIBRATION_PATH
 import roi_manager
 import metrics
 
-SPEED_SCALE_PATH = Path(__file__).resolve().parent / "speed_scale.json"
+SPEED_SCALE_PATH    = Path(__file__).resolve().parent / "speed_scale.json"
+VEHICLE_CALIB_PATH  = Path(__file__).resolve().parent / "vehicle_calib.json"
+CAMERA_POSE_PATH    = Path(__file__).resolve().parent / "camera_pose.json"
+
+
+def _load_vehicle_calib(cam_key: str) -> dict | None:
+    """카메라별 저장된 vehicle scale model 로드. 없으면 None."""
+    try:
+        if VEHICLE_CALIB_PATH.exists():
+            data = json.loads(VEHICLE_CALIB_PATH.read_text(encoding="utf-8"))
+            entry = data.get(cam_key)
+            if entry and "B" in entry and "C" in entry:
+                return entry
+    except Exception as exc:
+        logger.debug("vehicle_calib 로드 실패: %s", exc)
+    return None
+
+
+def _save_vehicle_calib(cam_key: str, params: dict) -> None:
+    """vehicle scale model을 camera_key별로 JSON에 저장."""
+    try:
+        data: dict = {}
+        if VEHICLE_CALIB_PATH.exists():
+            try:
+                data = json.loads(VEHICLE_CALIB_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        B, C = float(params["B"]), float(params["C"])
+        data[cam_key] = {
+            **params,
+            "vp_y":       round(-C / B, 2),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        VEHICLE_CALIB_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.info("vehicle_calib 저장: key=%s B=%.5f vp_y=%.1f", cam_key, B, -C / B)
+    except Exception as exc:
+        logger.warning("vehicle_calib 저장 실패: %s", exc)
+
+
+def _load_camera_pose(cam_key: str) -> dict | None:
+    """카메라별 저장된 road-model 포즈 로드. 없으면 None (Phase 12)."""
+    try:
+        if CAMERA_POSE_PATH.exists():
+            data = json.loads(CAMERA_POSE_PATH.read_text(encoding="utf-8"))
+            entry = data.get(cam_key)
+            if entry and "H_m" in entry and "pitch_deg" in entry:
+                return entry
+    except Exception as exc:
+        logger.debug("camera_pose 로드 실패: %s", exc)
+    return None
+
+
+def _save_camera_pose(cam_key: str, params: dict) -> None:
+    """road-model 포즈를 camera_key별 JSON에 저장 (다음 세션 prior 재사용)."""
+    try:
+        data: dict = {}
+        if CAMERA_POSE_PATH.exists():
+            try:
+                data = json.loads(CAMERA_POSE_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        prev = data.get(cam_key, {})
+        data[cam_key] = {
+            **params,
+            "n_updates":  int(prev.get("n_updates", 0)) + 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        CAMERA_POSE_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.info("camera_pose 저장: key=%s H=%.1f pitch=%.1f residual=%.1fpx",
+                    cam_key, params.get("H_m", 0), params.get("pitch_deg", 0),
+                    params.get("residual_px", -1))
+    except Exception as exc:
+        logger.warning("camera_pose 저장 실패: %s", exc)
+
+
+def _compute_roi_gps_ring() -> list[list[float]] | None:
+    """현재 활성 카메라의 ROI를 GPS ring으로 변환 (Phase 3).
+
+    ROI 정규화 좌표 → pixel → GPS (수평선 초과 점은 FAR_CAP_M으로 clamp).
+    캘리브레이션/ROI가 없으면 None 반환.
+    """
+    if _current_cam is None:
+        return None
+    url = _current_cam.get("cctvurl", "")
+    roi = roi_manager.load_roi(url)
+    if not roi or len(roi) < 3:
+        return None
+    try:
+        # 최근 프레임 크기 — transformer에 frame_w/h 저장돼 있으면 사용, 아니면 기본값
+        w = getattr(_transformer, "_frame_w", None) or 640
+        h = getattr(_transformer, "_frame_h", None) or 360
+        return _transformer.roi_to_gps_ring(roi, int(w), int(h))
+    except Exception as exc:
+        logger.debug("roi_to_gps_ring 실패: %s", exc)
+        return None
+
+
+def _apply_fov_ema(new_info: dict) -> dict:
+    """Phase 4: FOV 파라미터(near_m, far_m, road_width_m)에 느린 EMA 적용.
+
+    수동 cali가 있으면 호출하지 않음 (main.py에서 guard).
+    첫 FOV_EMA_MIN_SAMPLES 회는 그냥 고정, 이후 EMA alpha로 조금씩 이동.
+    """
+    global _accepted_fov, _fov_ema_samples
+    _fov_ema_samples += 1
+    keys = ("near_m", "far_m", "road_width_m")
+    if not _accepted_fov:
+        # 최초 채택 — 고정
+        _accepted_fov = {k: new_info[k] for k in keys if k in new_info}
+        return {**new_info, **_accepted_fov}
+    if _fov_ema_samples < FOV_EMA_MIN_SAMPLES:
+        # 데이터 부족 — 초기값 유지
+        return {**new_info, **_accepted_fov}
+    # 충분히 쌓임 → EMA로 조금씩 이동
+    updated = {}
+    changed = False
+    for k in keys:
+        if k not in new_info or k not in _accepted_fov:
+            continue
+        ema_val = _accepted_fov[k] * (1.0 - FOV_EMA_ALPHA) + new_info[k] * FOV_EMA_ALPHA
+        if abs(ema_val - _accepted_fov[k]) > 0.05:  # 미세 변화는 broadcast 생략 지원용
+            changed = True
+        updated[k] = round(ema_val, 2)
+    if changed:
+        _accepted_fov.update(updated)
+    return {**new_info, **_accepted_fov}
 
 
 def _load_speed_scale(cam_key: str) -> float:
@@ -85,7 +214,7 @@ def _load_speed_scale(cam_key: str) -> float:
     return 1.0
 
 
-def _save_speed_scale(cam_key: str, scale: float, converged: bool) -> None:
+def _save_speed_scale(cam_key: str, scale: float) -> None:
     """속도 보정 계수를 camera_key별로 JSON에 저장."""
     try:
         data: dict = {}
@@ -96,7 +225,6 @@ def _save_speed_scale(cam_key: str, scale: float, converged: bool) -> None:
                 pass
         data[cam_key] = {
             "speed_scale": scale,
-            "converged": converged,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         SPEED_SCALE_PATH.write_text(
@@ -121,7 +249,14 @@ from config import (
     JPEG_QUALITY,
     MAX_IN_FLIGHT,
     RUNTIME_PROFILE_NAME,
+    SCALE_MIN_OBS,
+    SCALE_MIN_OBS_SPARSE,
+    SCALE_SPARSE_AFTER_FRAMES,
     VEHICLE_CLASSES,
+    BEARING_REFINE_INTERVAL_FRAMES,
+    BEARING_BROADCAST_MIN_DEG,
+    FOV_EMA_MIN_SAMPLES,
+    FOV_EMA_ALPHA,
 )
 from congestion import compute_clusters
 from history import HistoryStore, SnapshotRow, retention_cutoff
@@ -140,6 +275,7 @@ _clients: set[WebSocket] = set()
 _camera_queue: asyncio.Queue = asyncio.Queue()
 
 _frame_count: int = 0
+_scale_switch_frame: int = 0   # 카메라 전환 시점의 _frame_count (적응형 min_obs 기준)
 _detect_clients: int = 0   # ws/detect 활성 연결 수 — live_loop 브로드캐스트 억제용
 
 # 현재 선택된 카메라 정보 (lat, lon, name, cctvurl)
@@ -169,6 +305,13 @@ _label_ann = sv.LabelAnnotator(text_scale=0.4, text_thickness=1, text_padding=3)
 # 차선 감지 자동 캘리브레이션 상태
 _auto_calib_attempts: int  = 0    # 남은 시도 횟수 (0 = 비활성)
 _auto_calib_road_width_m: float = 7.0  # lanes × 2 × lane_width_m
+# 마지막 auto_calibrated 브로드캐스트 내용 (bearing 재보정 시 재사용)
+_last_calib_info: dict = {}
+_last_broadcast_bearing: float = 0.0
+
+# Phase 4: polygon 안정화 — 초기값 고정 + 느린 EMA
+_accepted_fov: dict = {}          # 최초 채택된 FOV 파라미터 (near_m, far_m, road_width_m)
+_fov_ema_samples: int = 0         # 자동 추정값 수신 횟수 (임계치 이후 EMA 반영)
 
 # ITS API 응답 캐시 (TTL 5분, 최대 50개 bbox 조합)
 _cctv_cache: TTLCache = TTLCache(maxsize=50, ttl=300)
@@ -254,11 +397,10 @@ async def _update_its_speed() -> None:
         logger.info("ITS 구간속도 갱신: %.1f kph", result)
         new_scale = analytics.calibrate_from_its(result)
         if new_scale is not None:
-            converged = analytics.speed_scale_converged
-            logger.info("속도 보정 계수 갱신: %.4f (수렴: %s, ITS %.1f kph)", new_scale, converged, result)
+            logger.info("속도 보정 계수 갱신: %.4f (ITS %.1f kph)", new_scale, result)
             if _current_cam:
                 cam_key = roi_manager.camera_key(_current_cam.get("cctvurl", ""))
-                _save_speed_scale(cam_key, new_scale, converged)
+                _save_speed_scale(cam_key, new_scale)
 
 
 _NAME_BEARING: dict[str, float] = {
@@ -399,8 +541,8 @@ class BackgroundMonitor:
     - B(클러스터링) / C(히스토리 저장) / D(Re-ID) 확장을 위한 훅 포함
     """
     POLL_S            = 8.0   # 캡처 주기 (초) — CPU 부하 절충
-    THRESH_BUSY       = 3     # > 3 → busy
-    THRESH_CONGESTED  = 6     # > 6 → congested
+    THRESH_BUSY       = 6     # > 6 → busy  (7+)
+    THRESH_CONGESTED  = 14    # > 14 → congested  (15+)
 
     def __init__(self) -> None:
         self._cams: dict[str, _BgCamState] = {}
@@ -619,7 +761,7 @@ async def history_sampler_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from detector import VehicleDetector, VideoStream
-    logger.info("YOLOv8 + BoT-SORT 모델 로드 중…")
+    logger.info("YOLO 모델 (YOLO26 기본) + BoxMOT 트래커 로드 중…")
     detector = await asyncio.to_thread(VehicleDetector)
     stream   = VideoStream()
     app.state.stream   = stream
@@ -892,12 +1034,28 @@ class CameraSwitch(BaseModel):
 @app.post("/switch-camera")
 async def switch_camera(body: CameraSwitch):
     """클릭한 CCTV 정보 저장 + transformer 재보정 + BoT-SORT 리셋 + live_loop 스트림 전환."""
-    global _current_cam, _cam_version
+    global _current_cam, _cam_version, _scale_switch_frame
     _cam_version += 1
+    _scale_switch_frame = _frame_count   # 적응형 min_obs 기준 리셋
     analytics.reset()
     cam_key = roi_manager.camera_key(body.cctvurl)
     analytics.speed_scale = _load_speed_scale(cam_key)
     logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
+
+    # Vehicle apparent-size scale model 복원
+    _transformer.reset_scale_obs(clear_model=True)
+    vc = _load_vehicle_calib(cam_key)
+    if vc:
+        _transformer.load_scale_params(vc)
+        logger.info("vehicle_calib 복원: B=%.5f C=%.3f (camera=%s)", vc["B"], vc["C"], cam_key)
+
+    # Road-model 포즈 prior 복원 → solve_pose 초기값 seed (Phase 12)
+    _transformer.reset_pose(clear_prior=True)
+    cp = _load_camera_pose(cam_key)
+    if cp:
+        _transformer.load_pose_params(cp)
+        logger.info("camera_pose prior 복원: H=%.1f pitch=%.1f (camera=%s)",
+                    cp["H_m"], cp["pitch_deg"], cam_key)
 
     # BoT-SORT 내부 상태 리셋
     det = getattr(app.state, "detector", None)
@@ -909,9 +1067,12 @@ async def switch_camera(body: CameraSwitch):
     _its_speed_kph = None
     asyncio.create_task(_update_its_speed())
 
-    # 노드링크 DB에서 가장 가까운 도로의 제한속도 자동 적용
-    road = await asyncio.to_thread(get_road_info, body.lat, body.lon, _parse_road_name_hint(body.name))
-    road_snap = await asyncio.to_thread(get_road_snap, body.lat, body.lon, _parse_road_name_hint(body.name))
+    # 노드링크 DB에서 가장 가까운 도로 정보 조회 — 두 쿼리 병렬 실행
+    _hint = _parse_road_name_hint(body.name)
+    road, road_snap = await asyncio.gather(
+        asyncio.to_thread(get_road_info, body.lat, body.lon, _hint),
+        asyncio.to_thread(get_road_snap, body.lat, body.lon, _hint),
+    )
     if road and road["max_spd"] > 0:
         analytics.speed_limit_kph = float(road["max_spd"])
         logger.info("노드링크 제한속도 적용: %d kph (%s)", road["max_spd"], road.get("road_name", ""))
@@ -959,7 +1120,12 @@ async def switch_camera(body: CameraSwitch):
         "snap_along_m": road_snap["snap_along_m"] if road_snap else None,
     }
 
-    # live_loop 스트림 전환 큐잉
+    # 이전 카메라 프레임이 새 연결에 흘러들어가지 않도록 버퍼 초기화
+    global _latest_frame_jpeg, _latest_annotated_jpeg
+    _latest_frame_jpeg = None
+    _latest_annotated_jpeg = None
+
+    # live_loop 스트림 전환 큐잉 — road_info도 함께 전달해 live_loop 재쿼리 방지
     if body.cctvurl:
         await _camera_queue.put({
             "url":          body.cctvurl,
@@ -974,6 +1140,11 @@ async def switch_camera(body: CameraSwitch):
             "name_bearing": _current_cam["name_bearing"],
             "road_pts":     _current_cam["road_pts"],
             "snap_along_m": _current_cam["snap_along_m"],
+            # road_info 캐시 — live_loop가 중복 DB 쿼리 하지 않게
+            "_road_name":     road["road_name"]  if road else None,
+            "_road_lanes":    road["lanes"]       if road else None,
+            "_road_max_spd":  road["max_spd"]     if road else None,
+            "_road_rank":     road["road_rank"]   if road else None,
         })
 
     analytics.cam_lat = _current_cam["snap_lat"]
@@ -1207,10 +1378,17 @@ async def save_roi(body: RoiBody):
     if len(body.polygon) < 3:
         return {"ok": False, "error": "polygon must have at least 3 points"}
     roi_manager.save_roi(body.cctvurl, body.polygon, auto=False)
-    # 현재 활성 카메라와 같으면 detector에 즉시 적용
+    # 현재 활성 카메라와 같으면 detector에 즉시 적용 + ROI ring 재broadcast
     det = getattr(app.state, "detector", None)
     if det is not None and _current_cam and _current_cam.get("cctvurl") == body.cctvurl:
         det.set_roi(body.polygon)
+        # Phase 3: ROI 변경 → GPS ring 재계산 후 broadcast
+        roi_ring = _compute_roi_gps_ring()
+        if roi_ring:
+            asyncio.create_task(_broadcast({
+                "type": "roi_updated",
+                "roi_gps_ring": roi_ring,
+            }))
     return {"ok": True}
 
 
@@ -1506,7 +1684,6 @@ async def runtime_config():
 def _inject_its_speed(payload: dict) -> dict:
     """FrameAnalytics dict에 ITS 구간속도 및 오차율, 보정 계수 추가."""
     payload["speed_scale"] = round(analytics.speed_scale, 4)
-    payload["speed_scale_converged"] = analytics.speed_scale_converged
 
     # 화면 비교용: 10분 rolling average (calibrate_from_its와 동일 창)
     # avg_speed_kph(순간값)이 아니라 같은 시간축의 평균끼리 비교해야 의미 있음
@@ -1642,6 +1819,8 @@ async def live_loop(detector, stream) -> None:
                 _transformer.set_road_corridor(cam.get("road_pts"), cam.get("snap_along_m"))
                 analytics.cam_lat = snap_lat
                 analytics.cam_lon = snap_lon
+                # Phase 5: road_pts를 analytics에도 전달 (로컬 도로 방위 계산용)
+                analytics.road_pts = cam.get("road_pts")
                 tracker = VehicleTracker()
                 analytics.reset()
                 _metrics.set_context(source=cam.get("name", ""))
@@ -1663,6 +1842,28 @@ async def live_loop(detector, stream) -> None:
                 analytics.speed_scale = _load_speed_scale(cam_key)
                 logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
 
+                # Vehicle apparent-size scale model 복원 (live_loop 경로)
+                _transformer.reset_scale_obs(clear_model=True)
+                _vc = _load_vehicle_calib(cam_key)
+                if _vc:
+                    _transformer.load_scale_params(_vc)
+                    logger.info("vehicle_calib 복원 (live_loop): B=%.5f (camera=%s)", _vc["B"], cam_key)
+
+                # Road-model 포즈 prior 복원 → solve_pose 초기값 seed (Phase 12)
+                _transformer.reset_pose(clear_prior=True)
+                _cp = _load_camera_pose(cam_key)
+                if _cp:
+                    _transformer.load_pose_params(_cp)
+                    logger.info("camera_pose prior 복원 (live_loop): H=%.1f (camera=%s)",
+                                _cp["H_m"], cam_key)
+                global _scale_switch_frame, _last_calib_info, _last_broadcast_bearing
+                global _accepted_fov, _fov_ema_samples
+                _scale_switch_frame = _frame_count   # 적응형 min_obs 기준 리셋
+                _last_calib_info = {}
+                _last_broadcast_bearing = analytics.road_bearing_deg or 0.0
+                _accepted_fov = {}           # Phase 4: 카메라 전환 시 FOV 초기화
+                _fov_ema_samples = 0
+
                 # 저장된 calibration 자동 적용
                 _manual_cal_loaded = False
                 if CALIBRATION_PATH.exists():
@@ -1678,17 +1879,17 @@ async def live_loop(detector, stream) -> None:
                     except Exception as exc:
                         logger.warning("캘리브레이션 로드 실패: %s", exc)
 
-                # 스트림 준비 완료 신호를 모든 WS 클라이언트에 전송
-                road_info = await asyncio.to_thread(
-                    get_road_info, cam["lat"], cam["lon"], _parse_road_name_hint(cam.get("name", ""))
-                )
+                # 스트림 준비 완료 신호 — switch_camera에서 캐싱된 road_info 재사용 (중복 쿼리 없음)
+                _road_name    = cam.get("_road_name")
+                _road_lanes   = cam.get("_road_lanes")
+                _road_max_spd = cam.get("_road_max_spd")
+                _road_rank    = str(cam.get("_road_rank") or "")
 
                 # 도로폭 계산 (카메라 공통 — manual/auto-calib 무관하게 broadcast에 사용)
                 _cam_road_width_m: float | None = cam.get("road_width_m")
                 if _cam_road_width_m is None:
-                    _ri_lanes = road_info["lanes"] if road_info and road_info.get("lanes") else 2
-                    _ri_rank  = str(road_info.get("road_rank", "")) if road_info else ""
-                    _ri_lane_w = 3.5 if _ri_rank in ("101", "102", "103") else (3.25 if _ri_rank in ("104", "105") else 3.0)
+                    _ri_lanes = _road_lanes or 2
+                    _ri_lane_w = 3.5 if _road_rank in ("101", "102", "103") else (3.25 if _road_rank in ("104", "105") else 3.0)
                     _cam_road_width_m = max(1, _ri_lanes) * 2 * _ri_lane_w
 
                 # 수동 캘리브레이션 없으면 차선 감지 자동 보정 예약
@@ -1698,25 +1899,23 @@ async def live_loop(detector, stream) -> None:
                     oneway = cam.get("is_oneway", False)
                     logger.info("도로폭: %.1fm (%s)", _cam_road_width_m, "편도" if oneway else "양방향")
                     _auto_calib_attempts = 5  # 최대 5프레임 시도
-                road_bearing_for_ui = (
-                    cam.get("road_bearing")
-                    if cam.get("road_bearing") is not None
-                    else (road_info["bearing_deg"] if road_info else None)
-                )
+                road_bearing_for_ui = cam.get("road_bearing")
                 name_bearing_for_ui = (
                     cam.get("name_bearing")
                     if cam.get("name_bearing") is not None
                     else _parse_name_bearing(cam.get("name", ""), road_bearing_for_ui)
                 )
+                # Phase 3: ROI를 GPS ring으로 변환해 polygon으로 표시
+                _roi_ring = _compute_roi_gps_ring()
                 await _broadcast({
                     "type": "camera_ready",
                     "name": cam.get("name", ""),
                     "roi": saved_roi,
                     "camera_key": cam_key,
                     "calibrated": _transformer.is_calibrated,
-                    "road_name": road_info["road_name"] if road_info else None,
-                    "road_lanes": road_info["lanes"] if road_info else None,
-                    "road_max_spd": road_info["max_spd"] if road_info else None,
+                    "road_name":     _road_name,
+                    "road_lanes":    _road_lanes,
+                    "road_max_spd":  _road_max_spd,
                     "road_bearing": road_bearing_for_ui,
                     "name_bearing": name_bearing_for_ui,
                     "snap_lat":     snap_lat,
@@ -1724,6 +1923,7 @@ async def live_loop(detector, stream) -> None:
                     "road_width_m": _cam_road_width_m,
                     "road_pts":     cam.get("road_pts"),
                     "snap_along_m": cam.get("snap_along_m"),
+                    **({"roi_gps_ring": _roi_ring} if _roi_ring else {}),
                 })
                 logger.info("카메라 전환 완료, camera_ready 신호 전송")
             except RuntimeError as e:
@@ -1754,8 +1954,9 @@ async def live_loop(detector, stream) -> None:
             await asyncio.sleep(0.5)
             continue
 
-        # 차선 감지 자동 캘리브레이션 (수동 캘리브 없을 때, 최초 N프레임 시도)
-        if _auto_calib_attempts > 0 and frame is not None:
+        # 차선 감지 자동 캘리브레이션
+        # Phase 4: 수동 cali가 있으면 완전 skip — polygon/homography 고정
+        if _auto_calib_attempts > 0 and frame is not None and not _transformer.is_calibrated:
             _auto_calib_attempts -= 1
             bearing = analytics.road_bearing_deg or 0.0
             ok, used_bearing, calib_info = await asyncio.to_thread(
@@ -1769,19 +1970,35 @@ async def live_loop(detector, stream) -> None:
                 logger.info("차선 감지 자동 캘리브레이션 완료 (bearing=%.1f°)", used_bearing)
                 _auto_calib_attempts = 0
                 if analytics.road_bearing_deg is None:
-                    # 노드링크 bearing 없음 → 자동 캘리브 bearing 사용
                     analytics.road_bearing_deg = used_bearing
                 elif abs((used_bearing - bearing + 180) % 360 - 180) > 90:
-                    # VP 반전 감지 → 갱신
                     analytics.road_bearing_deg = used_bearing
+                if calib_info and calib_info.get("method") == "pose":
+                    _pp = _transformer.get_pose_params()
+                    if _pp:
+                        _save_camera_pose(
+                            roi_manager.camera_key(_current_cam.get("cctvurl", "")), _pp)
+                raw_info = dict(calib_info) if calib_info else {}
+                # Phase 4: FOV 파라미터에 EMA 적용 (급변 방지)
+                stabilized_info = _apply_fov_ema(raw_info)
+                _last_calib_info = stabilized_info
+                _last_broadcast_bearing = used_bearing
+                roi_ring = _compute_roi_gps_ring()
                 await _broadcast({
                     "type": "auto_calibrated",
                     "heading": used_bearing,
-                    **(calib_info or {}),
+                    **({"roi_gps_ring": roi_ring} if roi_ring else {}),
+                    **_last_calib_info,
                 })
             elif _auto_calib_attempts == 0:
-                logger.info("차선 감지 실패 — GPS 근사 캘리브레이션 유지 (road_width=%.1fm)",
-                            _auto_calib_road_width_m)
+                # 결정트리 3단계: 엣지 실패 + 저장 prior 있음 → prior 포즈 직접 적용. Phase 12
+                _h0, _w0 = frame.shape[:2]
+                if _transformer.apply_prior_pose(
+                    _auto_calib_road_width_m, analytics.road_bearing_deg or 0.0, (_w0, _h0)):
+                    logger.info("차선 감지 실패 — 저장 prior 포즈로 폴백 적용")
+                else:
+                    logger.info("차선 감지 실패 — GPS 근사 캘리브레이션 유지 (road_width=%.1fm)",
+                                _auto_calib_road_width_m)
 
         # MJPEG 스트림용 버퍼 업데이트 (모든 프레임, 탐지 여부 무관)
         global _latest_frame_jpeg
@@ -1804,6 +2021,31 @@ async def live_loop(detector, stream) -> None:
         )
         if payload:
             await _broadcast(payload)
+
+        # Task 3: bearing auto-refinement from observed vehicle flow
+        # Phase 2: refine_road_pts 호출 결과를 road_pts에 반영하지 않음
+        #   (bearing-bin 직선화가 OSM shape_pts 곡선을 덮어쓰는 문제 차단)
+        if _frame_count % BEARING_REFINE_INTERVAL_FRAMES == 0:
+            refined = analytics.refine_bearing()
+            # Phase 2: new_road = None 고정 — OSM shape_pts 곡선 유지
+            new_road = None
+
+            need_broadcast = False
+            if refined is not None:
+                diff = abs(((refined - _last_broadcast_bearing + 180) % 360) - 180)
+                if diff >= BEARING_BROADCAST_MIN_DEG:
+                    _last_broadcast_bearing = refined
+                    need_broadcast = True
+                    logger.debug("bearing 자동 보정: %.1f° (변화량 %.1f°)", refined, diff)
+
+            if need_broadcast:
+                roi_ring = _compute_roi_gps_ring()
+                await _broadcast({
+                    "type": "auto_calibrated",
+                    "heading": refined,
+                    **({"roi_gps_ring": roi_ring} if roi_ring else {}),
+                    **_last_calib_info,
+                })
 
         elapsed = time.perf_counter() - t0
         if elapsed > target_interval:
@@ -1867,7 +2109,34 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
     _t0 = time.perf_counter()
     vehicles = _build_vehicles(tracked, frame_wh=(w, h))
     _transform_ms = (time.perf_counter() - _t0) * 1000.0
+
+    # ── Vehicle apparent-size scale 관측 누적 ──────────────────────────
+    for v_state in vehicles:
+        x1, _, x2, y2 = v_state.bbox_xyxy
+        _transformer.accumulate_scale_obs(y2, x2 - x1, v_state.class_name, h, w)
+
     _frame_count += 1
+
+    # 10프레임마다 재피팅 — 적응형 최소관측수(한계2 C): 교통량 적으면 자동 하향.
+    _min_obs = (SCALE_MIN_OBS_SPARSE
+                if (_frame_count - _scale_switch_frame) > SCALE_SPARSE_AFTER_FRAMES
+                else SCALE_MIN_OBS)
+    if (_frame_count % 10 == 0 and _transformer._scale_obs_since_fit >= _min_obs
+            and _current_cam):
+        if _transformer.fit_scale_model(_min_obs):
+            new_p = _transformer.get_scale_params()
+            if new_p:
+                _ck = roi_manager.camera_key(_current_cam.get("cctvurl", ""))
+                # Drift 감지: 저장된 vp_y와 15% 이상 차이나면 경고 후 덮어쓰기
+                _saved_vc = _load_vehicle_calib(_ck)
+                if _saved_vc and _saved_vc.get("vp_y") and new_p["B"] != 0:
+                    _new_vp = -new_p["C"] / new_p["B"]
+                    _drift = abs(_new_vp - _saved_vc["vp_y"]) / max(_saved_vc["vp_y"], 1.0)
+                    if _drift > 0.15:
+                        logger.warning("vehicle_calib vp_y drift %.0f%% (%.1f→%.1f) — 새 모델로 갱신",
+                                       _drift * 100, _saved_vc["vp_y"], _new_vp)
+                _save_vehicle_calib(_ck, new_p)
+
     _t0 = time.perf_counter()
     result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt, in_ids, out_ids)
     _analytics_ms = (time.perf_counter() - _t0) * 1000.0

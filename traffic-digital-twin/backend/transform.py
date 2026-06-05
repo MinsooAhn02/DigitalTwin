@@ -10,15 +10,21 @@ transform.py — Perspective Transform (픽셀 → 실세계 좌표)
 import json
 import logging
 import math
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 import cv2
 from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIGHT_M, CAMERA_BEARING_DEG
+from config import POSE_RESIDUAL_MAX_PX, SCALE_MIN_OBS, FAR_CAP_M
+import camera_pose
 
 CALIBRATION_PATH = Path(__file__).parent / "calibration_data.json"
 
 logger = logging.getLogger(__name__)
+
+# 차종별 알려진 폭 (m) — vehicle apparent size calibration에 사용
+VEHICLE_WIDTHS_M: dict[str, float] = {"car": 1.8, "truck": 2.5, "bus": 2.5}
 
 
 def _line_intersection(l1: tuple, l2: tuple) -> tuple[float, float] | None:
@@ -66,6 +72,18 @@ class PerspectiveTransformer:
         self._gps_center_lat: float = float(np.mean(gps_arr[:, 0]))
         self._gps_center_lon: float = float(np.mean(gps_arr[:, 1]))
         self._is_calibrated: bool = False  # 4-point 사용자 캘리브레이션 여부
+
+        # ── Vehicle apparent-size scale model ──────────────────────────
+        self._scale_obs: deque[tuple[float, float]] = deque(maxlen=200)  # (v_px, scale_m/px)
+        self._scale_model: tuple[float, float] | None = None             # (B, C): 1/scale = B*v + C
+        self._scale_obs_since_fit: int = 0
+        self._frame_h: int = 0
+        self._frame_w: int = 0
+
+        # ── Road-model 카메라 포즈 (camera_pose.solve_pose) ─────────────
+        self._pose: camera_pose.Pose | None = None         # 현재 적용된 포즈
+        self._pose_residual: float = float("inf")          # 마지막 솔브 reprojection RMS(px)
+        self._pose_prior: camera_pose.Pose | None = None   # 저장값 seed (다음 세션 재사용)
 
         # ── 도로 중심선 기반 곡선 GPS 매핑 ──────────────────────────────
         # 단일 Homography의 직선 근사 대신, 도로 곡선을 따라 차량 GPS를 계산.
@@ -342,7 +360,11 @@ class PerspectiveTransformer:
         return self._gps_center_lat + new_dlat, self._gps_center_lon + new_dlon
 
     def pixel_to_meter(self, u: float, v: float) -> tuple[float, float]:
-        """픽셀 (u, v) → (x_m, y_m) — 속도 계산용 실세계 미터 좌표"""
+        """픽셀 (u, v) → (x_m, y_m) — 속도 계산용 실세계 미터 좌표.
+
+        H_meter 호모그래피 결과를 그대로 반환한다. scale model의 depth-varying 계수를
+        절대 좌표에 곱하면 프레임 간 위치 불연속(speed=0 고착)이 발생하므로 적용하지 않는다.
+        """
         return self._transform_point(self._H_meter, u, v)
 
     def batch_pixel_to_gps(
@@ -376,6 +398,209 @@ class PerspectiveTransformer:
     @property
     def is_calibrated(self) -> bool:
         return self._is_calibrated
+
+    # ── Phase 3: ROI → GPS ring ─────────────────────────────────────────
+
+    def roi_to_gps_ring(
+        self,
+        roi_norm_pts: list[list[float]],
+        w: int,
+        h: int,
+    ) -> list[list[float]] | None:
+        """ROI 정규화 좌표(0~1)를 GPS [[lat,lon],...] ring으로 변환.
+
+        수평선 초과(d > FAR_CAP_M) 또는 카메라 뒤(d < 0.5m) 꼭짓점은
+        v 좌표를 이진 탐색으로 조정해 유효 깊이 범위 안으로 clamp.
+        """
+        if self._H_meter is None:
+            return None
+        ring: list[list[float]] = []
+        for nx, ny in roi_norm_pts:
+            u = nx * w
+            v = self._clamp_v_to_depth(nx * w, ny * h, float(h))
+            lat, lon = self.pixel_to_gps(u, v)
+            ring.append([lat, lon])
+        return ring if len(ring) >= 3 else None
+
+    def _clamp_v_to_depth(self, u: float, v: float, h: float) -> float:
+        """v 좌표를 [0.5m, FAR_CAP_M] 깊이 범위로 조정 (이진 탐색).
+
+        일반 도로 카메라에서 v 증가 → 깊이 감소 (아래로 갈수록 가까움).
+        """
+        x_m, y_m = self.pixel_to_meter(u, v)
+        d = math.hypot(x_m, y_m)
+        if 0.5 <= d <= FAR_CAP_M:
+            return v
+        # v_lo → v_hi 범위에서 깊이가 FAR_CAP_M 이하가 되는 v 탐색
+        # (너무 멀거나 음수: v를 아래로 이동해 깊이 줄임)
+        v_lo = max(v, 0.0)
+        v_hi = h - 1.0
+        if v_lo >= v_hi:
+            return v_hi
+        for _ in range(20):
+            v_mid = (v_lo + v_hi) * 0.5
+            x_m, y_m = self.pixel_to_meter(u, v_mid)
+            d_mid = math.hypot(x_m, y_m)
+            if d_mid > FAR_CAP_M or d_mid < 0.5:
+                v_lo = v_mid  # 아직 범위 밖 → v 더 증가
+            else:
+                v_hi = v_mid  # 유효 범위 → v 감소해 상단 경계 좁힘
+        return (v_lo + v_hi) * 0.5
+
+    # ── Vehicle apparent-size scale model ──────────────────────────────
+
+    def accumulate_scale_obs(
+        self,
+        v: float,
+        bbox_w_px: float,
+        class_name: str,
+        frame_h: int,
+        frame_w: int,
+    ) -> None:
+        """차량 bbox 폭 관측을 scale model 피팅용 버퍼에 추가."""
+        real_w = VEHICLE_WIDTHS_M.get(class_name)
+        if real_w is None or bbox_w_px < 20.0:
+            return
+        self._frame_h, self._frame_w = frame_h, frame_w
+        self._scale_obs.append((float(v), real_w / bbox_w_px))
+        self._scale_obs_since_fit += 1
+
+    def fit_scale_model(self, min_obs: int = SCALE_MIN_OBS) -> bool:
+        """누적 관측으로 1/scale = B*v + C 선형 모델 피팅.
+
+        성공 시 _scale_model 업데이트 후 True 반환.
+        유효성 조건: B > 0, vp_y = -C/B ∈ (0, 0.7*frame_h).
+
+        min_obs: 적응형 최소 관측수 (교통량 적으면 낮춰 호출 — 한계2 C). 이제 스케일
+        모델은 포즈 캘리브의 *보조*(미세보정)이므로 임계값을 낮춰도 안전.
+        """
+        if len(self._scale_obs) < min_obs:
+            return False
+        vs    = np.array([o[0] for o in self._scale_obs], dtype=np.float64)
+        invsc = np.array([1.0 / o[1] for o in self._scale_obs], dtype=np.float64)
+        A = np.column_stack([vs, np.ones_like(vs)])
+        result = np.linalg.lstsq(A, invsc, rcond=None)
+        B, C = float(result[0][0]), float(result[0][1])
+        if B <= 0:
+            logger.debug("fit_scale_model: B=%.5f <= 0, 피팅 거부", B)
+            return False
+        vp_y = -C / B
+        if not (0 < vp_y < 0.7 * self._frame_h):
+            logger.debug("fit_scale_model: vp_y=%.1f 유효 범위 벗어남, 피팅 거부", vp_y)
+            return False
+        self._scale_model = (B, C)
+        self._scale_obs_since_fit = 0
+        logger.info("fit_scale_model 완료: B=%.5f C=%.3f vp_y=%.1fpx (obs=%d)",
+                    B, C, vp_y, len(self._scale_obs))
+        return True
+
+    def _scale_correction_at(self, v: float) -> float:
+        """픽셀 y=v에서의 스케일 보정 계수 (fitted/homography). [0.3, 3.0] 클램프."""
+        if self._scale_model is None or self._frame_w == 0:
+            return 1.0
+        B, C = self._scale_model
+        denom = B * v + C
+        if denom <= 0:
+            return 1.0
+        fitted_scale = 1.0 / denom
+        w2 = self._frame_w / 2.0
+        x0m, _ = self._transform_point(self._H_meter, w2, v)
+        x1m, _ = self._transform_point(self._H_meter, w2 + 1.0, v)
+        h_scale = abs(x1m - x0m)
+        if h_scale < 1e-6:
+            return 1.0
+        return min(max(fitted_scale / h_scale, 0.3), 3.0)
+
+    def load_scale_params(self, params: dict) -> None:
+        """vehicle_calib.json 엔트리에서 scale model 복원."""
+        try:
+            B, C = float(params["B"]), float(params["C"])
+            self._scale_model = (B, C)
+            self._frame_h = int(params.get("frame_h", self._frame_h))
+            self._frame_w = int(params.get("frame_w", self._frame_w))
+            logger.info("load_scale_params: B=%.5f C=%.3f (frame %dx%d)",
+                        B, C, self._frame_w, self._frame_h)
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("load_scale_params 실패: %s", exc)
+
+    def get_scale_params(self) -> dict | None:
+        """현재 scale model을 직렬화 가능한 dict로 반환. 모델 없으면 None."""
+        if self._scale_model is None:
+            return None
+        B, C = self._scale_model
+        return {"B": B, "C": C, "frame_h": self._frame_h, "frame_w": self._frame_w}
+
+    def reset_scale_obs(self, clear_model: bool = False) -> None:
+        """카메라 전환 시 관측 버퍼 초기화.
+
+        clear_model=True: 이전 카메라 모델도 제거 (load_scale_params로 새 모델 로드 전).
+        """
+        self._scale_obs.clear()
+        self._scale_obs_since_fit = 0
+        if clear_model:
+            self._scale_model = None
+
+    # ── Road-model 카메라 포즈 영속화 / 적용 ───────────────────────────
+
+    def get_pose_params(self) -> dict | None:
+        """현재 포즈를 직렬화 가능한 dict로 반환. 포즈 없으면 None."""
+        if self._pose is None:
+            return None
+        d = self._pose.to_dict()
+        d["residual_px"] = round(self._pose_residual, 2)
+        d["frame_w"] = self._frame_w
+        d["frame_h"] = self._frame_h
+        return d
+
+    def load_pose_params(self, params: dict) -> None:
+        """camera_pose.json 엔트리를 prior로 복원 (solve_pose 초기값 seed)."""
+        try:
+            self._pose_prior = camera_pose.Pose(
+                H_m=float(params["H_m"]),
+                pitch_deg=float(params["pitch_deg"]),
+                yaw_deg=float(params["yaw_deg"]),
+                focal_px=float(params["focal_px"]),
+                x0_m=float(params["x0_m"]),
+            )
+            logger.info(
+                "load_pose_params: H=%.1f pitch=%.1f yaw=%.1f f=%.0f (prior seed)",
+                self._pose_prior.H_m, self._pose_prior.pitch_deg,
+                self._pose_prior.yaw_deg, self._pose_prior.focal_px,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("load_pose_params 실패: %s", exc)
+
+    def apply_prior_pose(
+        self, road_width_m: float, bearing_deg: float, frame_wh: tuple[int, int],
+    ) -> bool:
+        """저장된 prior 포즈를 직접 적용 (엣지 약함 + prior 있음 — 결정트리 3단계)."""
+        if self._pose_prior is None:
+            return False
+        road_model = camera_pose.RoadModel(
+            road_width_m=road_width_m, bearing_deg=bearing_deg,
+            snap_lat=self._gps_center_lat, snap_lon=self._gps_center_lon,
+        )
+        corners = camera_pose.pose_to_corners(self._pose_prior, road_model, frame_wh)
+        if corners is None:
+            return False
+        src_pts, dst_gps = corners
+        if self._apply_homography_corners(src_pts, dst_gps, bearing_deg):
+            self._pose = self._pose_prior
+            logger.info("prior 포즈 직접 적용: H=%.1fm pitch=%.1f° (엣지 폴백)",
+                        self._pose_prior.H_m, self._pose_prior.pitch_deg)
+            return True
+        return False
+
+    def reset_pose(self, clear_prior: bool = True) -> None:
+        """카메라 전환 시 포즈 상태 초기화. clear_prior=False면 prior seed 유지."""
+        self._pose = None
+        self._pose_residual = float("inf")
+        if clear_prior:
+            self._pose_prior = None
+
+    @property
+    def pose_residual(self) -> float:
+        return self._pose_residual
 
     def update_from_calibration(
         self,
@@ -411,6 +636,37 @@ class PerspectiveTransformer:
             pixel_pts, gps_pts,
         )
 
+    def _apply_homography_corners(
+        self,
+        src_pts: np.ndarray,
+        dst_gps: np.ndarray,
+        bearing_deg: float,
+    ) -> bool:
+        """이미지 4코너 ↔ GPS 4코너 대응으로 _H_gps/_H_meter + 곡선매핑 상태 갱신.
+
+        포즈 캘리브와 휴리스틱 캘리브가 공유하는 공통 꼬리 로직.
+        """
+        H_gps, _ = cv2.findHomography(src_pts, dst_gps)
+        if H_gps is None:
+            return False
+        self._H_gps = H_gps
+        dst_meter = self._gps_pts_to_local_meters(np.float32(dst_gps))
+        H_m, _ = cv2.findHomography(src_pts, dst_meter)
+        if H_m is not None:
+            self._H_meter = H_m
+        self._bearing_rad = 0.0
+        self._is_calibrated = False
+
+        # snap(=_gps_center)의 H_meter ENU 좌표 갱신 (곡선 GPS 매핑용)
+        _R = 6_371_000.0
+        _tl_lat, _tl_lon = float(dst_gps[0][0]), float(dst_gps[0][1])
+        _lat0_r = math.radians(_tl_lat)
+        self._snap_meter_x = _R * math.radians(self._gps_center_lon - _tl_lon) * math.cos(_lat0_r)
+        self._snap_meter_y = _R * math.radians(self._gps_center_lat - _tl_lat)
+        self._curve_bearing_rad = math.radians(bearing_deg)
+        self._refresh_curve_direction_sign()
+        return True
+
     def auto_calibrate_from_frame(
         self,
         frame: np.ndarray,
@@ -427,6 +683,7 @@ class PerspectiveTransformer:
           calib_info: {cam_h_m, near_m, far_m, road_width_m, pitch_deg, road_length_m}
         """
         h, w = frame.shape[:2]
+        self._frame_h, self._frame_w = h, w
         fy = h * 1.2  # assumed focal length (≈45° vFoV)
 
         # ── 1. Edge detection ────────────────────────────────────────
@@ -597,6 +854,57 @@ class PerspectiveTransformer:
                 bearing_deg = (bearing_deg + 180.0) % 360.0
                 logger.info("bearing %.1f°로 반전", bearing_deg)
 
+        # ── 5c. Road-model 포즈 솔버 (主 캘리브) ───────────────────────
+        # 차선 엣지 + VP + 도로폭으로 카메라 물리 포즈를 역산(camera_pose.solve_pose).
+        # 성공·품질충족 시 휴리스틱(섹션 6~10)을 건너뛰고 포즈→호모그래피로 즉시 반환.
+        # 실패 시 아래 기존 휴리스틱으로 폴백(behavior 비퇴행).
+        road_model = camera_pose.RoadModel(
+            road_width_m=road_width_m,
+            bearing_deg=bearing_deg,
+            snap_lat=self._gps_center_lat,
+            snap_lon=self._gps_center_lon,
+        )
+        pose, residual = camera_pose.solve_pose(
+            left_pts, right_pts, (vp_x, vp_y), road_model, (w, h),
+            prior=self._pose_prior,
+        )
+        if pose is not None and residual < POSE_RESIDUAL_MAX_PX:
+            corners = camera_pose.pose_to_corners(pose, road_model, (w, h))
+            if corners is not None:
+                src_pts, dst_gps = corners
+                if self._apply_homography_corners(src_pts, dst_gps, bearing_deg):
+                    self._pose = pose
+                    self._pose_residual = residual
+                    # FOV 표시용 near/far (snap → 코너 지오데식 거리). dst_gps: TL,TR,BR,BL
+                    def _dist_from_snap(latlon) -> float:
+                        dn = (latlon[0] - self._gps_center_lat) * 110574.0
+                        de = ((latlon[1] - self._gps_center_lon) * 111320.0
+                              * math.cos(math.radians(self._gps_center_lat)))
+                        return math.hypot(dn, de)
+                    near_m = min(_dist_from_snap(dst_gps[2]), _dist_from_snap(dst_gps[3]))
+                    far_m = max(_dist_from_snap(dst_gps[0]), _dist_from_snap(dst_gps[1]))
+                    logger.info(
+                        "포즈 캘리브 적용: H=%.1fm pitch=%.1f° yaw=%.1f° "
+                        "residual=%.1fpx bearing=%.1f° near=%.1f far=%.1f",
+                        pose.H_m, pose.pitch_deg, pose.yaw_deg, residual, bearing_deg,
+                        near_m, far_m,
+                    )
+                    return True, bearing_deg, {
+                        "method":           "pose",
+                        "cam_h_m":          round(pose.H_m, 1),
+                        "pitch_deg":        round(pose.pitch_deg, 1),
+                        "yaw_deg":          round(pose.yaw_deg, 1),
+                        "focal_px":         round(pose.focal_px, 1),
+                        "residual_px":      round(residual, 2),
+                        "road_width_m":     round(road_width_m, 1),
+                        "near_m":           round(near_m, 1),
+                        "far_m":            round(far_m, 1),
+                        "road_length_m":    round(max(0.0, far_m - near_m), 1),
+                        "direction_source": direction_source,
+                        "image_curve_sign": image_curve_sign,
+                    }
+        logger.info("포즈 솔브 실패/품질미달(residual=%.1f) — 휴리스틱 폴백", residual)
+
         # ── 6. Camera tilt estimation ────────────────────────────────
         pitch_deg = math.degrees(math.atan2(h / 2 - vp_y, fy))
         pitch_deg = max(3.0, min(50.0, pitch_deg))
@@ -658,27 +966,8 @@ class PerspectiveTransformer:
             gps_pts.append([self._gps_center_lat + dlat, self._gps_center_lon + dlon])
 
         dst_gps = np.float32(gps_pts)
-        H_gps, _ = cv2.findHomography(src_pts, dst_gps)
-        if H_gps is None:
+        if not self._apply_homography_corners(src_pts, dst_gps, bearing_deg):
             return False, bearing_deg, None
-
-        self._H_gps = H_gps
-        dst_meter = self._gps_pts_to_local_meters(dst_gps)
-        H_m, _ = cv2.findHomography(src_pts, dst_meter)
-        if H_m is not None:
-            self._H_meter = H_m
-        self._bearing_rad = 0.0
-        self._is_calibrated = False
-
-        # snap의 H_meter 좌표 갱신 (곡선 GPS 매핑용)
-        # gps_pts[0] = TL (far-left), snap = _gps_center
-        _R = 6_371_000.0
-        _tl_lat, _tl_lon = float(gps_pts[0][0]), float(gps_pts[0][1])
-        _lat0_r = math.radians(_tl_lat)
-        self._snap_meter_x = _R * math.radians(self._gps_center_lon - _tl_lon) * math.cos(_lat0_r)
-        self._snap_meter_y = _R * math.radians(self._gps_center_lat - _tl_lat)
-        self._curve_bearing_rad = b
-        self._refresh_curve_direction_sign()
 
         road_length_m = far_m - near_m
         logger.info(
@@ -687,6 +976,7 @@ class PerspectiveTransformer:
             pitch_deg, cam_h, near_m, far_m, road_length_m, half_w, bearing_deg,
         )
         calib_info = {
+            "method":        "heuristic",
             "cam_h_m":       round(cam_h, 1),
             "near_m":        round(near_m, 1),
             "far_m":         round(far_m, 1),
@@ -774,4 +1064,6 @@ class PerspectiveTransformer:
     def batch_pixel_to_meter(
         self, points: list[tuple[float, float]]
     ) -> list[tuple[float, float]]:
+        # scale model correction은 절대 좌표에 적용하지 않음 — 프레임 간 depth 변화로
+        # corr 계수가 달라져 인위적 위치 점프(teleport_reset/outlier_skip → speed=0) 유발.
         return self._batch_transform(self._H_meter, points)

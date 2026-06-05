@@ -21,6 +21,14 @@
 \providecommand{\BIBdecl}{\relax}
 \BIBdecl
 
+\bibitem{yolo26}
+\BIBentryALTinterwordspacing
+Ultralytics, ``{YOLO26}: Key architectural enhancements and performance
+  benchmarking for real-time object detection,'' \emph{arXiv preprint
+  arXiv:2509.25164}, 2025. [Online]. Available:
+  \url{https://arxiv.org/abs/2509.25164}
+\BIBentrySTDinterwordspacing
+
 \bibitem{yolov8}
 G.~Jocher, A.~Chaurasia, and J.~Qiu, ``Ultralytics {YOLOv8},''
   \url{https://github.com/ultralytics/ultralytics}, 2023, open-source object

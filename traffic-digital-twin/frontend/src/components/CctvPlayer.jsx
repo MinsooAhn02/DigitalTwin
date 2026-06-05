@@ -122,6 +122,8 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
   const [calibrated, setCalibrated]       = useState(false);
   const [calibState, setCalibState]       = useState(null);
   const [roiState, setRoiState]           = useState(null);
+  const [streamKey, setStreamKey]         = useState(0);
+  const [mjpegLoading, setMjpegLoading]   = useState(false);
 
   useEffect(() => {
     fetch(`${API_BASE}/runtime-config`)
@@ -135,6 +137,11 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
     setCalibrating(false); setCalibrated(false);
     setCalibState(null); setRoiState(null);
     onCancelGps?.(); onCalibTabChange?.(false);
+    // 카메라 URL 변경 시 MJPEG img를 강제 재연결해 이전 카메라 화면이 굳는 현상 방지
+    setStreamKey(k => k + 1);
+    setMjpegLoading(true);
+    const t = setTimeout(() => setMjpegLoading(false), 4000);
+    return () => clearTimeout(t);
   }, [cctv?.cctvurl]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── HLS 스트림 (10-4: watchdog 개선) ─────────────────────────────
@@ -318,17 +325,27 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
 
         {/* live 탭: MJPEG 스트림 (HLS CORS 우회) */}
         {tab === "live" && (
-          <img
-            src={MJPEG_URL}
-            alt="live"
-            style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#000" }}
-          />
+          <>
+            <img
+              key={streamKey}
+              src={`${MJPEG_URL}?k=${streamKey}`}
+              alt="live"
+              onLoad={() => setMjpegLoading(false)}
+              style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#000" }}
+            />
+            {mjpegLoading && (
+              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.85)", color: "#94a3b8", fontSize: 13 }}>
+                <div style={{ fontSize: 28, marginBottom: 8 }}>⏳</div>{t("cctv.stream.loading")}
+              </div>
+            )}
+          </>
         )}
 
         {/* cal / roi 탭: MJPEG 배경 + 투명 video (오버레이 dimension 기준용) */}
         {(tab === "cal" || tab === "roi") && (
           <img
-            src={MJPEG_URL}
+            key={streamKey}
+            src={`${MJPEG_URL}?k=${streamKey}`}
             alt="cal-bg"
             style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }}
           />

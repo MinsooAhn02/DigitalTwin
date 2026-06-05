@@ -13,10 +13,10 @@ The system turns a live Korean ITS CCTV feed into an interactive, on-map **digit
 traffic. For a camera the user clicks, it:
 
 1. streams the camera's HLS video,
-2. detects vehicles (YOLOv8) and tracks them across frames (BoxMOT multi-object tracker),
+2. detects vehicles (**YOLO26**, NMS-free end-to-end; YOLOv8 available as fallback) and tracks them across frames (BoxMOT multi-object tracker),
 3. converts each vehicle's pixel position to a GPS coordinate via a homography that is either
-   manually calibrated, automatically estimated from lane geometry, or approximated from the road
-   network,
+   manually calibrated, **solved from a road-model camera pose** (lane edges + NodeLink road
+   width/bearing → camera height/pitch/yaw via least squares), or approximated from the road network,
 4. computes per-vehicle speed, travel direction (In/Out), and flags (speeding, bottleneck, parked),
 5. aggregates frame-level metrics (vehicle count, average speed, Level-of-Service grade), and
 6. broadcasts everything over a WebSocket to a React/deck.gl front-end that draws vehicles, trails,
@@ -74,8 +74,9 @@ attempts on camera switch.
 | Layer | Technology |
 |-------|------------|
 | Web server | FastAPI + Uvicorn (async REST + WebSocket) |
-| Detection | ultralytics **YOLOv8** (classes 2/3/5/7 = car/motorcycle/bus/truck) |
+| Detection | ultralytics **YOLO26** (default, NMS-free end-to-end) / YOLOv8 (legacy fallback); classes 2/3/5/7 = car/motorcycle/bus/truck; `YOLO_CONF=0.30`, `YOLO_IOU=0.45` (ignored by YOLO26) |
 | Inference backend | **TensorRT FP16 `.engine` → ONNX Runtime → PyTorch** (auto-selected, `detector.py:resolve_model_selection`) |
+| Calibration | Road-model camera-pose solver — `scipy.optimize.least_squares` → planar homography (`camera_pose.py`) |
 | Tracking | **BoxMOT**: ByteTrack / OcSort / BotSort / DeepOcSort (tier-selected) |
 | Detection utils | `supervision` (Detections, LineZone, Box/Label annotators) |
 | Video | OpenCV + FFmpeg (HLS), numpy homography |
@@ -94,11 +95,16 @@ attempts on camera switch.
 
 ### 4.1 `detector.py` — detection + tracking
 
-**Model selection (`resolve_model_selection`).** Walks candidate variant stems (`yolov8{x,l,m,s,n}`
-or the configured `YOLO_MODEL`) and picks, in priority order: an existing `.engine` (TensorRT, if CUDA
-+ tensorrt present), else export `.pt→.engine` on the fly (`YOLO_AUTO_EXPORT_ENGINE`), else
-`.onnx` (ONNX Runtime), else `.pt` (PyTorch). FP16 (`half=True`) is used only for the PyTorch path on
-CUDA; TensorRT engines are already FP16.
+**Model selection (`resolve_model_selection`).** Walks candidate **family×variant** stems
+(`{yolo26,yolov8}{x,l,m,s,n}`, family from `YOLO_MODEL_FAMILY` — default `yolo26` — or the configured
+`YOLO_MODEL`) and picks, in priority order: an existing `.engine` (TensorRT, if CUDA + tensorrt
+present), else export `.pt→.engine` on the fly (`YOLO_AUTO_EXPORT_ENGINE`), else `.onnx` (ONNX
+Runtime), else `.pt` (PyTorch). FP16 (`half=True`) is used only for the PyTorch path on CUDA; TensorRT
+engines are already FP16. **YOLO26 is end-to-end (NMS-free)** so the engine graph is simpler/faster, but
+it still goes through the *same* `.pt→.engine` export and falls back to `.pt` if the engine build fails.
+`model_setup.py`'s picker groups models by a **family tab** (YOLO26 default / YOLOv8), shows that
+family's n/s/m/x variants, and writes the chosen stem (e.g. `yolo26m.engine`) to `.yolo_model` plus the
+family into `.runtime_profile.json`.
 
 **Tracker tiers.** `TRACKER_TIER` (`auto` by default). `_auto_tracker_tier` picks by VRAM:
 ≥10 GB → `high`, ≥6 GB → `medium`, ≥3.5 GB → `low`, else `cpu`.
@@ -114,7 +120,7 @@ CUDA; TensorRT engines are already FP16.
 1. `should_detect = (frame_count-1) % detect_interval == 0`. `_detect_interval` is forced to **1** on
    TensorRT/ONNX (inference is cheap); only CPU honours `YOLO_DETECT_INTERVAL`.
 2. On detect frames: YOLO `predict` → `sv.Detections` → ROI mask (`_apply_roi` via `sv.PolygonZone`).
-3. **Empty-detection grace:** if YOLO returns nothing and the empty streak ≤ `_YOLO_MISS_GRACE` (2),
+3. **Empty-detection grace:** if YOLO returns nothing and the empty streak ≤ `_YOLO_MISS_GRACE` (**3**, raised from 2 for moving-vehicle occlusion tolerance),
    it returns the *last* tracks and skips `tracker.update`. Calling `update(empty)` would make
    ByteTrack/OcSort mark all tracks LOST and re-issue new raw IDs on the next real detection →
    IDStabilizer mismatch → duplicate IDs. Preserving tracker state lets the same raw ID re-match.
@@ -126,7 +132,11 @@ CUDA; TensorRT engines are already FP16.
 the lower (older) ID. Handles ByteTrack emitting two IDs for one car.
 
 **`IDStabilizer`** (only for cpu/low, which lack appearance ReID). Restores a vehicle's previous ID
-after a brief miss, using last-known-centre nearest-neighbour matching (≤ 80 px). Two-pass design:
+after a brief miss using **velocity-predicted position nearest-neighbour matching** (≤ **80 px** from
+predicted centre; class default is 120 px, but the `VehicleDetector` instantiates with `max_dist_px=80.0`). Each active track's pixel velocity `(vx, vy)` is tracked per frame; when a track
+goes lost its velocity is saved in `_lost` as `[cx, cy, age, vx, vy]`. `_find_lost` predicts
+`(cx + vx·age, cy + vy·age)` so fast-moving vehicles (30+ px/frame) remain matchable across 3–4 lost
+frames. Two-pass design:
 - **Pass 1:** raw IDs already in `_remap` reclaim their stable ID first (prevents a new track from
   stealing it via `_find_lost`).
 - **Pass 2:** unmatched tracks match against `_lost`; on match it **purges all stale `_remap`
@@ -135,6 +145,8 @@ after a brief miss, using last-known-centre nearest-neighbour matching (≤ 80 p
 - Tracks that disappear within 50 px of a frame edge are evicted immediately (they left the scene, so
   their ID must not be handed to a newly entering vehicle).
 - Display IDs are renumbered 1,2,3… (`_display_map`) so the UI never shows ByteTrack's 200+ counters.
+- `match_thresh` for ByteTrack: **0.35** (lowered from 0.5) — fast vehicles have IoU 0.3–0.4 between
+  frames at 30 fps, which previously caused premature track splits.
 
 **ByteTrack patch.** boxmot 12.x sets `STrack.is_activated` only when `frame_id == 1`; with
 `DETECT_INTERVAL > 1` new tracks were never returned. `_patched_activate` forces `is_activated = True`.
@@ -185,12 +197,46 @@ lane geometry when no manual calibration exists. Steps:
    `φ = atan2(vp_x − w/2, fy)` against the camera→snap bearing (flip 180° if the reverse candidate is
    closer), else fall back to `vp_x > 0.55·w`. Skipped entirely when `fix_direction=True`
    (a name-derived bearing is already trusted).
-7. Pitch `= atan2(h/2 − vp_y, fy)` clamped to 3–50°; `fy = h·1.2` (assumed ~45° vertical FoV).
-8. Pinhole near distance `d_near = road_width_m · fy / road_px_w`; camera height
-   `cam_h = d_near · tan(pitch + vfov/2)` clamped 3–40 m; far distance from `cam_h / tan(pitch − vfov/2)`.
-9. Build a trapezoid `src_pts` from the fitted edges, GPS corners from bearing + near/far + half-width,
-   then both homographies. `is_calibrated` stays **False** (auto-calib is an approximation), so the UI
-   still shows "not calibrated" and `speed_scale` keeps correcting.
+7. **Road-model pose solver (primary, `camera_pose.solve_pose`).** Feeds the multi-level lane edges +
+   VP + NodeLink `road_width_m` to the pose solver (next subsection). On success with
+   `residual_px < POSE_RESIDUAL_MAX_PX` (8 px) it builds the 4 image↔GPS corners (`pose_to_corners`) →
+   `_apply_homography_corners` and returns immediately (`method="pose"`, carrying
+   `cam_h_m/pitch_deg/yaw_deg/near_m/far_m` for the FOV).
+8. **Heuristic trapezoid fallback** (only when the pose solve fails or is low-quality). The legacy
+   estimate: pitch `= atan2(h/2 − vp_y, fy)`, `fy = h·1.2`; `d_near = road_width_m·fy/road_px_w`;
+   `cam_h = d_near·tan(pitch+vfov/2)` (3–40 m); trapezoid `src_pts` → GPS corners → homographies.
+
+Either path leaves `is_calibrated` **False** (auto-calib is an approximation) so the UI still shows
+"not calibrated" and `speed_scale` keeps correcting. `_apply_homography_corners` is the shared tail that
+builds `_H_gps`/`_H_meter` from the 4 image↔GPS corners and refreshes the curve-mapping snap/bearing.
+
+**Road-model camera-pose solver (`camera_pose.py`).** A pinhole-camera pose fit that replaces the
+trapezoid heuristic with a physically-meaningful pose, so calibration degrades gracefully and persists
+per camera.
+- **Model.** World frame is nadir-aligned ENU at the snap point (camera at `(0,0,H)`, ground `Z=0`).
+  Camera rotation is pitch-only; the road carries `yaw` and lateral offset `x0`. Parameters
+  `θ = (H, pitch, yaw, x0)`; **focal is fixed** at `FOCAL_RATIO·h` (≈45° FoV).
+- **Solve (`solve_pose`).** `scipy.optimize.least_squares` (soft-L1) minimises, over the 5 sampled rows,
+  the reprojection residual of the projected left/right road boundaries (`±road_width_m/2`) against the
+  detected lane edges, plus a vanishing-point residual. Road width is the metric anchor.
+- **Output (`pose_to_corners`).** Projects 4 road-frame corners to image (`src_pts`) and to GPS via
+  snap + bearing (`dst_gps`); the shared tail turns them into the two homographies, so all downstream
+  (curved Stage-2 mapping, speed) is unchanged.
+- **Why 4 params, focal fixed.** Lane edges give a single vanishing point, so road width fixes the
+  **lateral** metric scale but not the **longitudinal** (depth/speed) scale — that is focal/FoV-dependent
+  and not observable from edges alone. Solving focal is unstable; fixing it keeps lateral accuracy
+  (<1 % in the synthetic self-test) and leaves the residual longitudinal scale to `speed_scale` (ITS).
+  The solver's job is removing the heuristic's *shape* error, not replacing `speed_scale`.
+- **Persistence & cold-start.** `get_pose_params`/`load_pose_params` serialise the pose to
+  `camera_pose.json` per `camera_key`; on camera switch the saved pose seeds the solver (`_pose_prior`)
+  so each session refines the last. `apply_prior_pose` applies the saved pose directly when edges are too
+  weak to solve; `rough_pose_from_vehicles` is a last-resort cold-start from the first 1–3 vehicle bboxes
+  (marked high-residual so it is overwritten once real edges/observations accumulate). A `__main__`
+  synthetic round-trip self-test validates the geometry.
+- **Vehicle scale model demoted.** The legacy apparent-size model (`fit_scale_model`, linear
+  `1/scale = B·v + C` from bbox widths, persisted to `vehicle_calib.json`) is now a **secondary**
+  refinement; its minimum-observation threshold is adaptive (`SCALE_MIN_OBS` 12 → `SCALE_MIN_OBS_SPARSE`
+  8 in light traffic, after `SCALE_SPARSE_AFTER_FRAMES`).
 
 **Fallback grid (`update_gps_center`).** With no calibration at all, builds a trapezoidal homography
 (top edge 25–75 % of width, near 15 m / far 80 m / half-width 25 m) rotated to the road bearing. Also
@@ -205,19 +251,30 @@ los_grade, in_count, out_count, class_counts`.
 
 **Speed pipeline (`_speed`, the most-tuned logic).** Per track:
 1. **Duplicate skip** — identical metre coordinates (non-detect frames) are not appended.
-2. **Physics jump guard** — before appending, if `step_m > (MAX_REASONABLE_KPH/3.6/speed_scale)·dt·1.5`
-   the sample is dropped but the window is *kept* (an earlier version cleared the whole window and
-   produced 0 speed ~47 % of the time). `dt > 2 s` clears the window (track re-appeared).
-3. **OLS regression** — over a sliding window of `SPEED_WINDOW_FRAMES = 18` `(x_m, y_m, t)` samples,
+2. **Physics jump guard** — before appending, compute `raw_max_mps = (MAX_REASONABLE_KPH/3.6) / max(speed_scale, 0.1)` (divides by speed_scale so the guard tightens as the learned scale grows), then two-tier check:
+   - `step_m > raw_max_mps·dt·3.0` → **teleport reset**: window cleared entirely (ID-switch artifact; the
+     regression slope would otherwise be corrupted by a position jump across IDs).
+   - `step_m > raw_max_mps·dt·1.5` → sample dropped, window kept (transient detection noise; an earlier
+     version cleared the whole window and produced 0 speed ~47 % of the time).
+   - `dt > 2 s` clears the window (track re-appeared).
+3. **OLS regression** — over a sliding window of `SPEED_WINDOW_FRAMES` `(x_m, y_m, t)` samples,
    fit velocity by least squares: `kph = hypot(vx, vy)·3.6`. Window displacement
-   `< SPEED_JITTER_THRESHOLD_M = 0.5 m` ⇒ speed 0 (jitter).
+   `< SPEED_JITTER_THRESHOLD_M = 0.5 m` ⇒ speed 0 (jitter). The window is now defined in **seconds**
+   (`SPEED_WINDOW_FRAMES = round(SPEED_WINDOW_S·FPS)`, `SPEED_WINDOW_S = 0.7 s`) so the measurement
+   *time* stays constant when a different model/profile changes the FPS.
 4. **Per-track EMA** (`_speed_ema`, α = `SPEED_EMA_ALPHA` = 0.35). Spike reject: if a confirmed EMA
    (> 5) and `scaled > ema·2.5 + 20`, ignore the sample. The EMA is **never seeded at 0** (a 0 seed
    makes spike-reject block all real speeds → stuck at 0). Stop decay: when stopped, decay ×0.6 and
    floor to 0 below `SPEED_MIN_KPH = 5`.
-5. **Scale + flag** — `speed_kph = round(raw · speed_scale, 1)`; `is_speeding = speed_kph > limit`.
+5. **Scale + flag** — `speed_kph = round(raw · speed_scale, 1)`; `is_speeding = speed_kph > limit * 1.10` (10 % tolerance — accounts for measurement noise and the common 70→77 kph real-world tolerance on national routes).
    `MAX_REASONABLE_KPH = 180` rejects only ID-swap/homography blow-ups (so legit highway speed passes
    and feeds the ITS calibration).
+
+**Cross-vehicle outlier rejection (`_reject_speed_outliers`, used by `_avg_speed`).** Before averaging
+the per-vehicle speeds for a frame, samples with `|x − median| > SPEED_OUTLIER_MAD_K·1.4826·MAD`
+(K = 3) are dropped (needs ≥ 3 vehicles; otherwise kept). A single ID-swap/homography spike no longer
+pulls the frame average — which matters because that average also feeds the `speed_scale` statistics, so
+ITS-less roads get self-consistency checking without an external reference.
 
 `MAX_REASONABLE_KPH = 180` and `speed_limit_kph` come from the NodeLink `max_spd` on camera switch
 (else `SPEED_LIMIT_KPH = 120`).
@@ -244,7 +301,8 @@ against the ITS segment speed:
 - **Volatility guard:** coefficient of variation > 0.4 ⇒ skip (traffic in transition).
 - `target = old_scale · ITS / our_avg`, **clamped to [0.3, 5.0]** (a clamp hit logs a warning —
   surfaces a badly-off homography instead of failing silently).
-- Learning rate `α = 0.5` before convergence, `0.95` after (slow once stable).
+- Learning rate (weight of new target) = `0.5` before convergence, `0.05` after (slow once stable).
+  Code: `scale = old_scale * alpha + target * (1 - alpha)` where `alpha = 0.95` (converged) / `0.5` (not converged).
 - Convergence: `_stable_count ≥ 3` consecutive updates with < 1 % change. The 10-min window is double
   the ITS 5-min aggregation so the ITS window is always contained regardless of poll phase.
 
@@ -301,8 +359,11 @@ older than `retention_cutoff(HISTORY_RETENTION_DAYS = 14)`.
 ### 4.9 `roi_manager.py`, `config.py`, `utils.py`
 - `roi_manager` — ROI polygons stored as **normalized** [0,1] coordinates (resolution-independent),
   keyed by `camera_key = md5(url)[:12]`; `roi_to_pixels` converts for `sv.PolygonZone`.
-- `config.py` — all constants (YOLO params, tracker buffers, speed thresholds, LOS, history,
-  congestion, ITS URLs/keys). Runtime profile (`.runtime_profile.json`) overrides capture/FPS/JPEG.
+- `config.py` — all constants (YOLO params + `YOLO_MODEL_FAMILY`, tracker buffers, speed thresholds,
+  LOS, history, congestion, ITS URLs/keys; pose calibration `POSE_RESIDUAL_MAX_PX`, scale
+  `SCALE_MIN_OBS`/`SCALE_MIN_OBS_SPARSE`/`SCALE_SPARSE_AFTER_FRAMES`, `SPEED_OUTLIER_MAD_K`, and the
+  seconds-based `SPEED_WINDOW_S`). Runtime profile (`.runtime_profile.json`, with `family`) overrides
+  capture/FPS/JPEG.
 - `utils.py` — `haversine_m` geodesic distance.
 
 ### 4.10 `main.py` — server, endpoints, orchestration
@@ -327,15 +388,24 @@ Messages on `/ws`: `camera_ready`, `auto_calibrated`, `camera_error`, `backgroun
 `congestion_clusters`, else a `FrameAnalytics` JSON.
 
 **`switch_camera`.** Bumps `_cam_version` (so `/ws/detect` resets its tracker), resets analytics,
-restores the saved per-camera `speed_scale`, resets the BoxMOT tracker, kicks an async ITS speed
-fetch, queries NodeLink (`get_road_info` + `get_road_snap` with the parsed road-name hint), sets
-`speed_limit_kph` and the effective bearing (priority **name_bearing ?? snap bearing ?? link
-bearing**), stores `_current_cam`, and queues the stream switch for `live_loop`.
+restores the saved per-camera `speed_scale`, the vehicle scale model (`vehicle_calib.json`) **and the
+road-model pose prior** (`_load_camera_pose` → `load_pose_params`, which seeds the next solve), resets
+the BoxMOT tracker, kicks an async ITS speed fetch, queries NodeLink (`get_road_info` +
+`get_road_snap`), sets `speed_limit_kph` and the effective bearing (priority **name_bearing ?? snap
+bearing ?? link bearing**), stores `_current_cam`, and queues the stream switch for `live_loop`.
 
 **`live_loop` camera-switch block.** Switches the OpenCV stream, sets the road corridor
-(`set_road_corridor`), restores saved ROI and manual calibration (if any), schedules 5 auto-calibration
-attempts when there's no manual calibration, computes road width (camera value or NodeLink fallback),
-and broadcasts `camera_ready` (then `auto_calibrated` once lane detection succeeds).
+(`set_road_corridor`), restores saved ROI, manual calibration, the scale model **and the pose prior**,
+schedules 5 auto-calibration attempts when there's no manual calibration, computes road width, and
+broadcasts `camera_ready` (then `auto_calibrated` once calibration succeeds). On a successful pose
+calibration the solved pose is written back to `camera_pose.json` (`_save_camera_pose`); if all 5
+lane-detection attempts fail it falls back to `apply_prior_pose` (saved pose) before the GPS-grid
+approximation.
+
+**Camera-pose / scale persistence.** `camera_pose.json` and `vehicle_calib.json` are keyed by
+`camera_key`; the per-frame scale refit (`_live_process`) uses the adaptive `min_obs` and `_save_*`
+writes update them so each session improves on the last. `_scale_switch_frame` records the switch frame
+for the light-traffic (`SCALE_SPARSE_AFTER_FRAMES`) threshold drop.
 
 **Speed time axis (`_speed_timestamp_ms`).** Builds a monotonic ms clock preferring the stream PTS
 (`pos_msec`) delta and falling back to wall-clock when PTS is 0/non-monotonic. The old `frame_id/fps`
@@ -379,6 +449,19 @@ camera, `POST /switch-camera`, clear `switching` when `camera_ready` arrives. Bu
 `PathLayer` from a reducer that appends recent positions (capped). Uses `useRef`/`useCallback`/
 `React.memo` (CounterPanel, ClassBarChart, VehicleTable) so 30 fps frames don't re-render the sidebar.
 
+**Camera hint banner.** When no camera is selected (`noCameraSelected`), a floating hint is shown at
+the bottom-centre of the map. Its colours adapt to `mapMode`: light mode uses a white/slate palette
+(`rgba(255,255,255,0.92)` background, dark text, `#cbd5e1` border); dark mode uses the usual dark
+card (`rgba(17,24,39,0.88)`, `#374151` border). The 📷 icon gets a cyan glow on dark and no filter
+on light. Size and padding are slightly larger than before (14 px text, 12 px 20 px padding).
+
+**`CollapsibleCard`.** Defined inline in `App.jsx`. Accepts an optional `description` prop; when
+provided a small `ℹ` button appears in the card header. Clicking it opens a **centered fixed-position
+modal overlay** (dark card, `zIndex 9999`, click-outside to dismiss) showing the description text.
+The Auto Calibration Estimate and ITS Speed Comparison cards both pass a bilingual description string
+(via `t("app.autoCalibDesc")` / `t("app.itsCompareDesc")`) explaining what the section does and what
+each displayed value means.
+
 ### 5.2 `MapView.jsx` — deck.gl rendering
 Layer z-order (bottom→top): `congestion-clusters` → trails (`extraLayers`) → `cctv-fov` →
 `cctvs-hit` (invisible click target) → `cctv-icons` (status-coloured SVG) → `cctv-labels` →
@@ -421,6 +504,14 @@ Single `/ws` connection with 3 s auto-reconnect. Demultiplexes 6 message types i
 `frameData, cameraReadyInfo (+counter), autoCalibInfo, backgroundStatus, congestionClusters` and an
 `error` string.
 
+### 5.7b `VehicleTable.jsx` — direction tabs
+The vehicle list now has a 3-tab toggle (`All / Inbound / Outbound`) above the table. A local
+`dirTab` state (`"all" | "in" | "out"`) filters the `vehicles` prop by `v.direction` before
+rendering. Tab badges show the count per direction (`tabCounts` memoised from the full list);
+active tab colour matches the direction convention (blue = In, red = Out, neutral = All).
+The speed-log summary (min/avg/max) is computed from the **currently filtered** set, not all
+vehicles. An empty filtered set shows a `—` placeholder instead of an empty table.
+
 ### 5.8 `i18n`, `colorMap.js`
 React-context i18n (en/ko, `{{param}}` interpolation). `colorMap` maps vehicle direction
 (In=blue, Out=red, Unknown=grey; speeding overrides red; parked grey) and congestion severity colours,
@@ -431,9 +522,9 @@ with a high-contrast variant for light/satellite maps.
 ## 6. Key Workflows
 
 1. **Camera switch** — click → `App.handleCctvClick` (debounce, fly) → `POST /switch-camera`
-   (analytics reset, road snap, bearing, speed_scale restore, queue) → `live_loop` switches stream,
-   sets corridor, loads ROI/calibration, schedules auto-calib → `camera_ready` broadcast → sidebar/map
-   update; YOLO tab opens `/ws/detect`.
+   (analytics reset, road snap, bearing, `speed_scale` + scale-model + **pose-prior** restore, queue) →
+   `live_loop` switches stream, sets corridor, loads ROI/calibration, schedules auto-calib →
+   `camera_ready` broadcast → sidebar/map update; YOLO tab opens `/ws/detect`.
 2. **ROI** — ROI tab → draw polygon → `POST /roi` → applied to detector; reloaded on next switch.
 3. **Manual calibration** — 4 pixel↔GPS pairs → `POST /calibration` → homography rebuilt,
    `is_calibrated = True`, FOV oriented from the ring bearing.
@@ -443,6 +534,10 @@ with a high-contrast variant for light/satellite maps.
    icon colour; fed into congestion clustering and history.
 6. **Speed self-calibration** — every 5 min ITS segment speed → `calibrate_from_its` → `speed_scale`
    converges (3× < 1 % change) and is saved per camera.
+7. **Road-model pose calibration** — on switch, lane edges + VP + NodeLink width/bearing →
+   `camera_pose.solve_pose` → homography; the solved pose is saved to `camera_pose.json` and seeds the
+   next session's solve (per-camera refinement). Edges too weak → saved prior; no prior → rough
+   vehicle-bbox pose; nothing → GPS-grid approximation.
 
 ---
 
@@ -453,16 +548,31 @@ with a high-contrast variant for light/satellite maps.
   `live_loop` drain-only; `reset_tracker()` runs when `/ws/detect` ends.
 - **Homography error structure.** A 4-point homography is accurate inside the calibration quad but
   extrapolates with growing error toward the frame top (far vehicles). Mitigation is four-layered:
-  (1) dual-matrix manual calibration with near+far points, (2) 18-frame OLS to dilute single-frame
-  error, (3) lane-based auto-calibration for an initial estimate, (4) ITS `speed_scale` to absorb the
-  systematic scale error over time.
+  (1) dual-matrix manual calibration with near+far points, (2) a 0.7 s OLS window to dilute single-frame
+  error, (3) the **road-model pose solver** (replacing the lane trapezoid) for a physically-consistent
+  homography that persists/refines per camera, (4) ITS `speed_scale` to absorb the systematic
+  (longitudinal) scale error over time.
 - **Bidirectional centre fix** uses the link's overall F→T bearing, not the local snap-segment bearing
   (which differs 40–60° on curves and would fail the ±60° reverse-link test).
-- **Auto-calibration limits.** `fy = h·1.2` (unknown true focal length) → ±20–30 % scale error; road
-  width is estimated from NodeLink lane count, not measured; lane detection fails at night / in rain /
-  in dense traffic, leaving the fallback grid (`is_calibrated` stays False to prompt manual
-  calibration). Residual scale error is absorbed by `speed_scale`.
+- **Auto-calibration limits & the monocular lateral/longitudinal split.** The road-model pose solver
+  fixes the homography's *shape* (lateral position, lane offset, curve), but a single road vanishing
+  point cannot recover the *longitudinal* (depth → speed) scale from lane width alone — that depends on
+  the focal length/FoV, which is fixed at `FOCAL_RATIO·h` (≈45° FoV). So lateral metric is accurate
+  (<1 % in the self-test) while the absolute longitudinal/speed scale carries a focal-dependent error
+  (~±15–20 % per FoV mismatch) that **`speed_scale` (ITS) absorbs** — the pose solver does not replace
+  it. Road width is still estimated from NodeLink lane count, not measured; lane detection fails at
+  night / in rain / in dense traffic, in which case the saved pose prior (or, last, the GPS-grid
+  approximation) is used. `is_calibrated` stays False to prompt manual calibration.
+- **No camera metadata.** The ITS `cctvInfo` API exposes only position/name/URL — no installation
+  height, heading, or FoV — so the pose must be solved from the image + road model, not read off.
 - **"Always ×2" road width** assumes bidirectional carriageways; one-way roads are over-wide.
+- **YOLO26 vs YOLOv8 transition notes.** YOLO26 is NMS-free (end-to-end), so `YOLO_IOU=0.45` passed
+  to `predict()` is ignored — it was the YOLOv8 NMS threshold. `YOLO_CONF` raised to **0.30** (from
+  0.25) because NMS-free models never produce post-NMS duplicates, so the earlier low threshold
+  admitted more noise detections than were filtered by NMS. The `_dedup_tracks` function
+  (IoU/distance based) remains necessary for ByteTrack/OcSort tiers (no ReID), but is NOT a YOLOv8
+  NMS substitute — it removes tracker-level duplicates, not detection-level. YOLOv8 remains selectable
+  as a legacy fallback; all bbox format handling is model-family-agnostic (supervision `xyxy`).
 - **Known issues (`todo.txt`).** Polygon vs vehicle-GPS range can still mismatch on some cameras; the
   nearest NodeLink can be the wrong road (e.g. a national-route camera snapping to an adjacent
   expressway); some cameras read speed ≈ 0 for moving traffic; English names degrade to

@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from "react";
 import DeckGL from "@deck.gl/react";
-import { ScatterplotLayer, TextLayer, PolygonLayer, IconLayer } from "@deck.gl/layers";
+import { ScatterplotLayer, TextLayer, PolygonLayer, IconLayer, PathLayer } from "@deck.gl/layers";
 import Map from "react-map-gl/maplibre";
 import { getVehicleColor, getSeverityColor } from "../utils/colorMap";
 import { useLang } from "../i18n/index.jsx";
@@ -228,6 +228,7 @@ export default function MapView({
   fovSnapLon = null,
   fovRoadPts = null,
   fovSnapAlongM = null,
+  fovRoiGpsRing = null,
   backgroundStatus = {},
   congestionClusters = [],
 }) {
@@ -300,17 +301,16 @@ export default function MapView({
     const originLat = fovSnapLat ?? selectedCctv.lat;
     const originLon = fovSnapLon ?? selectedCctv.lon;
     let ring;
-    if (selectedCctv.calibGpsRing) {
-      // 수동 4점 보정: 실제 클릭한 GPS 코너 사용
+    // Phase 3: 우선순위 — ROI GPS ring > calibGpsRing > corridor > 기본 trapezoid
+    if (fovRoiGpsRing && fovRoiGpsRing.length >= 3) {
+      // ROI를 GPS로 투영한 실제 detect 범위 (수평선 clamp 적용)
+      ring = fovRoiGpsRing.map(([lat, lon]) => [lon, lat]); // deck.gl: [lon, lat]
+    } else if (selectedCctv.calibGpsRing) {
       ring = selectedCctv.calibGpsRing;
     } else if (fovNearM != null && fovFarM != null && fovRoadWidthM != null) {
-      // 곡선 도로 polygon 우선, 없으면 직사각형 fallback
-      const curved = (fovRoadPts && fovSnapAlongM != null)
-        ? computeRoadCorridorPolygon(fovRoadPts, fovSnapAlongM, heading, fovNearM, fovFarM, fovRoadWidthM / 2)
-        : null;
-      ring = curved ?? computeCalibPolygon(originLat, originLon, heading, fovNearM, fovFarM, fovRoadWidthM / 2);
+      // H_gps와 동일한 직선 사각형 — 차량 GPS 위치와 일치함
+      ring = computeCalibPolygon(originLat, originLon, heading, fovNearM, fovFarM, fovRoadWidthM / 2);
     } else {
-      // 미보정: FOV 각도 기반 기본 사다리꼴
       ring = computeFovPolygon(originLat, originLon, heading);
     }
     return new PolygonLayer({
@@ -323,7 +323,22 @@ export default function MapView({
       stroked:        true,
       filled:         true,
     });
-  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM, fovHeadingDeg, fovSnapLat, fovSnapLon, fovRoadPts, fovSnapAlongM]);
+  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM, fovHeadingDeg, fovSnapLat, fovSnapLon, fovRoiGpsRing]);
+
+  // 도로 중심선 — 실제 도로 곡선을 별도 선으로 표시 (FOV polygon과 분리)
+  const roadCenterlineLayer = useMemo(() => {
+    if (!selectedCctv || !fovRoadPts || fovRoadPts.length < 2) return null;
+    const path = fovRoadPts.map(([lat, lon]) => [lon, lat]);
+    return new PathLayer({
+      id:           "road-centerline",
+      data:         [{ path }],
+      getPath:      (d) => d.path,
+      getColor:     [251, 191, 36, 160],
+      getWidth:     2,
+      widthUnits:   "meters",
+      widthMinPixels: 2,
+    });
+  }, [selectedCctv, fovRoadPts]);
 
   const nodeStroked = mapMode !== "dark";
   const nodeOutline = mapMode === "satellite" ? [0, 0, 0, 230] : [80, 80, 80, 180];
@@ -407,6 +422,7 @@ export default function MapView({
   const layers = useMemo(() => [
     congestionLayer,
     ...(showVehicles ? extraLayers : []),
+    roadCenterlineLayer,
     fovLayer,
     cctvHitLayer,
     cctvIconLayer,
@@ -415,7 +431,7 @@ export default function MapView({
     snapNodeLayer,
     snapNodeLabelLayer,
   ].filter(Boolean), [
-    congestionLayer, showVehicles, extraLayers, fovLayer,
+    congestionLayer, showVehicles, extraLayers, roadCenterlineLayer, fovLayer,
     cctvHitLayer, cctvIconLayer, cctvLabelLayer,
     scatterLayer, textLayer, snapNodeLayer, snapNodeLabelLayer,
   ]);

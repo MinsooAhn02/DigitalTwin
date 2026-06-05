@@ -163,6 +163,27 @@ SCALE_SPARSE_AFTER_FRAMES: int = int(os.getenv("SCALE_SPARSE_AFTER_FRAMES", "600
 # 차량간 속도 outlier 제거 MAD 계수 (한계3 A) — |x-median| > K*MAD 면 이상치.
 SPEED_OUTLIER_MAD_K: float = float(os.getenv("SPEED_OUTLIER_MAD_K", "3.0"))
 
+# ── Movement-based direction classification (Task 1) ──────────────────────
+# Along-axis EMA threshold (m) below which direction is kept unchanged.
+DIR_DEADZONE_M: float = float(os.getenv("DIR_DEADZONE_M", "0.10"))
+DIR_EMA_ALPHA: float = 0.4   # smoothing for along-velocity signal
+
+# ── Bearing auto-refinement from vehicle flow (Task 3) ────────────────────
+# Minimum reliable movement samples before refining bearing.
+BEARING_REFINE_MIN_SAMPLES: int = int(os.getenv("BEARING_REFINE_MIN_SAMPLES", "30"))
+# How aggressively to update bearing (lower = more inertia).
+BEARING_REFINE_EMA_ALPHA: float = float(os.getenv("BEARING_REFINE_EMA_ALPHA", "0.15"))
+# Check and potentially refine bearing every N frames.
+BEARING_REFINE_INTERVAL_FRAMES: int = int(os.getenv("BEARING_REFINE_INTERVAL_FRAMES", "30"))
+# Minimum angular change (deg) before re-broadcasting updated heading.
+BEARING_BROADCAST_MIN_DEG: float = float(os.getenv("BEARING_BROADCAST_MIN_DEG", "1.5"))
+
+# ── Road-shape learning from vehicle GPS traces ───────────────────────────────
+# Minimum GPS positions before attempting road_pts refinement.
+ROAD_PTS_REFINE_MIN_SAMPLES: int = int(os.getenv("ROAD_PTS_REFINE_MIN_SAMPLES", "50"))
+# Number of along-axis bins for polyline estimation.
+ROAD_PTS_REFINE_NBINS: int = int(os.getenv("ROAD_PTS_REFINE_NBINS", "10"))
+
 # ── Tracker ────────────────────────────────────────────────────────────────
 # TRACKER_TIER: "auto" | "cpu" | "low" | "medium" | "high"
 #   auto   → GPU VRAM 크기 기준 자동 선택

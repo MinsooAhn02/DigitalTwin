@@ -362,13 +362,10 @@ class PerspectiveTransformer:
     def pixel_to_meter(self, u: float, v: float) -> tuple[float, float]:
         """픽셀 (u, v) → (x_m, y_m) — 속도 계산용 실세계 미터 좌표.
 
-        vehicle scale model이 로드돼 있으면 y-위치별 보정 계수를 적용한다.
+        H_meter 호모그래피 결과를 그대로 반환한다. scale model의 depth-varying 계수를
+        절대 좌표에 곱하면 프레임 간 위치 불연속(speed=0 고착)이 발생하므로 적용하지 않는다.
         """
-        x_m, y_m = self._transform_point(self._H_meter, u, v)
-        if self._scale_model is not None:
-            corr = self._scale_correction_at(v)
-            return x_m * corr, y_m * corr
-        return x_m, y_m
+        return self._transform_point(self._H_meter, u, v)
 
     def batch_pixel_to_gps(
         self, points: list[tuple[float, float]]
@@ -1019,10 +1016,6 @@ class PerspectiveTransformer:
     def batch_pixel_to_meter(
         self, points: list[tuple[float, float]]
     ) -> list[tuple[float, float]]:
-        raw = self._batch_transform(self._H_meter, points)
-        if self._scale_model is None:
-            return raw
-        return [
-            (x_m * self._scale_correction_at(v), y_m * self._scale_correction_at(v))
-            for (u, v), (x_m, y_m) in zip(points, raw)
-        ]
+        # scale model correction은 절대 좌표에 적용하지 않음 — 프레임 간 depth 변화로
+        # corr 계수가 달라져 인위적 위치 점프(teleport_reset/outlier_skip → speed=0) 유발.
+        return self._batch_transform(self._H_meter, points)

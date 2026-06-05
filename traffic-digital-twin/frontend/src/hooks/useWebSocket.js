@@ -52,8 +52,13 @@ export function useWebSocket() {
         } else if (data.type === "auto_calibrated") {
           setCameraReadyInfo((prev) => {
             const base = prev ?? {};
-            // calibrated 플래그만 업데이트. name_bearing(노드링크 방위)은 덮어쓰지 않음.
-            return { ...base, calibrated: true };
+            // road_pts/snap_along_m은 학습된 값으로 갱신; name_bearing은 덮어쓰지 않음.
+            return {
+              ...base,
+              calibrated: true,
+              ...(data.road_pts      != null && { road_pts:      data.road_pts }),
+              ...(data.snap_along_m  != null && { snap_along_m:  data.snap_along_m }),
+            };
           });
           setAutoCalibInfo({
             cam_h_m:       data.cam_h_m       ?? null,

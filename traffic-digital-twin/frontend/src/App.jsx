@@ -452,105 +452,117 @@ export default function App() {
           </div>
         </div>
 
-        {/* 탭 콘텐츠 */}
-        <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "0 16px 8px" }}>
+        {/* 탭 콘텐츠: flex column, no outer scroll — each tab manages its own scroll */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
 
           {/* ── Live View 탭 ── */}
           {sidebarTab === "live" && <>
-            <CounterPanel inCount={inCount} outCount={outCount} vehicleCount={vehicleCnt} />
+            {/* 고정 상단 패널 (크기 고정, 찌부 없음) */}
+            <div style={{ flexShrink: 0, display: "flex", flexDirection: "column", gap: 10, padding: "0 16px 0" }}>
+              <CounterPanel inCount={inCount} outCount={outCount} vehicleCount={vehicleCnt} />
 
-            {roadName && (
-              <CollapsibleCard label={t("app.roadInfo")}>
-                <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-                  <div style={{ fontWeight: 600, color: "#e2e8f0", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={roadName}>{roadName}</div>
-                  <div style={{ display: "flex", gap: 16, color: "#94a3b8" }}>
-                    {roadLanes != null && roadLanes > 0 && <span>{t("app.roadLanes", { n: roadLanes })}</span>}
-                    {roadMaxSpd != null && roadMaxSpd > 0 && (
-                      <span><b style={{ color: "#fbbf24" }}>{t("app.roadSpeedLimit", { n: roadMaxSpd })}</b></span>
+              {roadName && (
+                <CollapsibleCard label={t("app.roadInfo")}>
+                  <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+                    <div style={{ fontWeight: 600, color: "#e2e8f0", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={roadName}>{roadName}</div>
+                    <div style={{ display: "flex", gap: 16, color: "#94a3b8" }}>
+                      {roadLanes != null && roadLanes > 0 && <span>{t("app.roadLanes", { n: roadLanes })}</span>}
+                      {roadMaxSpd != null && roadMaxSpd > 0 && (
+                        <span><b style={{ color: "#fbbf24" }}>{t("app.roadSpeedLimit", { n: roadMaxSpd })}</b></span>
+                      )}
+                    </div>
+                  </div>
+                </CollapsibleCard>
+              )}
+
+              {autoCalibInfo?.cam_h_m != null && (
+                <CollapsibleCard label={t("app.autoCalib")} defaultOpen={false} description={t("app.autoCalibDesc")}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 12, color: "#94a3b8" }}>
+                    <span>{t("app.calibCamH")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.cam_h_m} m</b>
+                    <span>{t("app.calibRoadW")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_width_m} m</b>
+                    <span>{t("app.calibNear")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.near_m} m</b>
+                    <span>{t("app.calibFar")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.far_m} m</b>
+                    {autoCalibInfo.road_length_m != null && <>
+                      <span>{t("app.calibRoadLen")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_length_m} m</b>
+                    </>}
+                    <span>{t("app.calibTilt")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.pitch_deg}°</b>
+                  </div>
+                </CollapsibleCard>
+              )}
+
+              {itsSpeed !== null && (
+                <CollapsibleCard label={t("app.itsCompare")} defaultOpen={false} description={t("app.itsCompareDesc")}>
+                  <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center", fontSize: 12 }}>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsMeasured")}</div>
+                      <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{ourAvgKph > 0 ? ourAvgKph.toFixed(1) : "—"}</div>
+                      {ourAvgKph > 0 && <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>}
+                    </div>
+                    <div style={{ color: "#374151", fontSize: 18 }}>vs</div>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsSegment")}</div>
+                      <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{itsSpeed.toFixed(1)}</div>
+                      <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>
+                    </div>
+                    {speedErrPct !== null && ourAvgKph > 0 && (
+                      <div style={{ textAlign: "center" }}>
+                        <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsError")}</div>
+                        <div style={{ fontWeight: 700, fontSize: 16, color: Math.abs(speedErrPct) < 10 ? "#34d399" : Math.abs(speedErrPct) < 20 ? "#fbbf24" : "#f87171" }}>
+                          {speedErrPct > 0 ? "+" : ""}{speedErrPct.toFixed(1)}%
+                        </div>
+                      </div>
                     )}
                   </div>
-                </div>
-              </CollapsibleCard>
-            )}
-
-            {autoCalibInfo?.cam_h_m != null && (
-              <CollapsibleCard label={t("app.autoCalib")} defaultOpen={false} description={t("app.autoCalibDesc")}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 12, color: "#94a3b8" }}>
-                  <span>{t("app.calibCamH")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.cam_h_m} m</b>
-                  <span>{t("app.calibRoadW")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_width_m} m</b>
-                  <span>{t("app.calibNear")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.near_m} m</b>
-                  <span>{t("app.calibFar")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.far_m} m</b>
-                  {autoCalibInfo.road_length_m != null && <>
-                    <span>{t("app.calibRoadLen")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_length_m} m</b>
-                  </>}
-                  <span>{t("app.calibTilt")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.pitch_deg}°</b>
-                </div>
-              </CollapsibleCard>
-            )}
-
-            {itsSpeed !== null && (
-              <CollapsibleCard label={t("app.itsCompare")} defaultOpen={false} description={t("app.itsCompareDesc")}>
-                <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center", fontSize: 12 }}>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsMeasured")}</div>
-                    <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{ourAvgKph > 0 ? ourAvgKph.toFixed(1) : "—"}</div>
-                    {ourAvgKph > 0 && <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>}
+                  <div style={{ marginTop: 6, textAlign: "center", fontSize: 10, color: "#4b5563" }}>
+                    {t("app.scaleFactor")}&nbsp;
+                    <span style={{ color: scaleConverged ? "#34d399" : Math.abs(speedScale - 1) < 0.05 ? "#94a3b8" : "#fbbf24", fontWeight: 700 }}>×{speedScale.toFixed(3)}</span>
+                    &nbsp;{scaleConverged ? <span style={{ color: "#34d399" }}>{t("app.scaleConverged")}</span> : <span style={{ color: "#6b7280" }}>{t("app.scaleLearning")}</span>}
                   </div>
-                  <div style={{ color: "#374151", fontSize: 18 }}>vs</div>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsSegment")}</div>
-                    <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{itsSpeed.toFixed(1)}</div>
-                    <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>
-                  </div>
-                  {speedErrPct !== null && ourAvgKph > 0 && (
-                    <div style={{ textAlign: "center" }}>
-                      <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsError")}</div>
-                      <div style={{ fontWeight: 700, fontSize: 16, color: Math.abs(speedErrPct) < 10 ? "#34d399" : Math.abs(speedErrPct) < 20 ? "#fbbf24" : "#f87171" }}>
-                        {speedErrPct > 0 ? "+" : ""}{speedErrPct.toFixed(1)}%
-                      </div>
-                    </div>
-                  )}
-                </div>
-                <div style={{ marginTop: 6, textAlign: "center", fontSize: 10, color: "#4b5563" }}>
-                  {t("app.scaleFactor")}&nbsp;
-                  <span style={{ color: scaleConverged ? "#34d399" : Math.abs(speedScale - 1) < 0.05 ? "#94a3b8" : "#fbbf24", fontWeight: 700 }}>×{speedScale.toFixed(3)}</span>
-                  &nbsp;{scaleConverged ? <span style={{ color: "#34d399" }}>{t("app.scaleConverged")}</span> : <span style={{ color: "#6b7280" }}>{t("app.scaleLearning")}</span>}
-                </div>
+                </CollapsibleCard>
+              )}
+
+              <CollapsibleCard label={t("app.classDist")}>
+                <ClassBarChart classCounts={classCounts} />
               </CollapsibleCard>
-            )}
+            </div>
 
-            <CollapsibleCard label={t("app.classDist")}>
-              <ClassBarChart classCounts={classCounts} />
-            </CollapsibleCard>
-
-            <CollapsibleCard label={t("app.vehicleList")}>
-              <VehicleTable vehicles={vehicles} calibrated={isCalibrated} />
-            </CollapsibleCard>
+            {/* 차량 리스트: 남은 공간을 차지하며 내부 스크롤 */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 16px 8px" }}>
+              <CollapsibleCard label={t("app.vehicleList")}>
+                <VehicleTable vehicles={vehicles} calibrated={isCalibrated} />
+              </CollapsibleCard>
+            </div>
           </>}
 
           {/* ── Background 탭 ── */}
           {sidebarTab === "monitor" && (
-            <MonitorPanel
-              monitoredCams={monitoredCams}
-              backgroundStatus={backgroundStatus}
-              cctvList={cctvList}
-              selectedCctv={selectedCctv}
-              lang={lang}
-              t={t}
-              onToggleMonitor={handleToggleMonitor}
-              onRemove={(camKey) => {
-                const c = cctvList.find((x) => x.cam_key === camKey);
-                if (c) handleToggleMonitor(c);
-                else {
-                  fetch(`${API_BASE}/background/remove/${camKey}`, { method: "POST" }).catch(() => {});
-                  setMonitoredCams((prev) => { const s = new Set(prev); s.delete(camKey); return s; });
-                }
-              }}
-            />
+            <div style={{ flex: 1, overflowY: "auto", padding: "0 16px 8px" }}>
+              <MonitorPanel
+                monitoredCams={monitoredCams}
+                backgroundStatus={backgroundStatus}
+                cctvList={cctvList}
+                selectedCctv={selectedCctv}
+                lang={lang}
+                t={t}
+                onToggleMonitor={handleToggleMonitor}
+                onRemove={(camKey) => {
+                  const c = cctvList.find((x) => x.cam_key === camKey);
+                  if (c) handleToggleMonitor(c);
+                  else {
+                    fetch(`${API_BASE}/background/remove/${camKey}`, { method: "POST" }).catch(() => {});
+                    setMonitoredCams((prev) => { const s = new Set(prev); s.delete(camKey); return s; });
+                  }
+                }}
+              />
+            </div>
           )}
 
           {/* ── History 탭 ── */}
-          {sidebarTab === "history" && <HistoryPanel lang={lang} t={t} />}
+          {sidebarTab === "history" && (
+            <div style={{ flex: 1, overflowY: "auto", padding: "0 16px 8px" }}>
+              <HistoryPanel lang={lang} t={t} />
+            </div>
+          )}
         </div>
 
         {/* CctvSearch: 하단 고정 */}

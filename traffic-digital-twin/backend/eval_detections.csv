@@ -1,4 +1,5 @@
 class,total_detections
-bus,1517
-car,19308
-truck,4454
+bus,3
+car,12093
+motorcycle,12
+truck,2397

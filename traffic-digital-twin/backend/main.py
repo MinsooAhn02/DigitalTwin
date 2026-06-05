@@ -201,6 +201,8 @@ from config import (
     SCALE_MIN_OBS_SPARSE,
     SCALE_SPARSE_AFTER_FRAMES,
     VEHICLE_CLASSES,
+    BEARING_REFINE_INTERVAL_FRAMES,
+    BEARING_BROADCAST_MIN_DEG,
 )
 from congestion import compute_clusters
 from history import HistoryStore, SnapshotRow, retention_cutoff
@@ -249,6 +251,9 @@ _label_ann = sv.LabelAnnotator(text_scale=0.4, text_thickness=1, text_padding=3)
 # 차선 감지 자동 캘리브레이션 상태
 _auto_calib_attempts: int  = 0    # 남은 시도 횟수 (0 = 비활성)
 _auto_calib_road_width_m: float = 7.0  # lanes × 2 × lane_width_m
+# 마지막 auto_calibrated 브로드캐스트 내용 (bearing 재보정 시 재사용)
+_last_calib_info: dict = {}
+_last_broadcast_bearing: float = 0.0
 
 # ITS API 응답 캐시 (TTL 5분, 최대 50개 bbox 조합)
 _cctv_cache: TTLCache = TTLCache(maxsize=50, ttl=300)
@@ -1778,8 +1783,10 @@ async def live_loop(detector, stream) -> None:
                     _transformer.load_pose_params(_cp)
                     logger.info("camera_pose prior 복원 (live_loop): H=%.1f (camera=%s)",
                                 _cp["H_m"], cam_key)
-                global _scale_switch_frame
+                global _scale_switch_frame, _last_calib_info, _last_broadcast_bearing
                 _scale_switch_frame = _frame_count   # 적응형 min_obs 기준 리셋
+                _last_calib_info = {}
+                _last_broadcast_bearing = analytics.road_bearing_deg or 0.0
 
                 # 저장된 calibration 자동 적용
                 _manual_cal_loaded = False
@@ -1898,10 +1905,12 @@ async def live_loop(detector, stream) -> None:
                     if _pp:
                         _save_camera_pose(
                             roi_manager.camera_key(_current_cam.get("cctvurl", "")), _pp)
+                _last_calib_info = dict(calib_info) if calib_info else {}
+                _last_broadcast_bearing = used_bearing
                 await _broadcast({
                     "type": "auto_calibrated",
                     "heading": used_bearing,
-                    **(calib_info or {}),
+                    **_last_calib_info,
                 })
             elif _auto_calib_attempts == 0:
                 # 결정트리 3단계: 엣지 실패 + 저장 prior 있음 → prior 포즈 직접 적용. Phase 12
@@ -1934,6 +1943,39 @@ async def live_loop(detector, stream) -> None:
         )
         if payload:
             await _broadcast(payload)
+
+        # Task 3: bearing + road_pts auto-refinement from observed vehicle flow
+        if _frame_count % BEARING_REFINE_INTERVAL_FRAMES == 0:
+            refined = analytics.refine_bearing()
+            new_road = analytics.refine_road_pts(analytics.cam_lat, analytics.cam_lon)
+
+            need_broadcast = False
+            if refined is not None:
+                diff = abs(((refined - _last_broadcast_bearing + 180) % 360) - 180)
+                if diff >= BEARING_BROADCAST_MIN_DEG:
+                    _last_broadcast_bearing = refined
+                    need_broadcast = True
+                    logger.debug("bearing 자동 보정: %.1f° (변화량 %.1f°)", refined, diff)
+
+            if new_road is not None:
+                new_pts, new_snap = new_road
+                _last_calib_info["road_pts"] = new_pts
+                _last_calib_info["snap_along_m"] = new_snap
+                # near_m/far_m/road_width_m 없으면 기본값 채우기 (auto-cali 전에도 polygon 표시)
+                if "near_m" not in _last_calib_info:
+                    _last_calib_info.setdefault("near_m", 15.0)
+                    _last_calib_info.setdefault("far_m", 80.0)
+                    _last_calib_info.setdefault("road_width_m",
+                        _current_cam.get("road_width_m") or 12.0)
+                need_broadcast = True
+                logger.debug("road_pts 자동 보정: %d pts, snap=%.1fm", len(new_pts), new_snap)
+
+            if need_broadcast:
+                await _broadcast({
+                    "type": "auto_calibrated",
+                    "heading": refined if refined is not None else _last_broadcast_bearing,
+                    **_last_calib_info,
+                })
 
         elapsed = time.perf_counter() - t0
         if elapsed > target_interval:

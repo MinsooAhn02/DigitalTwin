@@ -228,6 +228,7 @@ export default function MapView({
   fovSnapLon = null,
   fovRoadPts = null,
   fovSnapAlongM = null,
+  fovRoiGpsRing = null,
   backgroundStatus = {},
   congestionClusters = [],
 }) {
@@ -300,7 +301,11 @@ export default function MapView({
     const originLat = fovSnapLat ?? selectedCctv.lat;
     const originLon = fovSnapLon ?? selectedCctv.lon;
     let ring;
-    if (selectedCctv.calibGpsRing) {
+    // Phase 3: 우선순위 — ROI GPS ring > calibGpsRing > corridor > 기본 trapezoid
+    if (fovRoiGpsRing && fovRoiGpsRing.length >= 3) {
+      // ROI를 GPS로 투영한 실제 detect 범위 (수평선 clamp 적용)
+      ring = fovRoiGpsRing.map(([lat, lon]) => [lon, lat]); // deck.gl: [lon, lat]
+    } else if (selectedCctv.calibGpsRing) {
       ring = selectedCctv.calibGpsRing;
     } else if (fovNearM != null && fovFarM != null && fovRoadWidthM != null) {
       // H_gps와 동일한 직선 사각형 — 차량 GPS 위치와 일치함
@@ -318,7 +323,7 @@ export default function MapView({
       stroked:        true,
       filled:         true,
     });
-  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM, fovHeadingDeg, fovSnapLat, fovSnapLon]);
+  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM, fovHeadingDeg, fovSnapLat, fovSnapLon, fovRoiGpsRing]);
 
   // 도로 중심선 — 실제 도로 곡선을 별도 선으로 표시 (FOV polygon과 분리)
   const roadCenterlineLayer = useMemo(() => {

@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import cv2
 from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIGHT_M, CAMERA_BEARING_DEG
-from config import POSE_RESIDUAL_MAX_PX, SCALE_MIN_OBS
+from config import POSE_RESIDUAL_MAX_PX, SCALE_MIN_OBS, FAR_CAP_M
 import camera_pose
 
 CALIBRATION_PATH = Path(__file__).parent / "calibration_data.json"
@@ -398,6 +398,54 @@ class PerspectiveTransformer:
     @property
     def is_calibrated(self) -> bool:
         return self._is_calibrated
+
+    # ── Phase 3: ROI → GPS ring ─────────────────────────────────────────
+
+    def roi_to_gps_ring(
+        self,
+        roi_norm_pts: list[list[float]],
+        w: int,
+        h: int,
+    ) -> list[list[float]] | None:
+        """ROI 정규화 좌표(0~1)를 GPS [[lat,lon],...] ring으로 변환.
+
+        수평선 초과(d > FAR_CAP_M) 또는 카메라 뒤(d < 0.5m) 꼭짓점은
+        v 좌표를 이진 탐색으로 조정해 유효 깊이 범위 안으로 clamp.
+        """
+        if self._H_meter is None:
+            return None
+        ring: list[list[float]] = []
+        for nx, ny in roi_norm_pts:
+            u = nx * w
+            v = self._clamp_v_to_depth(nx * w, ny * h, float(h))
+            lat, lon = self.pixel_to_gps(u, v)
+            ring.append([lat, lon])
+        return ring if len(ring) >= 3 else None
+
+    def _clamp_v_to_depth(self, u: float, v: float, h: float) -> float:
+        """v 좌표를 [0.5m, FAR_CAP_M] 깊이 범위로 조정 (이진 탐색).
+
+        일반 도로 카메라에서 v 증가 → 깊이 감소 (아래로 갈수록 가까움).
+        """
+        x_m, y_m = self.pixel_to_meter(u, v)
+        d = math.hypot(x_m, y_m)
+        if 0.5 <= d <= FAR_CAP_M:
+            return v
+        # v_lo → v_hi 범위에서 깊이가 FAR_CAP_M 이하가 되는 v 탐색
+        # (너무 멀거나 음수: v를 아래로 이동해 깊이 줄임)
+        v_lo = max(v, 0.0)
+        v_hi = h - 1.0
+        if v_lo >= v_hi:
+            return v_hi
+        for _ in range(20):
+            v_mid = (v_lo + v_hi) * 0.5
+            x_m, y_m = self.pixel_to_meter(u, v_mid)
+            d_mid = math.hypot(x_m, y_m)
+            if d_mid > FAR_CAP_M or d_mid < 0.5:
+                v_lo = v_mid  # 아직 범위 밖 → v 더 증가
+            else:
+                v_hi = v_mid  # 유효 범위 → v 감소해 상단 경계 좁힘
+        return (v_lo + v_hi) * 0.5
 
     # ── Vehicle apparent-size scale model ──────────────────────────────
 

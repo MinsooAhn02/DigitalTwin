@@ -43,12 +43,15 @@ export function useWebSocket() {
         const data = JSON.parse(evt.data);
         // 메시지 타입 분기
         if (data.type === "camera_ready") {
-          setCameraReadyInfo({ camera_key: data.camera_key, roi: data.roi, name: data.name, calibrated: data.calibrated ?? false, road_name: data.road_name ?? null, road_lanes: data.road_lanes ?? null, road_max_spd: data.road_max_spd ?? null, road_bearing: data.road_bearing ?? null, name_bearing: data.name_bearing ?? null, snap_lat: data.snap_lat ?? null, snap_lon: data.snap_lon ?? null, road_width_m: data.road_width_m ?? null, road_pts: data.road_pts ?? null, snap_along_m: data.snap_along_m ?? null });
+          setCameraReadyInfo({ camera_key: data.camera_key, roi: data.roi, name: data.name, calibrated: data.calibrated ?? false, road_name: data.road_name ?? null, road_lanes: data.road_lanes ?? null, road_max_spd: data.road_max_spd ?? null, road_bearing: data.road_bearing ?? null, name_bearing: data.name_bearing ?? null, snap_lat: data.snap_lat ?? null, snap_lon: data.snap_lon ?? null, road_width_m: data.road_width_m ?? null, road_pts: data.road_pts ?? null, snap_along_m: data.snap_along_m ?? null, roi_gps_ring: data.roi_gps_ring ?? null });
           setAutoCalibInfo(null); // 카메라 전환 시 이전 자동 캘리브 정보 초기화
           setCameraReady((n) => n + 1);
         } else if (data.type === "camera_error") {
           setError(`Camera switch failed: ${data.message ?? ""}`);
           setCameraReady((n) => n + 1); // release loading state even on error
+        } else if (data.type === "roi_updated") {
+          // Phase 3: ROI 변경 시 GPS ring 업데이트
+          setCameraReadyInfo((prev) => prev ? { ...prev, roi_gps_ring: data.roi_gps_ring ?? null } : prev);
         } else if (data.type === "auto_calibrated") {
           setCameraReadyInfo((prev) => {
             const base = prev ?? {};
@@ -58,6 +61,7 @@ export function useWebSocket() {
               calibrated: true,
               ...(data.road_pts      != null && { road_pts:      data.road_pts }),
               ...(data.snap_along_m  != null && { snap_along_m:  data.snap_along_m }),
+              ...(data.roi_gps_ring  != null && { roi_gps_ring:  data.roi_gps_ring }),
             };
           });
           setAutoCalibInfo({

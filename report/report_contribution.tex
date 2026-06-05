@@ -64,7 +64,7 @@ dahyun.kwon@stonybrook.edu}
 We present a real-time traffic digital twin that converts live public CCTV feeds
 into an interactive, map-anchored view of road traffic. From a single clicked
 camera the system streams HLS video, detects vehicles with YOLO26~\cite{yolo26}---an NMS-free end-to-end detector
-(YOLOv8~\cite{yolov8} retained as legacy fallback)---and tracks them
+(YOLOv8~\cite{yolov8} retained as legacy fallback)---tracks them
 with a pluggable multi-object tracker (BoxMOT), and converts each vehicle's pixel
 position to a geographic coordinate through a perspective homography. Because
 public CCTV cameras are uncalibrated and their intrinsics are unknown, accurate
@@ -73,13 +73,13 @@ them with three complementary mechanisms: (i) a two-stage \emph{curved} transfor
 that maps pixels along the true road centreline obtained from the national
 node-link road network rather than a flat plane; (ii) a five-stage speed estimator
 combining a physics-based outlier guard, least-squares regression over a sliding
-window, and per-track exponential smoothing; and (iii) an online self-calibration
-loop that compares the measured speed against the official ITS segment speed and
-learns a per-camera correction factor. The system additionally provides
-multi-camera background monitoring, camera-level congestion clustering, and a
-SQLite time-series history with charting. We describe the architecture and the key
-algorithms, and report latency, throughput, tracking-stability, and speed metrics
-produced by a measurement harness over live streams.
+window, and per-track exponential smoothing; and (iii) a per-camera
+\texttt{speed\_scale} factor that absorbs the residual geometric scale error and
+is updated online via an ITS-referenced calibration loop. The system additionally
+provides multi-camera background monitoring, camera-level congestion clustering,
+and a SQLite time-series history with charting. We describe the architecture and
+the key algorithms, and report latency, throughput, tracking-stability, and speed
+metrics produced by a measurement harness over live streams.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -113,11 +113,13 @@ standpoint, are:
   (duplicate skip, physics jump guard, sliding-window least-squares regression,
   per-track exponential smoothing with spike rejection, and scale correction)
   produces stable speeds despite detection jitter and tracker ID churn.
-  \item \textbf{Online self-calibration.} Because absolute scale is unknowable from
-  an uncalibrated camera, we learn a per-camera \texttt{speed\_scale} by comparing
-  our measured rolling average against the ITS official segment speed, treating it
-  as a soft reference ($\alpha{=}0.99$) to account for ITS measurement uncertainty
-  (5-min aggregation, 1\,km granularity, possible direction mismatch).
+  \item \textbf{Per-camera scale correction.} Because absolute distance scale is
+  unknowable from an uncalibrated camera, the system maintains a per-camera
+  \texttt{speed\_scale} that decouples geometric projection from absolute speed
+  accuracy. An ITS-referenced online update loop ($\alpha{=}0.99$, every 5\,min)
+  accumulates the factor across sessions; the current deployment has collected
+  factors for 37 cameras (range 0.34--2.25), though convergence requires extended
+  multi-session operation at this adaptation rate (see Section~\ref{sec:discuss}).
   \item \textbf{A complete, resilient pipeline.} Automatic lane-based calibration,
   manual 4-point calibration, dual-path inference (browser canvas and server-side
   HLS) over a shared detector, multi-camera background monitoring, congestion
@@ -381,23 +383,26 @@ Cluster $\varepsilon$ & 500\,m (haversine) \\
 \end{tabular}
 \end{table}
 
-\subsection{Online Self-Calibration}
-The absolute distance scale of an uncalibrated camera is unknowable, so a residual
-scale error persists after geometric calibration. Every five minutes we fetch the
-ITS official segment speed near the camera and update a per-camera correction factor
-\texttt{speed\_scale}. The ITS signal carries inherent uncertainty: measurements
-are aggregated over approximately 1\,km road segments at 5-minute intervals, the
-reported direction may not correspond to the camera's field of view, and the figure
-reflects a broad spatial average rather than the camera's precise observation zone.
-Accordingly, the calibration loop treats the ITS speed as a \emph{soft reference}:
+\subsection{Per-Camera Scale Correction}
+The absolute distance scale of an uncalibrated camera is unknowable from geometry
+alone, so a residual scale error persists after geometric calibration. The system
+maintains a per-camera \texttt{speed\_scale} factor that multiplies the geometric
+speed estimate (Algorithm~\ref{alg:speed}, line~5) and is updated online using the
+ITS official segment speed as a soft reference. The ITS signal carries inherent
+uncertainty---aggregated over $\approx$1\,km segments at 5-minute intervals, the
+reported direction may not match the camera's field of view---so the loop adapts
+slowly:
 \begin{equation}
 \textit{target} = \textit{scale}\cdot \frac{v_\text{ITS}}{\bar v_\text{ours}},\quad
 \textit{scale} \gets (1{-}\alpha)\,\textit{scale} + \alpha\,\textit{target},
 \end{equation}
-with $\alpha{=}0.99$ (very slow adaptation), clamped to $[0.3,5.0]$, using a
-10-minute rolling average ($\ge$50 samples) and a coefficient-of-variation guard
-($\le$0.4) to skip volatile traffic. The factor is persisted per camera and
-accumulates across sessions without resetting the geometric calibration.
+with $\alpha{=}0.99$, clamped to $[0.3,5.0]$, using a 10-minute rolling average
+($\ge$50 samples) and a coefficient-of-variation guard ($\le$0.4) to skip volatile
+traffic. The factor persists per camera and accumulates across sessions without
+resetting the geometric calibration. The slow rate means convergence requires extended
+operation; in the current deployment the factor captures geometric projection bias
+and serves as a running estimate rather than a converged ITS-validated correction
+(Section~\ref{sec:discuss}).
 
 \subsection{Aggregation, Congestion, and History}
 Direction is primarily determined by projecting each vehicle's inter-frame
@@ -446,15 +451,15 @@ Measurements are produced from the real pipeline in two ways. While the system r
 tracking, speed, and detection statistics and flushes \texttt{eval\_*.csv} and
 \texttt{eval\_summary.json} every 30\,s (also on demand via \texttt{GET /eval/report});
 an offline harness (\texttt{backend/evaluate.py}) reproduces the same metrics over a
-fixed clip for controlled benchmarks. Numbers below are produced on the target
-hardware.
+fixed clip for controlled benchmarks. The system auto-selects the inference backend
+(TensorRT\,$\to$\,ONNX Runtime\,$\to$\,PyTorch) and tracker tier (ByteTrack\,/\,OC-SORT\,/\,BotSort\,/\,DeepOC-SORT, chosen by GPU VRAM at runtime).
 
-\textit{Setup:} model \texttt{YOLO26m}, backend \texttt{TensorRT},
-tracker \texttt{BotSort}, source: Goyang Jugyo Underpass, National Rd.\ 39 (live HLS),
-4{,}559 frames (935.9\,s).
+\textit{Setup:} model \texttt{YOLO26m}, backend \texttt{TensorRT} (auto-selected),
+tracker \texttt{BotSort} (medium tier, $\ge$6\,GB VRAM), source: Goyang Jugyo
+Underpass, National Rd.\ 39 (live HLS), 4{,}559 frames (935.9\,s).
 
 \begin{table}[t]
-\caption{Per-stage latency (ms) and throughput. Fill from \texttt{eval\_latency.csv}.}
+\caption{Per-stage latency (ms) and throughput (4{,}559-frame eval run).}
 \label{tab:latency}
 \centering
 \small
@@ -474,8 +479,7 @@ Analytics              &  0.18 &  0.16 &  0.38 \\
 \end{table}
 
 \begin{table}[t]
-\caption{Tracking stability and speed distribution. Fill from
-\texttt{eval\_tracking.csv} / \texttt{eval\_speed.csv}.}
+\caption{Tracking stability, speed distribution, and detection breakdown (eval run).}
 \label{tab:track}
 \centering
 \small
@@ -485,33 +489,46 @@ Metric & Value \\
 \midrule
 Frames processed              & 4{,}559 \\
 Unique tracks                 & 328 \\
-ID appearances (switch proxy) & 683 (2.08$\times$) \\
+Track creation events (re-entries\,+\,re-acquisitions) & 683 (2.08$\times$ unique tracks) \\
 Mean track lifetime (frames)  & 73.9 \\
-Median measured speed (km/h)  & 75.1 \\
+Median track lifetime (frames) & 61.0 \\
+Max track lifetime (frames)   & 933 \\
+\midrule
+Vehicle speed -- mean (km/h)  & 84.0 \\
+Vehicle speed -- median (km/h) & 75.1 \\
+Vehicle speed -- p95 (km/h)   & 172.5$^{\dagger}$ \\
 \% moving observations        & 70.6\,\% \\
+Total speed observations      & 17{,}103 of 24{,}241 detections$^{\ddagger}$ \\
+\midrule
+Detections -- car             & 21{,}041 \\
+Detections -- truck           & 2{,}923 \\
+Detections -- bus             & 277 \\
 \bottomrule
+\multicolumn{2}{@{}l}{\footnotesize $^{\dagger}$Far-field outliers; median 75.1\,km/h is representative.} \\
+\multicolumn{2}{@{}l}{\footnotesize $^{\ddagger}$Speed requires $\ge W$ frames of track history; single-frame detections excluded.} \\
 \end{tabular}
 \end{table}
 
 \textbf{Speed accuracy.} Because no per-vehicle ground truth exists for public CCTV,
-we assess speed against the ITS official segment speed for the same camera and time
-window. Table~\ref{tab:speed} compares the measured 10-minute average against ITS and
-reports the learned scale factor and convergence.
+the system maintains a per-camera \texttt{speed\_scale} via an online ITS-referenced
+update loop. Table~\ref{tab:speed} reports the calibrated measured average for the
+evaluation camera (speed already multiplied by the current \texttt{speed\_scale}) and
+the factors accumulated across all 37 active cameras; convergence has not been reached
+at the time of evaluation (see Section~\ref{sec:discuss}).
 
 \begin{table}[t]
-\caption{Measured vs.\ ITS segment speed (per camera). Fill from the live
-\texttt{our\_avg\_kph}/\texttt{its\_speed\_kph}/\texttt{speed\_error\_pct} broadcast
-and \texttt{speed\_scale.json}.}
+\caption{Calibrated speed and accumulated \texttt{speed\_scale} factors (37 cameras,
+\texttt{speed\_scale.json}). ITS reference values drive the update loop live and are not
+archived in the eval snapshot; all factors are marked unconverged at this snapshot.}
 \label{tab:speed}
 \centering
 \small
 \begin{tabular}{@{}lccc@{}}
 \toprule
-Camera & Ours avg (km/h) & ITS (km/h) & scale \\
+Camera & Calibrated avg (km/h) & n\_obs & \texttt{speed\_scale} \\
 \midrule
-\multicolumn{4}{@{}l}{\textit{(37 cameras accumulated; representative sample)}} \\
-Jugyo Underpass (eval) & 84.0 & --- & 0.846 \\
-Typical range (37 cams) & ---  & --- & 0.34\,--\,2.25 \\
+Jugyo Underpass (eval) & 84.0 & 17{,}103 & 0.846 (unconverged) \\
+All 37 cameras         & ---  & ---       & 0.34\,--\,2.25 (mean 0.90) \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -521,17 +538,28 @@ Typical range (37 cams) & ---  & --- & 0.34\,--\,2.25 \\
 %=============================================================================
 The homography is accurate inside the calibration quadrilateral and extrapolates
 with growing error toward the far field; we mitigate this with the dual-matrix
-calibration, the regression window, lane-based auto-calibration, and the ITS
-\texttt{speed\_scale}, but a residual error remains on poorly observed cameras.
+calibration, the regression window, and lane-based auto-calibration, but a
+residual error remains on poorly observed cameras.
 Automatic calibration assumes a focal length of $1.2\times$ image height (unknown
-intrinsics), giving a $\pm$15--20\,\% scale uncertainty per FoV mismatch, and fails when lane markings
-are not visible (night, rain, dense traffic), falling back to an approximate grid.
+intrinsics), giving a $\pm$15--20\,\% scale uncertainty per FoV mismatch. It also
+fails when lane markings are not visible (night, rain, dense traffic), falling back
+to an approximate grid.
 Road width is inferred from lane count and assumed bidirectional, so one-way roads
 are over-wide. The nearest node-link road is occasionally the wrong one (e.g., a
 camera near both a national route and an expressway), which displaces the FOV
 polygon and vehicle GPS; the CCTV-name road-hint reduces but does not eliminate this.
 Finally, congestion is clustered at the camera level because background cameras
 expose only counts, not per-vehicle speeds.
+
+The ITS-based self-calibration loop uses a slow adaptation rate ($\alpha{=}0.99$,
+updated every 5\,min) to treat the ITS segment speed as an imprecise soft reference,
+since ITS figures reflect 1-km road-segment averages that may not align with the
+camera's exact observation zone or direction. As a result, the per-camera
+\texttt{speed\_scale} requires extended multi-session operation to converge; none of
+the 37 accumulated cameras had converged at time of evaluation. The scale factors
+therefore capture the geometric projection bias present at each camera, rather than
+a fully ITS-validated correction, and should be interpreted as a running estimate
+rather than a definitive calibration.
 
 Because the system derives all geographic positions from map geometry rather than
 on-vehicle GPS receivers, localization accuracy is bounded by the quality of the
@@ -561,11 +589,12 @@ infrastructure without modification.
 We built a real-time traffic digital twin that localizes vehicles on a map from
 uncalibrated public CCTV and estimates their speed without ground truth. The key
 ideas are a road-centreline-following two-stage transform, a robust five-stage speed
-estimator, and an online self-calibration loop driven by official ITS segment
-speeds, wrapped in a resilient dual-path pipeline with congestion analytics and a
-historical store. The approach makes raw municipal camera feeds directly usable for
-situational awareness, and its self-calibration removes the main barrier---per-camera
-manual setup---to deploying across many cameras.
+estimator, and a per-camera scale-correction framework with an ITS-referenced online
+update loop, wrapped in a resilient dual-path pipeline with congestion analytics and
+a historical store. The automatic calibration pipeline---geometric pose solver plus
+the accumulating scale factor---substantially reduces the per-camera manual setup
+required to deploy across many cameras, while the system remains operational even
+before the ITS loop converges.
 
 A distinguishing property is that the system requires \emph{no GPS instrumentation
 on vehicles}: conventional traffic monitoring relies on embedded GPS loggers or
@@ -703,12 +732,14 @@ appeared wherever a flat default homography happened to project them.
   via \texttt{scipy.optimize.least\_squares} (soft-L1) that persists per camera and
   refines across sessions. A cold-start fallback chain covers edge cases (saved
   prior $\to$ vehicle-bbox pose $\to$ GPS-grid).
-  \item \emph{ITS speed-based auto-calibration loop}
+  \item \emph{Per-camera scale correction loop}
   (\texttt{analytics.py:calibrate\_from\_its}):
-  designed and implemented the online self-calibration loop that compares the
-  measured rolling average against the official ITS segment speed and learns a
-  per-camera \texttt{speed\_scale}, with convergence detection and a
-  coefficient-of-variation guard to skip volatile traffic.
+  designed and implemented the online ITS-referenced update loop that compares the
+  measured rolling average against the official ITS segment speed and accumulates a
+  per-camera \texttt{speed\_scale}, with a coefficient-of-variation guard to skip
+  volatile traffic and slow EMA adaptation ($\alpha{=}0.99$) to handle ITS
+  measurement uncertainty. The factor persists across sessions and is designed to
+  converge to an ITS-validated correction over extended operation.
   \item \emph{NodeLink road network integration}
   (\texttt{nodelink.py}, \texttt{osm.py}, \texttt{transform.py}):
   identified the MOCT NodeLink dataset~\cite{moct_nodelink} as the geometric anchor
@@ -739,9 +770,11 @@ appeared wherever a flat default homography happened to project them.
 to self-calibrating, road-geometry-aware localization. The pose solver makes
 calibration reproducible and session-improving rather than a one-off manual step;
 the curved transform keeps GPS positions physically grounded on non-straight roads;
-the ITS calibration loop corrects the longitudinal scale error that geometric
-calibration alone cannot resolve; and the single-click workflow means any new ITS
-camera can be brought online automatically without manual configuration.
+the ITS calibration loop is designed to correct the longitudinal scale error that
+geometric calibration alone cannot resolve, using ITS segment speed as a soft
+reference with slow adaptation to handle measurement uncertainty; and the
+single-click workflow means any new ITS camera can be brought online automatically
+without manual configuration.
 
 \textbf{Evidence.} \texttt{tracker.py} (\texttt{VehicleTracker}, \texttt{LineZone});
 \texttt{camera\_pose.py} (\texttt{solve\_pose}, \texttt{pose\_to\_corners});

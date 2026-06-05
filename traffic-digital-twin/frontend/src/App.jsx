@@ -137,7 +137,6 @@ export default function App() {
   const itsSpeed     = activeData?.its_speed_kph  ?? null;
   const speedErrPct  = activeData?.speed_error_pct ?? null;
   const speedScale     = activeData?.speed_scale           ?? 1.0;
-  const scaleConverged = activeData?.speed_scale_converged ?? false;
   const roadName     = cameraReadyInfo?.road_name  ?? null;
   const roadLanes    = cameraReadyInfo?.road_lanes  ?? null;
   const roadMaxSpd   = cameraReadyInfo?.road_max_spd ?? null;
@@ -516,8 +515,7 @@ export default function App() {
                   </div>
                   <div style={{ marginTop: 6, textAlign: "center", fontSize: 10, color: "#4b5563" }}>
                     {t("app.scaleFactor")}&nbsp;
-                    <span style={{ color: scaleConverged ? "#34d399" : Math.abs(speedScale - 1) < 0.05 ? "#94a3b8" : "#fbbf24", fontWeight: 700 }}>×{speedScale.toFixed(3)}</span>
-                    &nbsp;{scaleConverged ? <span style={{ color: "#34d399" }}>{t("app.scaleConverged")}</span> : <span style={{ color: "#6b7280" }}>{t("app.scaleLearning")}</span>}
+                    <span style={{ color: Math.abs(speedScale - 1) < 0.05 ? "#94a3b8" : "#fbbf24", fontWeight: 700 }}>×{speedScale.toFixed(3)}</span>
                   </div>
                 </CollapsibleCard>
               )}

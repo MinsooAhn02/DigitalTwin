@@ -214,7 +214,7 @@ def _load_speed_scale(cam_key: str) -> float:
     return 1.0
 
 
-def _save_speed_scale(cam_key: str, scale: float, converged: bool) -> None:
+def _save_speed_scale(cam_key: str, scale: float) -> None:
     """속도 보정 계수를 camera_key별로 JSON에 저장."""
     try:
         data: dict = {}
@@ -225,7 +225,6 @@ def _save_speed_scale(cam_key: str, scale: float, converged: bool) -> None:
                 pass
         data[cam_key] = {
             "speed_scale": scale,
-            "converged": converged,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         SPEED_SCALE_PATH.write_text(
@@ -398,11 +397,10 @@ async def _update_its_speed() -> None:
         logger.info("ITS 구간속도 갱신: %.1f kph", result)
         new_scale = analytics.calibrate_from_its(result)
         if new_scale is not None:
-            converged = analytics.speed_scale_converged
-            logger.info("속도 보정 계수 갱신: %.4f (수렴: %s, ITS %.1f kph)", new_scale, converged, result)
+            logger.info("속도 보정 계수 갱신: %.4f (ITS %.1f kph)", new_scale, result)
             if _current_cam:
                 cam_key = roi_manager.camera_key(_current_cam.get("cctvurl", ""))
-                _save_speed_scale(cam_key, new_scale, converged)
+                _save_speed_scale(cam_key, new_scale)
 
 
 _NAME_BEARING: dict[str, float] = {
@@ -1686,7 +1684,6 @@ async def runtime_config():
 def _inject_its_speed(payload: dict) -> dict:
     """FrameAnalytics dict에 ITS 구간속도 및 오차율, 보정 계수 추가."""
     payload["speed_scale"] = round(analytics.speed_scale, 4)
-    payload["speed_scale_converged"] = analytics.speed_scale_converged
 
     # 화면 비교용: 10분 rolling average (calibrate_from_its와 동일 창)
     # avg_speed_kph(순간값)이 아니라 같은 시간축의 평균끼리 비교해야 의미 있음

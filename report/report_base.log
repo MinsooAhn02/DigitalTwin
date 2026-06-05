@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.28 (MiKTeX 25.12) (preloaded format=pdflatex 2026.6.1)  5 JUN 2026 08:16
+This is pdfTeX, Version 3.141592653-2.6-1.40.28 (MiKTeX 25.12) (preloaded format=pdflatex 2026.6.1)  5 JUN 2026 18:17
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -918,38 +918,54 @@ sal/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/base/8r.enc}
 
 
 ]
-LaTeX Font Info:    Font shape `OT1/pcr/m/it' in size <9> not available
-(Font)              Font shape `OT1/pcr/m/sl' tried instead on input line 232.
+<img/cctv_map.png, id=110, 1443.89438pt x 679.78969pt>
+File: img/cctv_map.png Graphic file (type png)
+<use img/cctv_map.png>
+Package pdftex.def Info: img/cctv_map.png  used on input line 237.
+(pdftex.def)             Requested size: 252.0pt x 118.63304pt.
+<img/yolo_detect.png, id=113, 536.75531pt x 355.3275pt>
+File: img/yolo_detect.png Graphic file (type png)
+<use img/yolo_detect.png>
+Package pdftex.def Info: img/yolo_detect.png  used on input line 261.
+(pdftex.def)             Requested size: 252.0pt x 166.8196pt.
 Package hyperref Info: bookmark level for unknown algorithm defaults to 0 on in
-put line 280.
+put line 285.
  [2]
-Underfull \vbox (badness 2617) has occurred while \output is active []
+<img/auto_calib.png, id=139, 536.75531pt x 437.38406pt>
+File: img/auto_calib.png Graphic file (type png)
+<use img/auto_calib.png>
+Package pdftex.def Info: img/auto_calib.png  used on input line 323.
+(pdftex.def)             Requested size: 252.0pt x 205.34361pt.
+ [3 <./img/cctv_map.png> <./img/yolo_detect.png> <./img/auto_calib.png>]
+<img/congestion_map.png, id=152, 454.69875pt x 454.69875pt>
+File: img/congestion_map.png Graphic file (type png)
+<use img/congestion_map.png>
+Package pdftex.def Info: img/congestion_map.png  used on input line 419.
+(pdftex.def)             Requested size: 252.0pt x 252.0pt.
 
- [3]
-Underfull \hbox (badness 1484) in paragraph at lines 419--426
+Underfull \hbox (badness 1484) in paragraph at lines 443--450
 \OT1/ptm/m/n/10 (+20) ing, speed, and de-tec-tion statis-tics and flushes \OT1/
 pcr/m/n/10 eval_
  []
 
 
-Underfull \hbox (badness 2165) in paragraph at lines 419--426
+Underfull \hbox (badness 2165) in paragraph at lines 443--450
 \OT1/ptm/m/n/10 (+20) de-mand via \OT1/pcr/m/n/10 GET /eval/report\OT1/ptm/m/n/
 10 (+20) ); an of-fline har-ness
  []
 
-
-Underfull \hbox (badness 10000) in paragraph at lines 427--430
-[]\OT1/ptm/m/it/10 (+20) Setup: \OT1/ptm/m/n/10 (+20) model \OT1/pcr/m/n/10 [YO
-LO26m]\OT1/ptm/m/n/10 (+20) , back-end
+[4 <./img/congestion_map.png>]
+Overfull \hbox (14.9604pt too wide) in paragraph at lines 507--516
+ [][] 
  []
 
 
-Underfull \hbox (badness 3907) in paragraph at lines 427--430
-\OT1/pcr/m/n/10 [TensorRT/ONNX/PyTorch]\OT1/ptm/m/n/10 (+20) , tracker \OT1/pcr
-/m/n/10 [tier]\OT1/ptm/m/n/10 (+20) , GPU
+Overfull \hbox (0.90376pt too wide) in paragraph at lines 544--556
+\OT1/ptm/m/n/10 (-20) low il-lu-mi-na-tion, rain, lens con-tam-i-na-tion, and h
+ard-ware faults---
  []
 
-[4] (report_base.bbl)
+[5] (report_base.bbl)
 
 ** Conference Paper **
 Before submitting the final camera ready copy, remember to:
@@ -961,7 +977,9 @@ Before submitting the final camera ready copy, remember to:
  uses only Type 1 fonts and that every step in the generation
  process uses the appropriate paper size.
 
-[5] (report_base.aux)
+[6
+
+] (report_base.aux)
  ***********
 LaTeX2e <2025-11-01>
 L3 programming layer <2025-12-24>
@@ -970,11 +988,11 @@ Package rerunfilecheck Info: File `report_base.out' has not changed.
 (rerunfilecheck)             Checksum: 47BC0B4D32FDC9EF11913C08561B380D;2029.
  ) 
 Here is how much of TeX's memory you used:
- 25431 strings out of 467871
- 475392 string characters out of 5418377
- 917375 words of memory out of 5000000
- 53501 multiletter control sequences out of 15000+600000
- 690902 words of font info for 351 fonts, out of 8000000 for 9000
+ 25425 strings out of 467871
+ 475325 string characters out of 5418377
+ 918882 words of memory out of 5000000
+ 53502 multiletter control sequences out of 15000+600000
+ 690047 words of font info for 345 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
  84i,12n,94p,1010b,814s stack positions out of 10000i,1000n,20000p,200000b,200000s
 <C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/
@@ -991,15 +1009,14 @@ ers/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/cmsy7.pf
 b><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/
 cmsy9.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/courier
 /ucrb8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/couri
-er/ucrr8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/cou
-rier/ucrro8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/
-times/utmb8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/
-times/utmbi8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw
-/times/utmr8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw
-/times/utmri8a.pfb>
-Output written on report_base.pdf (5 pages, 270723 bytes).
+er/ucrr8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/tim
+es/utmb8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/tim
+es/utmbi8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/ti
+mes/utmr8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/ti
+mes/utmri8a.pfb>
+Output written on report_base.pdf (6 pages, 2122978 bytes).
 PDF statistics:
- 267 PDF objects out of 1000 (max. 8388607)
- 50 named destinations out of 1000 (max. 500000)
- 74877 words of extra memory for PDF output out of 89155 (max. 10000000)
+ 275 PDF objects out of 1000 (max. 8388607)
+ 51 named destinations out of 1000 (max. 500000)
+ 74385 words of extra memory for PDF output out of 89155 (max. 10000000)
 

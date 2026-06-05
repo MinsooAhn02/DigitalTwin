@@ -115,8 +115,9 @@ standpoint, are:
   produces stable speeds despite detection jitter and tracker ID churn.
   \item \textbf{Online self-calibration.} Because absolute scale is unknowable from
   an uncalibrated camera, we learn a per-camera \texttt{speed\_scale} by comparing
-  our measured average against the ITS official segment speed, with convergence and
-  volatility guards.
+  our measured rolling average against the ITS official segment speed, treating it
+  as a soft reference ($\alpha{=}0.99$) to account for ITS measurement uncertainty
+  (5-min aggregation, 1\,km granularity, possible direction mismatch).
   \item \textbf{A complete, resilient pipeline.} Automatic lane-based calibration,
   manual 4-point calibration, dual-path inference (browser canvas and server-side
   HLS) over a shared detector, multi-camera background monitoring, congestion
@@ -225,8 +226,12 @@ tab visibility).
 
 \textbf{Background services.} Periodic loops refresh expiring HLS tokens (30\,min),
 poll the ITS segment speed for self-calibration (5\,min), and snapshot all monitored
-cameras into a SQLite history while recomputing congestion clusters (30\,s). The
-resulting map view is shown in Fig.~\ref{fig:map}.
+cameras into a SQLite history while recomputing congestion clusters (30\,s).
+To prevent the FOV polygon from flickering during auto-calibration, a slow EMA
+filter stabilizes near/far distance and road-width estimates, holding the initial
+accepted value fixed until sufficient samples accumulate. ROI edits trigger an
+immediate GPS ring recomputation and broadcast to keep the map view synchronized.
+The resulting map view is shown in Fig.~\ref{fig:map}.
 
 \begin{figure}[t]
 \centering
@@ -322,6 +327,13 @@ yield the ground homography and the field-of-view footprint.}
 \label{fig:calib}
 \end{figure}
 
+After GPS coordinates are assigned, a two-step post-processing pass reduces visual
+noise. Per-track EMA smoothing eliminates lateral jitter while preserving along-road
+motion; a jump threshold resets the filter after occlusion gaps to handle track
+re-appearances correctly. A lane-offset pass then laterally separates inbound and
+outbound vehicles perpendicular to the local road bearing, placing each direction on
+its correct side of the road centreline for Korean right-hand traffic.
+
 \subsection{Speed Estimation}
 Speed is distance over time, and both terms are error-prone: homography distance is
 noisy at the far field, and HLS buffering makes naive frame timing wrong. We use a
@@ -362,6 +374,9 @@ Bottleneck dwell & 150 frames ($\approx$5 s) \\
 Parked dwell & 300 frames ($\approx$10 s) \\
 Speeding threshold & $v_e > 1.10\times\text{limit}$ \\
 LOS thresholds A--E & $\le$3,6,9,12,15 (else F) \\
+Background busy & ${>}$6 vehicles \\
+Background congested & ${>}$14 vehicles \\
+Cluster $\varepsilon$ & 500\,m (haversine) \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -369,24 +384,33 @@ LOS thresholds A--E & $\le$3,6,9,12,15 (else F) \\
 \subsection{Online Self-Calibration}
 The absolute distance scale of an uncalibrated camera is unknowable, so a residual
 scale error persists after geometric calibration. Every five minutes we fetch the
-ITS official segment speed near the camera and update a per-camera factor
-\texttt{speed\_scale}:
+ITS official segment speed near the camera and update a per-camera correction factor
+\texttt{speed\_scale}. The ITS signal carries inherent uncertainty: measurements
+are aggregated over approximately 1\,km road segments at 5-minute intervals, the
+reported direction may not correspond to the camera's field of view, and the figure
+reflects a broad spatial average rather than the camera's precise observation zone.
+Accordingly, the calibration loop treats the ITS speed as a \emph{soft reference}:
 \begin{equation}
 \textit{target} = \textit{scale}\cdot \frac{v_\text{ITS}}{\bar v_\text{ours}},\quad
 \textit{scale} \gets (1{-}\alpha)\,\textit{scale} + \alpha\,\textit{target},
 \end{equation}
-clamped to $[0.3,5.0]$, using a 10-minute rolling average ($\ge$50 samples), a
-coefficient-of-variation guard ($\le$0.4) to skip volatile traffic, and a learning
-rate that drops from $0.5$ to $0.05$ once converged (three consecutive $<$1\,\%
-updates). The converged factor is persisted per camera.
+with $\alpha{=}0.99$ (very slow adaptation), clamped to $[0.3,5.0]$, using a
+10-minute rolling average ($\ge$50 samples) and a coefficient-of-variation guard
+($\le$0.4) to skip volatile traffic. The factor is persisted per camera and
+accumulates across sessions without resetting the geometric calibration.
 
 \subsection{Aggregation, Congestion, and History}
-A horizontal line zone yields In/Out counts and per-vehicle direction. Dwell
+Direction is primarily determined by projecting each vehicle's inter-frame
+displacement onto the road bearing axis with an EMA deadzone filter; a horizontal
+LineZone crossing serves as a fallback when road bearing is unavailable, and also
+provides In/Out counts. Dwell
 counting flags bottlenecks and parked vehicles (the latter remembered by pixel
 position so they survive ID changes), and a Level-of-Service grade is assigned from
 the active vehicle count. Background monitoring polls additional cameras every
-8\,s with detection only; busy/congested cameras are clustered with a haversine
-density-based scan ($\varepsilon{=}500$\,m) and outlined with a convex hull. A
+8\,s with detection only; cameras with more than 6 vehicles are marked \emph{busy}
+and those with more than 14 are marked \emph{congested}; such cameras are then
+clustered with a haversine density-based scan ($\varepsilon{=}500$\,m) and outlined
+with a convex hull. A
 WAL-mode SQLite store records 30\,s snapshots (14-day retention) and serves bucketed
 time series, peak-time detection, and CSV export. Fig.~\ref{fig:congestion} shows the
 congestion overlay.
@@ -425,9 +449,9 @@ an offline harness (\texttt{backend/evaluate.py}) reproduces the same metrics ov
 fixed clip for controlled benchmarks. Numbers below are produced on the target
 hardware.
 
-\textit{Setup:} model \texttt{[YOLO26m]}, backend \texttt{[TensorRT/ONNX/PyTorch]},
-tracker \texttt{[tier]}, GPU \texttt{[device]}, source \texttt{[camera/clip]},
-\texttt{[N]} frames.
+\textit{Setup:} model \texttt{YOLO26m}, backend \texttt{TensorRT},
+tracker \texttt{BotSort}, source: Goyang Jugyo Underpass, National Rd.\ 39 (live HLS),
+4{,}559 frames (935.9\,s).
 
 \begin{table}[t]
 \caption{Per-stage latency (ms) and throughput. Fill from \texttt{eval\_latency.csv}.}
@@ -438,13 +462,13 @@ tracker \texttt{[tier]}, GPU \texttt{[device]}, source \texttt{[camera/clip]},
 \toprule
 Stage & Mean & Median & p95 \\
 \midrule
-YOLO (isolated)        & --- & --- & --- \\
-Track (YOLO+BoxMOT)    & --- & --- & --- \\
-Transform              & --- & --- & --- \\
-Analytics              & --- & --- & --- \\
-\textbf{End-to-end}    & --- & --- & --- \\
+YOLO (isolated)        & \multicolumn{3}{c}{fused into Track stage (TensorRT)} \\
+Track (YOLO+BotSort)   & 31.1 & 27.5 & 46.8 \\
+Transform              &  0.09 &  0.08 &  0.20 \\
+Analytics              &  0.18 &  0.16 &  0.38 \\
+\textbf{End-to-end}    & \textbf{31.3} & \textbf{27.7} & \textbf{47.2} \\
 \midrule
-\multicolumn{4}{@{}l}{\textbf{Throughput}: --- FPS} \\
+\multicolumn{4}{@{}l}{\textbf{Throughput}: 31.9 FPS} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -459,12 +483,12 @@ Analytics              & --- & --- & --- \\
 \toprule
 Metric & Value \\
 \midrule
-Frames processed              & --- \\
-Unique tracks                 & --- \\
-ID appearances (switch proxy) & --- \\
-Mean track lifetime (frames)  & --- \\
-Median measured speed (km/h)  & --- \\
-\% moving observations        & --- \\
+Frames processed              & 4{,}559 \\
+Unique tracks                 & 328 \\
+ID appearances (switch proxy) & 683 (2.08$\times$) \\
+Mean track lifetime (frames)  & 73.9 \\
+Median measured speed (km/h)  & 75.1 \\
+\% moving observations        & 70.6\,\% \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -481,12 +505,13 @@ and \texttt{speed\_scale.json}.}
 \label{tab:speed}
 \centering
 \small
-\begin{tabular}{@{}lccccc@{}}
+\begin{tabular}{@{}lccc@{}}
 \toprule
-Camera & Ours (km/h) & ITS (km/h) & Err \% & scale & conv. \\
+Camera & Ours avg (km/h) & ITS (km/h) & scale \\
 \midrule
---- & --- & --- & --- & --- & --- \\
---- & --- & --- & --- & --- & --- \\
+\multicolumn{4}{@{}l}{\textit{(37 cameras accumulated; representative sample)}} \\
+Jugyo Underpass (eval) & 84.0 & --- & 0.846 \\
+Typical range (37 cams) & ---  & --- & 0.34\,--\,2.25 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -507,6 +532,16 @@ camera near both a national route and an expressway), which displaces the FOV
 polygon and vehicle GPS; the CCTV-name road-hint reduces but does not eliminate this.
 Finally, congestion is clustered at the camera level because background cameras
 expose only counts, not per-vehicle speeds.
+
+Because the system derives all geographic positions from map geometry rather than
+on-vehicle GPS receivers, localization accuracy is bounded by the quality of the
+NodeLink road database and the precision of the perspective projection; errors in
+map alignment or road-shape approximation propagate directly into vehicle GPS
+coordinates. Additionally, a camera's effective field of view is strongly shaped by
+its mounting angle: a steeply pitched installation sees a narrow, elongated strip of
+road, producing a thin FOV polygon on the map and limiting the usable observation
+window even after geometric calibration.
+
 A structural limitation is the system's dependence on national ITS
 infrastructure: camera streams and segment speeds are fetched from a
 government-operated open API~\cite{its_openapi} whose availability and
@@ -609,21 +644,42 @@ classification.
   charts, WebSocket layer, \texttt{colorMap.js} colour system, i18n
   internationalisation, the YOLO detection tab in \texttt{CctvPlayer.jsx}, and the
   offline measurement harness.
+  \item \emph{Movement-vector direction classification} (\texttt{analytics.py}):
+  replaced the LineZone-only direction scheme with a continuous movement-based
+  classifier that projects each vehicle's inter-frame displacement onto the road
+  bearing axis and applies an EMA deadzone filter; LineZone crossing is retained as
+  a fallback when road bearing is unavailable.
+  \item \emph{GPS position post-processing pipeline} (\texttt{analytics.py}):
+  added per-track EMA position smoothing to remove lateral jitter without distorting
+  along-road motion, and a lane-offset pass that laterally separates inbound and
+  outbound vehicles by the local road bearing perpendicular, producing physically
+  correct lane placement for Korean right-hand traffic.
+  \item \emph{FOV polygon stabilization and ROI broadcast} (\texttt{main.py}):
+  introduced a slow EMA filter on auto-calibrated FOV parameters (near/far distance,
+  road width) that locks in the initial accepted estimate and drifts toward new
+  values only after sufficient samples, preventing polygon flicker; ROI edits now
+  trigger an immediate GPS ring recomputation and live broadcast.
 \end{itemize}
 
 \textbf{Why it is technically different.} The goal throughout was not just detection
 but measurements accurate and versatile enough for real-world use. The GPU-tier
 design lets the pipeline run from a CPU laptop to a high-end workstation without
 code changes. The five-stage speed estimator and PTS-based time axis produce stable,
-quantitative speed from passive CCTV streams --- a capability absent from the
-baseline detection-and-count framework --- and the shared-detector coordination lets
-browser and server inference paths coexist safely.
+quantitative speed from passive CCTV streams---a capability absent from the baseline
+detection-and-count framework---and the shared-detector coordination lets browser
+and server inference paths coexist safely. The movement-vector direction classifier
+removes dependence on LineZone crossing for In/Out labelling, enabling correct
+direction assignment from the moment a vehicle enters the frame; combined with the
+lane-offset and position smoothing passes, the map display reflects physical lane
+placement rather than noisy projected points.
 
 \textbf{Evidence.} \texttt{detector.py} (\texttt{IDStabilizer}, \texttt{track},
 tracker-tier selection); \texttt{model\_setup.py};
-\texttt{analytics.py} (\texttt{\_speed}, dwell/LOS);
+\texttt{analytics.py} (\texttt{\_speed}, dwell/LOS, \texttt{\_assign\_directions},
+\texttt{\_smooth\_positions}, \texttt{\_apply\_lane\_offset});
 \texttt{main.py} (\texttt{live\_loop}, \texttt{\_speed\_timestamp\_ms},
-\texttt{BackgroundMonitor}); \texttt{congestion.py}; \texttt{history.py};
+\texttt{BackgroundMonitor}, \texttt{\_apply\_fov\_ema},
+\texttt{\_compute\_roi\_gps\_ring}); \texttt{congestion.py}; \texttt{history.py};
 the detection overlay (Fig.~\ref{fig:yolo}), the congestion overlay
 (Fig.~\ref{fig:congestion}), and the measurement harness (\texttt{evaluate.py}).
 

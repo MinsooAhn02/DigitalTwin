@@ -1,5 +1,5 @@
 stage,mean_ms,median_ms,p95_ms
-track,26.932,24.908,45.288
-transform,0.073,0.067,0.159
-analytics,0.144,0.135,0.32
-end_to_end,27.149,25.17,45.534
+track,31.061,27.494,46.82
+transform,0.093,0.077,0.196
+analytics,0.181,0.155,0.38
+end_to_end,31.335,27.738,47.245

@@ -541,8 +541,8 @@ class BackgroundMonitor:
     - B(클러스터링) / C(히스토리 저장) / D(Re-ID) 확장을 위한 훅 포함
     """
     POLL_S            = 8.0   # 캡처 주기 (초) — CPU 부하 절충
-    THRESH_BUSY       = 3     # > 3 → busy
-    THRESH_CONGESTED  = 6     # > 6 → congested
+    THRESH_BUSY       = 6     # > 6 → busy  (7+)
+    THRESH_CONGESTED  = 14    # > 14 → congested  (15+)
 
     def __init__(self) -> None:
         self._cams: dict[str, _BgCamState] = {}

@@ -132,8 +132,8 @@ family into `.runtime_profile.json`.
 the lower (older) ID. Handles ByteTrack emitting two IDs for one car.
 
 **`IDStabilizer`** (only for cpu/low, which lack appearance ReID). Restores a vehicle's previous ID
-after a brief miss using **velocity-predicted position nearest-neighbour matching** (≤ **120 px** from
-predicted centre). Each active track's pixel velocity `(vx, vy)` is tracked per frame; when a track
+after a brief miss using **velocity-predicted position nearest-neighbour matching** (≤ **80 px** from
+predicted centre; class default is 120 px, but the `VehicleDetector` instantiates with `max_dist_px=80.0`). Each active track's pixel velocity `(vx, vy)` is tracked per frame; when a track
 goes lost its velocity is saved in `_lost` as `[cx, cy, age, vx, vy]`. `_find_lost` predicts
 `(cx + vx·age, cy + vy·age)` so fast-moving vehicles (30+ px/frame) remain matchable across 3–4 lost
 frames. Two-pass design:
@@ -251,10 +251,10 @@ los_grade, in_count, out_count, class_counts`.
 
 **Speed pipeline (`_speed`, the most-tuned logic).** Per track:
 1. **Duplicate skip** — identical metre coordinates (non-detect frames) are not appended.
-2. **Physics jump guard** — before appending, two-tier check on `step_m`:
-   - `step_m > max_mps·dt·3.0` → **teleport reset**: window cleared entirely (ID-switch artifact; the
+2. **Physics jump guard** — before appending, compute `raw_max_mps = (MAX_REASONABLE_KPH/3.6) / max(speed_scale, 0.1)` (divides by speed_scale so the guard tightens as the learned scale grows), then two-tier check:
+   - `step_m > raw_max_mps·dt·3.0` → **teleport reset**: window cleared entirely (ID-switch artifact; the
      regression slope would otherwise be corrupted by a position jump across IDs).
-   - `step_m > max_mps·dt·1.5` → sample dropped, window kept (transient detection noise; an earlier
+   - `step_m > raw_max_mps·dt·1.5` → sample dropped, window kept (transient detection noise; an earlier
      version cleared the whole window and produced 0 speed ~47 % of the time).
    - `dt > 2 s` clears the window (track re-appeared).
 3. **OLS regression** — over a sliding window of `SPEED_WINDOW_FRAMES` `(x_m, y_m, t)` samples,
@@ -301,7 +301,8 @@ against the ITS segment speed:
 - **Volatility guard:** coefficient of variation > 0.4 ⇒ skip (traffic in transition).
 - `target = old_scale · ITS / our_avg`, **clamped to [0.3, 5.0]** (a clamp hit logs a warning —
   surfaces a badly-off homography instead of failing silently).
-- Learning rate `α = 0.5` before convergence, `0.95` after (slow once stable).
+- Learning rate (weight of new target) = `0.5` before convergence, `0.05` after (slow once stable).
+  Code: `scale = old_scale * alpha + target * (1 - alpha)` where `alpha = 0.95` (converged) / `0.5` (not converged).
 - Convergence: `_stable_count ≥ 3` consecutive updates with < 1 % change. The 10-min window is double
   the ITS 5-min aggregation so the ITS window is always contained regardless of poll phase.
 
@@ -448,6 +449,12 @@ camera, `POST /switch-camera`, clear `switching` when `camera_ready` arrives. Bu
 `PathLayer` from a reducer that appends recent positions (capped). Uses `useRef`/`useCallback`/
 `React.memo` (CounterPanel, ClassBarChart, VehicleTable) so 30 fps frames don't re-render the sidebar.
 
+**Camera hint banner.** When no camera is selected (`noCameraSelected`), a floating hint is shown at
+the bottom-centre of the map. Its colours adapt to `mapMode`: light mode uses a white/slate palette
+(`rgba(255,255,255,0.92)` background, dark text, `#cbd5e1` border); dark mode uses the usual dark
+card (`rgba(17,24,39,0.88)`, `#374151` border). The 📷 icon gets a cyan glow on dark and no filter
+on light. Size and padding are slightly larger than before (14 px text, 12 px 20 px padding).
+
 **`CollapsibleCard`.** Defined inline in `App.jsx`. Accepts an optional `description` prop; when
 provided a small `ℹ` button appears in the card header. Clicking it opens a **centered fixed-position
 modal overlay** (dark card, `zIndex 9999`, click-outside to dismiss) showing the description text.
@@ -498,10 +505,12 @@ Single `/ws` connection with 3 s auto-reconnect. Demultiplexes 6 message types i
 `error` string.
 
 ### 5.7b `VehicleTable.jsx` — direction tabs
-The vehicle list now has a 3-tab toggle (`All / Inbound / Out`) above the table. A local `dirTab`
-state filters the `vehicles` prop by `v.direction` before rendering. Tab badges show the count per
-direction; active tab colour matches the direction convention (blue = In, red = Out, neutral = All).
-The speed-log summary (min/avg/max) is computed from the currently visible (filtered) set.
+The vehicle list now has a 3-tab toggle (`All / Inbound / Outbound`) above the table. A local
+`dirTab` state (`"all" | "in" | "out"`) filters the `vehicles` prop by `v.direction` before
+rendering. Tab badges show the count per direction (`tabCounts` memoised from the full list);
+active tab colour matches the direction convention (blue = In, red = Out, neutral = All).
+The speed-log summary (min/avg/max) is computed from the **currently filtered** set, not all
+vehicles. An empty filtered set shows a `—` placeholder instead of an empty table.
 
 ### 5.8 `i18n`, `colorMap.js`
 React-context i18n (en/ko, `{{param}}` interpolation). `colorMap` maps vehicle direction

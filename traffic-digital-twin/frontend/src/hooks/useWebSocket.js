@@ -1,12 +1,12 @@
 /**
- * useWebSocket.js — 실시간 WebSocket 데이터 수신 훅
+ * useWebSocket — real-time WebSocket data hook
  *
- * 반환값:
- *   frameData      : 최신 FrameAnalytics JSON (null 초기값)
- *   isConnected    : 연결 상태 boolean
- *   error          : 에러 메시지 string | null
- *   cameraReady    : 카메라 전환 완료 이벤트 카운터 (변경될 때마다 useEffect 트리거용)
- *   cameraReadyInfo: 최신 camera_ready 페이로드 { camera_key, roi, name }
+ * Returns:
+ *   frameData      : latest FrameAnalytics JSON (null initially)
+ *   isConnected    : connection state boolean
+ *   error          : error message string | null
+ *   cameraReady    : camera-switch completion event counter (triggers useEffect on change)
+ *   cameraReadyInfo: latest camera_ready payload { camera_key, roi, name }
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -43,17 +43,26 @@ export function useWebSocket() {
         const data = JSON.parse(evt.data);
         // 메시지 타입 분기
         if (data.type === "camera_ready") {
-          setCameraReadyInfo({ camera_key: data.camera_key, roi: data.roi, name: data.name, calibrated: data.calibrated ?? false, road_name: data.road_name ?? null, road_lanes: data.road_lanes ?? null, road_max_spd: data.road_max_spd ?? null, road_bearing: data.road_bearing ?? null, name_bearing: data.name_bearing ?? null, snap_lat: data.snap_lat ?? null, snap_lon: data.snap_lon ?? null, road_width_m: data.road_width_m ?? null, road_pts: data.road_pts ?? null, snap_along_m: data.snap_along_m ?? null });
+          setCameraReadyInfo({ camera_key: data.camera_key, roi: data.roi, name: data.name, calibrated: data.calibrated ?? false, road_name: data.road_name ?? null, road_lanes: data.road_lanes ?? null, road_max_spd: data.road_max_spd ?? null, road_bearing: data.road_bearing ?? null, name_bearing: data.name_bearing ?? null, snap_lat: data.snap_lat ?? null, snap_lon: data.snap_lon ?? null, road_width_m: data.road_width_m ?? null, road_pts: data.road_pts ?? null, snap_along_m: data.snap_along_m ?? null, roi_gps_ring: data.roi_gps_ring ?? null });
           setAutoCalibInfo(null); // 카메라 전환 시 이전 자동 캘리브 정보 초기화
           setCameraReady((n) => n + 1);
         } else if (data.type === "camera_error") {
-          setError(`카메라 전환 실패: ${data.message ?? ""}`);
-          setCameraReady((n) => n + 1); // 에러여도 로딩 상태 해제
+          setError(`Camera switch failed: ${data.message ?? ""}`);
+          setCameraReady((n) => n + 1); // release loading state even on error
+        } else if (data.type === "roi_updated") {
+          // Phase 3: ROI 변경 시 GPS ring 업데이트
+          setCameraReadyInfo((prev) => prev ? { ...prev, roi_gps_ring: data.roi_gps_ring ?? null } : prev);
         } else if (data.type === "auto_calibrated") {
           setCameraReadyInfo((prev) => {
             const base = prev ?? {};
-            // calibrated 플래그만 업데이트. name_bearing(노드링크 방위)은 덮어쓰지 않음.
-            return { ...base, calibrated: true };
+            // road_pts/snap_along_m은 학습된 값으로 갱신; name_bearing은 덮어쓰지 않음.
+            return {
+              ...base,
+              calibrated: true,
+              ...(data.road_pts      != null && { road_pts:      data.road_pts }),
+              ...(data.snap_along_m  != null && { snap_along_m:  data.snap_along_m }),
+              ...(data.roi_gps_ring  != null && { roi_gps_ring:  data.roi_gps_ring }),
+            };
           });
           setAutoCalibInfo({
             cam_h_m:       data.cam_h_m       ?? null,
@@ -84,7 +93,7 @@ export function useWebSocket() {
       }
     };
 
-    ws.onerror = () => setError("WebSocket 연결 오류");
+    ws.onerror = () => setError("WebSocket connection error");
 
     ws.onclose = () => {
       setIsConnected(false);

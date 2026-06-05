@@ -137,7 +137,6 @@ export default function App() {
   const itsSpeed     = activeData?.its_speed_kph  ?? null;
   const speedErrPct  = activeData?.speed_error_pct ?? null;
   const speedScale     = activeData?.speed_scale           ?? 1.0;
-  const scaleConverged = activeData?.speed_scale_converged ?? false;
   const roadName     = cameraReadyInfo?.road_name  ?? null;
   const roadLanes    = cameraReadyInfo?.road_lanes  ?? null;
   const roadMaxSpd   = cameraReadyInfo?.road_max_spd ?? null;
@@ -272,6 +271,7 @@ export default function App() {
           fovSnapLon={cameraReadyInfo?.snap_lon ?? selectedCctv?.lon ?? null}
           fovRoadPts={cameraReadyInfo?.road_pts ?? null}
           fovSnapAlongM={cameraReadyInfo?.snap_along_m ?? null}
+          fovRoiGpsRing={cameraReadyInfo?.roi_gps_ring ?? null}
           backgroundStatus={backgroundStatus}
           congestionClusters={congestionClusters}
         />
@@ -311,22 +311,28 @@ export default function App() {
           </div>
         )}
 
-        {/* 카메라 미선택 안내 — 좌하단 작은 힌트 */}
-        {noCameraSelected && (
-          <div style={{
-            position: "absolute", bottom: 60, left: 16,
-            background: "rgba(17,24,39,0.85)", padding: "8px 14px",
-            borderRadius: 8, fontSize: 12, backdropFilter: "blur(4px)",
-            border: "1px solid #374151", pointerEvents: "none",
-            display: "flex", alignItems: "center", gap: 8,
-          }}>
-            <span style={{ fontSize: 16 }}>📷</span>
-            <div>
-              <div style={{ color: "#f9fafb", fontWeight: 600 }}>{t("app.clickCctv")}</div>
-              <div style={{ color: "#9ca3af", fontSize: 11, marginTop: 1 }}>{t("app.clickCctvSub")}</div>
+        {/* 카메라 미선택 안내 — 하단 중앙 힌트 */}
+        {noCameraSelected && (() => {
+          const isLight = mapMode === "light";
+          return (
+            <div style={{
+              position: "absolute", bottom: 24, left: "50%", transform: "translateX(-50%)",
+              background: isLight ? "rgba(255,255,255,0.92)" : "rgba(17,24,39,0.88)",
+              padding: "12px 20px",
+              borderRadius: 10, fontSize: 14, backdropFilter: "blur(6px)",
+              border: `1px solid ${isLight ? "#cbd5e1" : "#374151"}`,
+              boxShadow: isLight ? "0 2px 12px rgba(0,0,0,0.12)" : "0 2px 12px rgba(0,0,0,0.4)",
+              pointerEvents: "none",
+              display: "flex", alignItems: "center", gap: 10, whiteSpace: "nowrap",
+            }}>
+              <span style={{ fontSize: 22, filter: isLight ? "none" : "drop-shadow(0 0 4px #38bdf8)" }}>📷</span>
+              <div>
+                <div style={{ color: isLight ? "#0f172a" : "#f9fafb", fontWeight: 700, fontSize: 14 }}>{t("app.clickCctv")}</div>
+                <div style={{ color: isLight ? "#475569" : "#94a3b8", fontSize: 12, marginTop: 2 }}>{t("app.clickCctvSub")}</div>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* 카메라 전환 중 */}
         {switching && (
@@ -412,7 +418,7 @@ export default function App() {
             <h1 style={{ margin: 0, fontSize: 15, fontWeight: 700, letterSpacing: "-0.02em" }}>{t("app.title")}</h1>
             <button
               onClick={() => setLang(lang === "en" ? "ko" : "en")}
-              title={lang === "en" ? "한국어로 전환" : "Switch to English"}
+              title={lang === "en" ? t("lang.switchToKo") : t("lang.switchToEn")}
               style={{ background: "rgba(30,41,59,0.9)", border: "1px solid #334155", borderRadius: 6, padding: "3px 10px", cursor: "pointer", fontSize: 12, fontWeight: 700, color: lang === "en" ? "#38bdf8" : "#fbbf24" }}
             >
               {lang === "en" ? "KO" : "EN"}
@@ -446,105 +452,116 @@ export default function App() {
           </div>
         </div>
 
-        {/* 탭 콘텐츠 */}
-        <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "0 16px 8px" }}>
+        {/* 탭 콘텐츠: flex column, no outer scroll — each tab manages its own scroll */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
 
           {/* ── Live View 탭 ── */}
           {sidebarTab === "live" && <>
-            <CounterPanel inCount={inCount} outCount={outCount} vehicleCount={vehicleCnt} />
+            {/* 고정 상단 패널 (크기 고정, 찌부 없음) */}
+            <div style={{ flexShrink: 0, display: "flex", flexDirection: "column", gap: 10, padding: "0 16px 0" }}>
+              <CounterPanel inCount={inCount} outCount={outCount} vehicleCount={vehicleCnt} />
 
-            {roadName && (
-              <CollapsibleCard label={t("app.roadInfo")}>
-                <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-                  <div style={{ fontWeight: 600, color: "#e2e8f0", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={roadName}>{roadName}</div>
-                  <div style={{ display: "flex", gap: 16, color: "#94a3b8" }}>
-                    {roadLanes != null && roadLanes > 0 && <span>{t("app.roadLanes", { n: roadLanes })}</span>}
-                    {roadMaxSpd != null && roadMaxSpd > 0 && (
-                      <span><b style={{ color: "#fbbf24" }}>{t("app.roadSpeedLimit", { n: roadMaxSpd })}</b></span>
+              {roadName && (
+                <CollapsibleCard label={t("app.roadInfo")}>
+                  <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+                    <div style={{ fontWeight: 600, color: "#e2e8f0", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={roadName}>{roadName}</div>
+                    <div style={{ display: "flex", gap: 16, color: "#94a3b8" }}>
+                      {roadLanes != null && roadLanes > 0 && <span>{t("app.roadLanes", { n: roadLanes })}</span>}
+                      {roadMaxSpd != null && roadMaxSpd > 0 && (
+                        <span><b style={{ color: "#fbbf24" }}>{t("app.roadSpeedLimit", { n: roadMaxSpd })}</b></span>
+                      )}
+                    </div>
+                  </div>
+                </CollapsibleCard>
+              )}
+
+              {autoCalibInfo?.cam_h_m != null && (
+                <CollapsibleCard label={t("app.autoCalib")} defaultOpen={false} description={t("app.autoCalibDesc")}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 12, color: "#94a3b8" }}>
+                    <span>{t("app.calibCamH")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.cam_h_m} m</b>
+                    <span>{t("app.calibRoadW")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_width_m} m</b>
+                    <span>{t("app.calibNear")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.near_m} m</b>
+                    <span>{t("app.calibFar")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.far_m} m</b>
+                    {autoCalibInfo.road_length_m != null && <>
+                      <span>{t("app.calibRoadLen")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_length_m} m</b>
+                    </>}
+                    <span>{t("app.calibTilt")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.pitch_deg}°</b>
+                  </div>
+                </CollapsibleCard>
+              )}
+
+              {itsSpeed !== null && (
+                <CollapsibleCard label={t("app.itsCompare")} defaultOpen={false} description={t("app.itsCompareDesc")}>
+                  <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center", fontSize: 12 }}>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsMeasured")}</div>
+                      <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{ourAvgKph > 0 ? ourAvgKph.toFixed(1) : "—"}</div>
+                      {ourAvgKph > 0 && <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>}
+                    </div>
+                    <div style={{ color: "#374151", fontSize: 18 }}>vs</div>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsSegment")}</div>
+                      <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{itsSpeed.toFixed(1)}</div>
+                      <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>
+                    </div>
+                    {speedErrPct !== null && ourAvgKph > 0 && (
+                      <div style={{ textAlign: "center" }}>
+                        <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsError")}</div>
+                        <div style={{ fontWeight: 700, fontSize: 16, color: Math.abs(speedErrPct) < 10 ? "#34d399" : Math.abs(speedErrPct) < 20 ? "#fbbf24" : "#f87171" }}>
+                          {speedErrPct > 0 ? "+" : ""}{speedErrPct.toFixed(1)}%
+                        </div>
+                      </div>
                     )}
                   </div>
-                </div>
-              </CollapsibleCard>
-            )}
-
-            {autoCalibInfo?.cam_h_m != null && (
-              <CollapsibleCard label={t("app.autoCalib")} defaultOpen={false}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 12, color: "#94a3b8" }}>
-                  <span>{t("app.calibCamH")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.cam_h_m} m</b>
-                  <span>{t("app.calibRoadW")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_width_m} m</b>
-                  <span>{t("app.calibNear")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.near_m} m</b>
-                  <span>{t("app.calibFar")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.far_m} m</b>
-                  {autoCalibInfo.road_length_m != null && <>
-                    <span>{t("app.calibRoadLen")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_length_m} m</b>
-                  </>}
-                  <span>{t("app.calibTilt")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.pitch_deg}°</b>
-                </div>
-              </CollapsibleCard>
-            )}
-
-            {itsSpeed !== null && (
-              <CollapsibleCard label={t("app.itsCompare")} defaultOpen={false}>
-                <div style={{ display: "flex", justifyContent: "space-around", alignItems: "center", fontSize: 12 }}>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsMeasured")}</div>
-                    <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{ourAvgKph > 0 ? ourAvgKph.toFixed(1) : "—"}</div>
-                    {ourAvgKph > 0 && <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>}
+                  <div style={{ marginTop: 6, textAlign: "center", fontSize: 10, color: "#4b5563" }}>
+                    {t("app.scaleFactor")}&nbsp;
+                    <span style={{ color: Math.abs(speedScale - 1) < 0.05 ? "#94a3b8" : "#fbbf24", fontWeight: 700 }}>×{speedScale.toFixed(3)}</span>
                   </div>
-                  <div style={{ color: "#374151", fontSize: 18 }}>vs</div>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsSegment")}</div>
-                    <div style={{ color: "#94a3b8", fontWeight: 700, fontSize: 18 }}>{itsSpeed.toFixed(1)}</div>
-                    <div style={{ color: "#4b5563", fontSize: 10 }}>km/h</div>
-                  </div>
-                  {speedErrPct !== null && ourAvgKph > 0 && (
-                    <div style={{ textAlign: "center" }}>
-                      <div style={{ color: "#64748b", fontSize: 10, marginBottom: 2 }}>{t("app.itsError")}</div>
-                      <div style={{ fontWeight: 700, fontSize: 16, color: Math.abs(speedErrPct) < 10 ? "#34d399" : Math.abs(speedErrPct) < 20 ? "#fbbf24" : "#f87171" }}>
-                        {speedErrPct > 0 ? "+" : ""}{speedErrPct.toFixed(1)}%
-                      </div>
-                    </div>
-                  )}
-                </div>
-                <div style={{ marginTop: 6, textAlign: "center", fontSize: 10, color: "#4b5563" }}>
-                  {t("app.scaleFactor")}&nbsp;
-                  <span style={{ color: scaleConverged ? "#34d399" : Math.abs(speedScale - 1) < 0.05 ? "#94a3b8" : "#fbbf24", fontWeight: 700 }}>×{speedScale.toFixed(3)}</span>
-                  &nbsp;{scaleConverged ? <span style={{ color: "#34d399" }}>{t("app.scaleConverged")}</span> : <span style={{ color: "#6b7280" }}>{t("app.scaleLearning")}</span>}
-                </div>
+                </CollapsibleCard>
+              )}
+
+              <CollapsibleCard label={t("app.classDist")}>
+                <ClassBarChart classCounts={classCounts} />
               </CollapsibleCard>
-            )}
+            </div>
 
-            <CollapsibleCard label={t("app.classDist")}>
-              <ClassBarChart classCounts={classCounts} />
-            </CollapsibleCard>
-
-            <CollapsibleCard label={t("app.vehicleList")}>
-              <VehicleTable vehicles={vehicles} calibrated={isCalibrated} />
-            </CollapsibleCard>
+            {/* 차량 리스트: 남은 공간을 차지하며 내부 스크롤 */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 16px 8px" }}>
+              <CollapsibleCard label={t("app.vehicleList")}>
+                <VehicleTable vehicles={vehicles} calibrated={isCalibrated} />
+              </CollapsibleCard>
+            </div>
           </>}
 
           {/* ── Background 탭 ── */}
           {sidebarTab === "monitor" && (
-            <MonitorPanel
-              monitoredCams={monitoredCams}
-              backgroundStatus={backgroundStatus}
-              cctvList={cctvList}
-              selectedCctv={selectedCctv}
-              lang={lang}
-              t={t}
-              onToggleMonitor={handleToggleMonitor}
-              onRemove={(camKey) => {
-                const c = cctvList.find((x) => x.cam_key === camKey);
-                if (c) handleToggleMonitor(c);
-                else {
-                  fetch(`${API_BASE}/background/remove/${camKey}`, { method: "POST" }).catch(() => {});
-                  setMonitoredCams((prev) => { const s = new Set(prev); s.delete(camKey); return s; });
-                }
-              }}
-            />
+            <div style={{ flex: 1, overflowY: "auto", padding: "0 16px 8px" }}>
+              <MonitorPanel
+                monitoredCams={monitoredCams}
+                backgroundStatus={backgroundStatus}
+                cctvList={cctvList}
+                selectedCctv={selectedCctv}
+                lang={lang}
+                t={t}
+                onToggleMonitor={handleToggleMonitor}
+                onRemove={(camKey) => {
+                  const c = cctvList.find((x) => x.cam_key === camKey);
+                  if (c) handleToggleMonitor(c);
+                  else {
+                    fetch(`${API_BASE}/background/remove/${camKey}`, { method: "POST" }).catch(() => {});
+                    setMonitoredCams((prev) => { const s = new Set(prev); s.delete(camKey); return s; });
+                  }
+                }}
+              />
+            </div>
           )}
 
           {/* ── History 탭 ── */}
-          {sidebarTab === "history" && <HistoryPanel lang={lang} t={t} />}
+          {sidebarTab === "history" && (
+            <div style={{ flex: 1, overflowY: "auto", padding: "0 16px 8px" }}>
+              <HistoryPanel lang={lang} t={t} />
+            </div>
+          )}
         </div>
 
         {/* CctvSearch: 하단 고정 */}
@@ -556,19 +573,66 @@ export default function App() {
   );
 }
 
-function CollapsibleCard({ children, label, defaultOpen = true }) {
+function CollapsibleCard({ children, label, defaultOpen = true, description = null }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [infoOpen, setInfoOpen] = useState(false);
   return (
     <div style={{ background: "#1f2937", borderRadius: 12, overflow: "hidden" }}>
-      <button onClick={() => setOpen(v => !v)} style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        width: "100%", padding: "10px 16px", background: "none", border: "none",
-        cursor: "pointer", color: "#9ca3af", fontSize: 12, textAlign: "left",
-      }}>
-        <span>{label}</span>
-        <span style={{ fontSize: 9, color: "#4b5563" }}>{open ? "▲" : "▼"}</span>
-      </button>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px" }}>
+        <button onClick={() => setOpen(v => !v)} style={{
+          flex: 1, display: "flex", alignItems: "center", background: "none", border: "none",
+          cursor: "pointer", color: "#9ca3af", fontSize: 12, textAlign: "left", padding: 0,
+        }}>
+          <span>{label}</span>
+        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {description && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setInfoOpen(true); }}
+              style={{
+                background: "none", border: "1px solid #374151", borderRadius: "50%",
+                width: 16, height: 16, display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer", color: "#6b7280", fontSize: 10, padding: 0, lineHeight: 1,
+              }}
+              title="What is this?"
+            >ℹ</button>
+          )}
+          <button onClick={() => setOpen(v => !v)} style={{
+            background: "none", border: "none", cursor: "pointer",
+            color: "#4b5563", fontSize: 9, padding: 0,
+          }}>
+            {open ? "▲" : "▼"}
+          </button>
+        </div>
+      </div>
       {open && <div style={{ padding: "0 16px 14px" }}>{children}</div>}
+
+      {infoOpen && (
+        <div
+          onClick={() => setInfoOpen(false)}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+            zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "#1f2937", borderRadius: 12, padding: 20, maxWidth: 340, width: "90%",
+              border: "1px solid #374151", boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{label}</span>
+              <button
+                onClick={() => setInfoOpen(false)}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "#6b7280", fontSize: 16, padding: 0 }}
+              >×</button>
+            </div>
+            <p style={{ fontSize: 12, color: "#94a3b8", lineHeight: 1.7, margin: 0 }}>{description}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

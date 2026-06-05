@@ -1,0 +1,253 @@
+{
+  "source": "[국도39호선] 고양 주교지하차도",
+  "inference_backend": "tensorrt",
+  "tracker": "BotSort",
+  "frames_processed": 4559,
+  "elapsed_s": 935.9,
+  "latency_ms": {
+    "yolo_isolated": {
+      "n": 0
+    },
+    "track": {
+      "n": 4559,
+      "mean": 31.061,
+      "median": 27.494,
+      "p95": 46.82,
+      "min": 6.961,
+      "max": 1377.192
+    },
+    "transform": {
+      "n": 4559,
+      "mean": 0.093,
+      "median": 0.077,
+      "p95": 0.196,
+      "min": 0.001,
+      "max": 1.165
+    },
+    "analytics": {
+      "n": 4559,
+      "mean": 0.181,
+      "median": 0.155,
+      "p95": 0.38,
+      "min": 0.024,
+      "max": 4.154
+    },
+    "end_to_end": {
+      "n": 4559,
+      "mean": 31.335,
+      "median": 27.738,
+      "p95": 47.245,
+      "min": 7.066,
+      "max": 1377.533
+    }
+  },
+  "throughput_fps": 31.9,
+  "tracking": {
+    "frames_processed": 4559,
+    "unique_tracks": 328,
+    "id_appearances": 683,
+    "mean_lifetime_frames": 73.91,
+    "median_lifetime_frames": 61.0,
+    "max_lifetime_frames": 933
+  },
+  "speed": {
+    "n": 17103,
+    "mean": 84.003,
+    "median": 75.1,
+    "p95": 172.5,
+    "min": 1.8,
+    "max": 179.7,
+    "pct_moving_obs": 70.6,
+    "total_vehicle_obs": 24241
+  },
+  "detection_class_totals": {
+    "car": 21041,
+    "truck": 2923,
+    "bus": 277
+  },
+  "speed_scale_snapshot": {
+    "16c3b5b2fa97": {
+      "speed_scale": 0.8464,
+      "converged": false,
+      "updated_at": "2026-05-26T13:21:51.429979+00:00"
+    },
+    "a7ae872573e5": {
+      "speed_scale": 0.9209,
+      "converged": false,
+      "updated_at": "2026-05-26T17:37:39.563858+00:00"
+    },
+    "39fc6e8b3c35": {
+      "speed_scale": 0.8867,
+      "converged": false,
+      "updated_at": "2026-05-26T17:42:43.627866+00:00"
+    },
+    "e9b6f2a8c07a": {
+      "speed_scale": 0.834,
+      "converged": false,
+      "updated_at": "2026-05-26T19:08:03.826323+00:00"
+    },
+    "e32baeb9d96f": {
+      "speed_scale": 0.9408,
+      "converged": false,
+      "updated_at": "2026-05-26T19:23:21.320173+00:00"
+    },
+    "07b316e15c06": {
+      "speed_scale": 1.0669,
+      "converged": false,
+      "updated_at": "2026-05-26T19:44:43.756311+00:00"
+    },
+    "04b4e098f43e": {
+      "speed_scale": 1.0123,
+      "converged": false,
+      "updated_at": "2026-05-26T19:54:51.552086+00:00"
+    },
+    "b43f280f5a50": {
+      "speed_scale": 0.934,
+      "converged": false,
+      "updated_at": "2026-05-26T20:07:01.814379+00:00"
+    },
+    "6d4848463ee7": {
+      "speed_scale": 2.2538,
+      "converged": false,
+      "updated_at": "2026-05-26T20:17:07.981238+00:00"
+    },
+    "a69c5c9e03cb": {
+      "speed_scale": 1.0604,
+      "converged": false,
+      "updated_at": "2026-05-26T20:52:55.908567+00:00"
+    },
+    "c102131b3499": {
+      "speed_scale": 0.8289,
+      "converged": false,
+      "updated_at": "2026-05-26T21:13:09.390261+00:00"
+    },
+    "6f3b763bb67c": {
+      "speed_scale": 0.5314,
+      "converged": false,
+      "updated_at": "2026-05-26T23:12:37.471908+00:00"
+    },
+    "7fb40b51536a": {
+      "speed_scale": 0.5103,
+      "converged": false,
+      "updated_at": "2026-05-26T23:37:54.730072+00:00"
+    },
+    "b8a3365d79bf": {
+      "speed_scale": 0.9498,
+      "converged": false,
+      "updated_at": "2026-05-27T00:41:09.986842+00:00"
+    },
+    "fa96971a90bb": {
+      "speed_scale": 1.531,
+      "converged": false,
+      "updated_at": "2026-05-27T00:51:21.550433+00:00"
+    },
+    "d7eb03c82162": {
+      "speed_scale": 0.9133,
+      "converged": false,
+      "updated_at": "2026-05-27T01:14:17.794684+00:00"
+    },
+    "dea0a63a1a76": {
+      "speed_scale": 0.8837,
+      "converged": false,
+      "updated_at": "2026-05-27T13:51:13.943317+00:00"
+    },
+    "382568ff4309": {
+      "speed_scale": 0.6867,
+      "converged": false,
+      "updated_at": "2026-05-27T20:52:32.512480+00:00"
+    },
+    "d11c4812bd06": {
+      "speed_scale": 0.7462,
+      "converged": false,
+      "updated_at": "2026-05-28T15:42:34.237959+00:00"
+    },
+    "a3a9d8cc9693": {
+      "speed_scale": 0.9579,
+      "converged": false,
+      "updated_at": "2026-05-28T15:52:40.303074+00:00"
+    },
+    "b2a29abae336": {
+      "speed_scale": 1.3716,
+      "converged": false,
+      "updated_at": "2026-05-31T14:55:40.275563+00:00"
+    },
+    "9ecba4c6cec5": {
+      "speed_scale": 0.7226,
+      "converged": false,
+      "updated_at": "2026-05-31T15:10:48.533306+00:00"
+    },
+    "d103faa16d32": {
+      "speed_scale": 0.8424,
+      "converged": false,
+      "updated_at": "2026-05-31T15:56:06.806950+00:00"
+    },
+    "4cb0d772dffe": {
+      "speed_scale": 0.8904,
+      "converged": false,
+      "updated_at": "2026-06-01T08:59:37.935325+00:00"
+    },
+    "865ad9709e6f": {
+      "speed_scale": 0.7582,
+      "converged": false,
+      "updated_at": "2026-06-04T19:25:06.788646+00:00"
+    },
+    "983cd63fd3b4": {
+      "speed_scale": 0.65,
+      "converged": false,
+      "updated_at": "2026-06-05T00:09:02.300242+00:00"
+    },
+    "b4ff3578b1e9": {
+      "speed_scale": 0.4929,
+      "converged": false,
+      "updated_at": "2026-06-05T00:29:14.338326+00:00"
+    },
+    "df009cf824b3": {
+      "speed_scale": 0.3964,
+      "converged": false,
+      "updated_at": "2026-06-05T00:34:17.665846+00:00"
+    },
+    "68604db2c9e0": {
+      "speed_scale": 0.4832,
+      "converged": false,
+      "updated_at": "2026-06-05T00:44:22.611881+00:00"
+    },
+    "8336c5d3d096": {
+      "speed_scale": 0.7742,
+      "converged": false,
+      "updated_at": "2026-06-05T01:14:34.240158+00:00"
+    },
+    "b3d8628dcf76": {
+      "speed_scale": 0.7047,
+      "converged": false,
+      "updated_at": "2026-06-05T01:19:37.743110+00:00"
+    },
+    "53d313e7e6de": {
+      "speed_scale": 0.5442,
+      "converged": false,
+      "updated_at": "2026-06-05T02:45:24.393023+00:00"
+    },
+    "29af69f3c9ce": {
+      "speed_scale": 0.3438,
+      "converged": false,
+      "updated_at": "2026-06-05T06:12:00.281589+00:00"
+    },
+    "e2b7acc0106c": {
+      "speed_scale": 0.8382,
+      "converged": false,
+      "updated_at": "2026-06-05T07:11:54.346499+00:00"
+    },
+    "a6653a6f7cdc": {
+      "speed_scale": 2.1251,
+      "converged": false,
+      "updated_at": "2026-06-05T07:16:57.613401+00:00"
+    },
+    "78b7a3163847": {
+      "speed_scale": 0.9974,
+      "updated_at": "2026-06-05T08:59:28.797371+00:00"
+    },
+    "218e59e6b733": {
+      "speed_scale": 0.9943,
+      "updated_at": "2026-06-05T09:02:05.996742+00:00"
+    }
+  }
+}

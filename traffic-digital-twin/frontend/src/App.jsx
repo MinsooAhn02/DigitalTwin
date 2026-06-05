@@ -272,6 +272,7 @@ export default function App() {
           fovSnapLon={cameraReadyInfo?.snap_lon ?? selectedCctv?.lon ?? null}
           fovRoadPts={cameraReadyInfo?.road_pts ?? null}
           fovSnapAlongM={cameraReadyInfo?.snap_along_m ?? null}
+          fovRoiGpsRing={cameraReadyInfo?.roi_gps_ring ?? null}
           backgroundStatus={backgroundStatus}
           congestionClusters={congestionClusters}
         />

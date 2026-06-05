@@ -184,6 +184,20 @@ ROAD_PTS_REFINE_MIN_SAMPLES: int = int(os.getenv("ROAD_PTS_REFINE_MIN_SAMPLES", 
 # Number of along-axis bins for polyline estimation.
 ROAD_PTS_REFINE_NBINS: int = int(os.getenv("ROAD_PTS_REFINE_NBINS", "10"))
 
+# ── Phase 1: node 위치 평활 ──────────────────────────────────────────────
+POS_EMA_ALPHA: float  = 0.4    # 새 위치 반영 비율 (높을수록 반응성, 낮을수록 평활)
+POS_JUMP_RESET_M: float = 8.0  # 이 거리 초과 점프면 EMA 리셋 (occlusion 재등장 대응)
+
+# ── Phase 3: ROI GPS ring 수평선 clamp ──────────────────────────────────
+FAR_CAP_M: float = 120.0       # ROI 투영 시 최대 전방거리 clamp (m)
+
+# ── Phase 4: polygon 안정화 ──────────────────────────────────────────────
+FOV_EMA_MIN_SAMPLES: int = 60  # 자동 추정값 반영 전 최소 누적 프레임
+FOV_EMA_ALPHA: float = 0.05    # polygon 파라미터 EMA alpha (낮을수록 느리게 변경)
+
+# ── Phase 5: 차선 분리 ───────────────────────────────────────────────────
+LANE_OFFSET_M: float = 1.75    # 방향별 도로 중심선 수직 offset (half-lane ≈ 1.75m)
+
 # ── Tracker ────────────────────────────────────────────────────────────────
 # TRACKER_TIER: "auto" | "cpu" | "low" | "medium" | "high"
 #   auto   → GPU VRAM 크기 기준 자동 선택

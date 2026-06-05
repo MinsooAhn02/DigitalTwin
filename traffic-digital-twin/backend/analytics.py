@@ -105,6 +105,9 @@ from config import (
     BEARING_REFINE_EMA_ALPHA,
     ROAD_PTS_REFINE_MIN_SAMPLES,
     ROAD_PTS_REFINE_NBINS,
+    POS_EMA_ALPHA,
+    POS_JUMP_RESET_M,
+    LANE_OFFSET_M,
 )
 
 from utils import haversine_m
@@ -173,6 +176,10 @@ class TrafficAnalytics:
         # Movement-based direction: along-axis EMA per track
         self._along_prev: dict[int, float] = {}
         self._dir_ema: dict[int, float] = {}
+        # Phase 1: 위치 EMA 평활 — lateral 보존하며 jitter 제거
+        self._pos_ema: dict[int, tuple[float, float]] = {}
+        # Phase 5: 차선 분리용 road_pts (곡선 bearing 계산에 사용)
+        self.road_pts: list[list[float]] | None = None
         # Bearing auto-refinement: axial flow accumulator (double-angle statistics)
         self._flow_sin2: float = 0.0
         self._flow_cos2: float = 0.0
@@ -200,6 +207,7 @@ class TrafficAnalytics:
             self._vehicle_direction.clear()
             self._along_prev.clear()
             self._dir_ema.clear()
+            self._pos_ema.clear()
             self._flow_sin2 = 0.0
             self._flow_cos2 = 0.0
             self._flow_n = 0
@@ -255,9 +263,11 @@ class TrafficAnalytics:
             self._speed(v, current_ts)
             self._dwell_update(v)
 
-        # Task 1: GPS 투영 + 이동 기반 방향 분류
+        # Task 1: GPS 투영 + 이동 기반 방향 분류 → 차선 offset → 위치 평활
         along_map = self._project_to_road_axis(vehicles)
         self._assign_directions(vehicles, along_map)
+        self._apply_lane_offset(vehicles)   # Phase 5: In/Out 방향별 좌우 분리
+        self._smooth_positions(vehicles)    # Phase 1: jitter 제거 (lateral 보존)
 
         # Road-shape learning: GPS trace 누적
         self._accumulate_gps_trace(vehicles)
@@ -462,8 +472,7 @@ class TrafficAnalytics:
             dy = (v.lat - ref_lat) * R_lat  # 북(North) 오프셋 (m)
             along = dx * sin_b + dy * cos_b  # 도로 방향 성분
             along_map[v.track_id] = along
-            v.lon = ref_lon + (along * sin_b) / R_lon
-            v.lat = ref_lat + (along * cos_b) / R_lat
+            # Phase 1: 실측 GPS 보존 — lat/lon 덮어쓰기 제거
         return along_map
 
     def _assign_directions(self, vehicles: list[VehicleState], along_map: dict[int, float]) -> None:
@@ -511,6 +520,86 @@ class TrafficAnalytics:
 
             self._vehicle_direction[tid] = dir_now
             v.direction = dir_now
+
+    def _apply_lane_offset(self, vehicles: list[VehicleState]) -> None:
+        """Phase 5: 방향별 좌우 offset으로 가는 차/오는 차 분리.
+
+        In/Out 차량을 도로 중심선 기준 각각 반대편으로 LANE_OFFSET_M 만큼 수직 이동.
+        한국 우측통행 기준: Out(순방향)=오른쪽, In(역방향)=왼쪽 (중심선 반대편).
+        """
+        if self.road_bearing_deg is None:
+            return
+        b = math.radians(self.road_bearing_deg)
+        sin_b, cos_b = math.sin(b), math.cos(b)
+        R_lat = 110574.0
+
+        for v in vehicles:
+            if v.is_parked or v.direction == "Unknown":
+                continue
+            # Out=+offset(오른쪽), In=-offset(왼쪽)
+            side = 1.0 if v.direction == "Out" else -1.0
+            off = side * LANE_OFFSET_M
+
+            # 차량 위치에서 로컬 도로 방위 계산 (곡선 도로 대응)
+            local_b = b
+            if self.road_pts and len(self.road_pts) >= 2:
+                local_b = self._local_road_bearing_at(v.lat, v.lon)
+
+            sin_lb = math.sin(local_b)
+            cos_lb = math.cos(local_b)
+            R_lon = 111320.0 * math.cos(math.radians(v.lat))
+            # 도로 진행 방향 수직 오른쪽: forward=(sin_b, cos_b) → right=(cos_b, -sin_b)
+            perp_e =  cos_lb * off   # East 성분 (m)
+            perp_n = -sin_lb * off   # North 성분 (m)
+            v.lat += perp_n / R_lat
+            v.lon += perp_e / R_lon
+
+    def _local_road_bearing_at(self, lat: float, lon: float) -> float:
+        """road_pts에서 (lat, lon)에 가장 가까운 세그먼트의 방위각(rad) 반환."""
+        R_lat = 110574.0
+        best_b = math.radians(self.road_bearing_deg)
+        best_d = float("inf")
+        pts = self.road_pts
+        for i in range(len(pts) - 1):
+            f, t = pts[i], pts[i + 1]
+            R_lon = 111320.0 * math.cos(math.radians(f[0]))
+            seg_lat = (f[0] + t[0]) / 2.0
+            seg_lon = (f[1] + t[1]) / 2.0
+            d = math.hypot((lat - seg_lat) * R_lat, (lon - seg_lon) * R_lon)
+            if d < best_d:
+                best_d = d
+                dx = (t[1] - f[1]) * R_lon
+                dy = (t[0] - f[0]) * R_lat
+                best_b = math.atan2(dx, dy)
+        return best_b
+
+    def _smooth_positions(self, vehicles: list[VehicleState]) -> None:
+        """Phase 1: track별 EMA 위치 평활 — lateral 성분 보존, jitter(떨림)만 제거.
+
+        큰 점프(POS_JUMP_RESET_M 초과)는 EMA 리셋 — occlusion 후 재등장 대응.
+        """
+        R_lat = 110574.0
+        for v in vehicles:
+            tid = v.track_id
+            prev = self._pos_ema.get(tid)
+            if prev is None:
+                self._pos_ema[tid] = (v.lat, v.lon)
+                continue
+            prev_lat, prev_lon = prev
+            R_lon = 111320.0 * math.cos(math.radians(prev_lat))
+            jump_m = math.hypot(
+                (v.lat - prev_lat) * R_lat,
+                (v.lon - prev_lon) * R_lon,
+            )
+            if jump_m > POS_JUMP_RESET_M:
+                # 큰 점프 = 재등장 또는 ID 재할당 → 리셋
+                self._pos_ema[tid] = (v.lat, v.lon)
+                continue
+            smooth_lat = prev_lat * (1.0 - POS_EMA_ALPHA) + v.lat * POS_EMA_ALPHA
+            smooth_lon = prev_lon * (1.0 - POS_EMA_ALPHA) + v.lon * POS_EMA_ALPHA
+            self._pos_ema[tid] = (smooth_lat, smooth_lon)
+            v.lat = smooth_lat
+            v.lon = smooth_lon
 
     def _accumulate_flow(self, vehicles: list[VehicleState]) -> None:
         """Task 3: 이동 차량의 방위각을 이중각 통계로 누적 (bearing 자동 보정용).
@@ -767,6 +856,7 @@ class TrafficAnalytics:
                 self._spd_log_last.pop(tid, None)
                 self._along_prev.pop(tid, None)
                 self._dir_ema.pop(tid, None)
+                self._pos_ema.pop(tid, None)
         # 재등장한 track의 grace counter 초기화
         for tid in active:
             self._lost_frames.pop(tid, None)

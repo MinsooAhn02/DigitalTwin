@@ -128,5 +128,50 @@
     "speed_scale": 0.65,
     "converged": false,
     "updated_at": "2026-06-05T00:09:02.300242+00:00"
+  },
+  "b4ff3578b1e9": {
+    "speed_scale": 0.4929,
+    "converged": false,
+    "updated_at": "2026-06-05T00:29:14.338326+00:00"
+  },
+  "df009cf824b3": {
+    "speed_scale": 0.3964,
+    "converged": false,
+    "updated_at": "2026-06-05T00:34:17.665846+00:00"
+  },
+  "68604db2c9e0": {
+    "speed_scale": 0.4832,
+    "converged": false,
+    "updated_at": "2026-06-05T00:44:22.611881+00:00"
+  },
+  "8336c5d3d096": {
+    "speed_scale": 0.7742,
+    "converged": false,
+    "updated_at": "2026-06-05T01:14:34.240158+00:00"
+  },
+  "b3d8628dcf76": {
+    "speed_scale": 0.7047,
+    "converged": false,
+    "updated_at": "2026-06-05T01:19:37.743110+00:00"
+  },
+  "53d313e7e6de": {
+    "speed_scale": 0.5442,
+    "converged": false,
+    "updated_at": "2026-06-05T02:45:24.393023+00:00"
+  },
+  "29af69f3c9ce": {
+    "speed_scale": 0.3438,
+    "converged": false,
+    "updated_at": "2026-06-05T06:12:00.281589+00:00"
+  },
+  "e2b7acc0106c": {
+    "speed_scale": 0.8382,
+    "converged": false,
+    "updated_at": "2026-06-05T07:11:54.346499+00:00"
+  },
+  "a6653a6f7cdc": {
+    "speed_scale": 2.1251,
+    "converged": false,
+    "updated_at": "2026-06-05T07:16:57.613401+00:00"
   }
 }

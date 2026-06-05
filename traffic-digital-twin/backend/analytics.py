@@ -99,6 +99,12 @@ from config import (
     SPEED_SPIKE_FACTOR,
     SPEED_MIN_KPH,
     SPEED_OUTLIER_MAD_K,
+    DIR_DEADZONE_M,
+    DIR_EMA_ALPHA,
+    BEARING_REFINE_MIN_SAMPLES,
+    BEARING_REFINE_EMA_ALPHA,
+    ROAD_PTS_REFINE_MIN_SAMPLES,
+    ROAD_PTS_REFINE_NBINS,
 )
 
 from utils import haversine_m
@@ -162,8 +168,17 @@ class TrafficAnalytics:
         self._pos_window: dict[int, deque] = {}
         # 트랙별 평활(EMA) 속도 — 프레임마다 재생성되는 VehicleState를 넘어 값 유지
         self._speed_ema: dict[int, float] = {}
-        # LineZone 교차 기반 per-vehicle direction
+        # Per-vehicle direction state (LineZone fallback + movement-based)
         self._vehicle_direction: dict[int, str] = {}
+        # Movement-based direction: along-axis EMA per track
+        self._along_prev: dict[int, float] = {}
+        self._dir_ema: dict[int, float] = {}
+        # Bearing auto-refinement: axial flow accumulator (double-angle statistics)
+        self._flow_sin2: float = 0.0
+        self._flow_cos2: float = 0.0
+        self._flow_n: int = 0
+        # Road-shape learning: GPS positions of moving vehicles for road_pts refinement
+        self._gps_trace: deque = deque(maxlen=1000)
         # ITS 구간속도 비교 자동 보정
         self.speed_scale: float = 1.0          # 보정 계수 (1.0 = 보정 없음)
         # 10분 분량 버퍼: ITS 5분 창 타이밍 불일치 흡수를 위해 2배 확보
@@ -183,6 +198,12 @@ class TrafficAnalytics:
             self._pos_window.clear()
             self._speed_ema.clear()
             self._vehicle_direction.clear()
+            self._along_prev.clear()
+            self._dir_ema.clear()
+            self._flow_sin2 = 0.0
+            self._flow_cos2 = 0.0
+            self._flow_n = 0
+            self._gps_trace.clear()
             self._speed_samples.clear()
             self._spd_log_last.clear()
             self._stable_count = 0
@@ -217,7 +238,7 @@ class TrafficAnalytics:
         active = {v.track_id for v in vehicles}
         self._gc(active)
 
-        # LineZone 교차 이벤트로 direction 갱신 (교차 순간에만 업데이트)
+        # LineZone 교차 이벤트 — 도로 bearing 미설정 시 fallback direction으로 유지
         for tid in crossed_in_ids:
             self._vehicle_direction[tid] = "In"
         for tid in crossed_out_ids:
@@ -226,17 +247,23 @@ class TrafficAnalytics:
         current_ts = timestamp_ms / 1000.0
 
         for v in vehicles:
-            if self._is_near_parked(v.center_px):
+            # Task 4: 주차 latch — 이미 느린 차에만 적용(이동 중인 차가 주차 지점 통과해도 0 되지 않도록)
+            if (self._is_near_parked(v.center_px)
+                    and self._speed_ema.get(v.track_id, 0.0) < SPEED_MIN_KPH):
                 v.is_parked = True
                 self._dwell[v.track_id] = PARKED_FRAMES_THRESHOLD
             self._speed(v, current_ts)
             self._dwell_update(v)
-            # 교차 기록이 있으면 direction 적용
-            if v.track_id in self._vehicle_direction:
-                v.direction = self._vehicle_direction[v.track_id]
 
-        # GPS 좌표를 도로 bearing 축에 투영 (지도 표시용)
-        self._project_to_road_axis(vehicles)
+        # Task 1: GPS 투영 + 이동 기반 방향 분류
+        along_map = self._project_to_road_axis(vehicles)
+        self._assign_directions(vehicles, along_map)
+
+        # Road-shape learning: GPS trace 누적
+        self._accumulate_gps_trace(vehicles)
+
+        # Task 3: 흐름 벡터 누적 (bearing 자동 보정용)
+        self._accumulate_flow(vehicles)
 
         # 통계·경보는 주차 차량 제외
         active_vehicles = [v for v in vehicles if not v.is_parked]
@@ -407,13 +434,16 @@ class TrafficAnalytics:
         v.is_speeding = v.speed_kph > self.speed_limit_kph * 1.10
         self._spd_debug(tid, current_ts, dec, inst_dt, step_m, span, disp_m, raw, len(win))
 
-    def _project_to_road_axis(self, vehicles: list[VehicleState]) -> None:
+    def _project_to_road_axis(self, vehicles: list[VehicleState]) -> dict[int, float]:
         """차량 GPS를 도로 bearing 축에 투영 → 횡방향 흔들림 제거.
 
         카메라 GPS를 고정 기준점으로 사용해 차량 수 변동에 따른 기준점 흔들림 방지.
+        반환: {track_id: along_m} — 방향 분류에 사용.
+        along > 0: bearing 방향(카메라 앞쪽), along < 0: 반대 방향.
         """
+        along_map: dict[int, float] = {}
         if self.road_bearing_deg is None or not vehicles:
-            return
+            return along_map
         b = math.radians(self.road_bearing_deg)
         sin_b, cos_b = math.sin(b), math.cos(b)
 
@@ -431,8 +461,183 @@ class TrafficAnalytics:
             dx = (v.lon - ref_lon) * R_lon  # 동(East) 오프셋 (m)
             dy = (v.lat - ref_lat) * R_lat  # 북(North) 오프셋 (m)
             along = dx * sin_b + dy * cos_b  # 도로 방향 성분
+            along_map[v.track_id] = along
             v.lon = ref_lon + (along * sin_b) / R_lon
             v.lat = ref_lat + (along * cos_b) / R_lat
+        return along_map
+
+    def _assign_directions(self, vehicles: list[VehicleState], along_map: dict[int, float]) -> None:
+        """Task 1: 이동 벡터 기반 In/Out 분류.
+
+        bearing 방향으로 이동(along 증가) = Out(outbound).
+        bearing 반대(along 감소) = In(inbound, approaching camera).
+        road_bearing_deg 미설정 시 LineZone fallback 사용.
+        """
+        if self.road_bearing_deg is None:
+            for v in vehicles:
+                if v.track_id in self._vehicle_direction:
+                    v.direction = self._vehicle_direction[v.track_id]
+            return
+
+        for v in vehicles:
+            if v.is_parked:
+                continue
+            tid = v.track_id
+            along = along_map.get(tid)
+            if along is None:
+                v.direction = self._vehicle_direction.get(tid, "Unknown")
+                continue
+
+            prev_along = self._along_prev.get(tid)
+            self._along_prev[tid] = along
+
+            if prev_along is None:
+                v.direction = self._vehicle_direction.get(tid, "Unknown")
+                continue
+
+            d_along = along - prev_along
+            prev_ema = self._dir_ema.get(tid)
+            new_ema = d_along if prev_ema is None else (
+                prev_ema * (1 - DIR_EMA_ALPHA) + d_along * DIR_EMA_ALPHA
+            )
+            self._dir_ema[tid] = new_ema
+
+            if new_ema < -DIR_DEADZONE_M:
+                dir_now = "In"
+            elif new_ema > DIR_DEADZONE_M:
+                dir_now = "Out"
+            else:
+                dir_now = self._vehicle_direction.get(tid, "Unknown")
+
+            self._vehicle_direction[tid] = dir_now
+            v.direction = dir_now
+
+    def _accumulate_flow(self, vehicles: list[VehicleState]) -> None:
+        """Task 3: 이동 차량의 방위각을 이중각 통계로 누적 (bearing 자동 보정용).
+
+        x_m(East), y_m(North) delta를 사용. _prev는 이전 프레임 값이므로 프레임간 이동 벡터가 정확.
+        """
+        for v in vehicles:
+            if v.is_parked or v.speed_kph < SPEED_MIN_KPH:
+                continue
+            prev = self._prev.get(v.track_id)
+            if prev is None:
+                continue
+            prev_x, prev_y = prev[2], prev[3]  # x_m, y_m (projection에 의해 변경되지 않음)
+            dx = v.x_m - prev_x  # East delta (m)
+            dy = v.y_m - prev_y  # North delta (m)
+            if math.hypot(dx, dy) < SPEED_JITTER_THRESHOLD_M:
+                continue
+            theta = math.atan2(dx, dy)  # heading (East, North) → atan2 기준
+            self._flow_sin2 += math.sin(2.0 * theta)
+            self._flow_cos2 += math.cos(2.0 * theta)
+            self._flow_n += 1
+
+    def _accumulate_gps_trace(self, vehicles: list[VehicleState]) -> None:
+        """Road-shape learning: GPS positions of moving vehicles를 누적.
+
+        속도 조건을 두지 않음 — 속도 버그 등으로 speed=0이어도 위치는 유효하며
+        도로 형상 학습에 기여 가능. 주차 확정 차량만 제외.
+        """
+        for v in vehicles:
+            if not v.is_parked and v.lat and v.lon:
+                self._gps_trace.append((v.lat, v.lon))
+
+    def refine_road_pts(
+        self, cam_lat: float | None, cam_lon: float | None,
+    ) -> tuple[list[list[float]], float] | None:
+        """GPS trace에서 도로 중심선 polyline을 추정한다.
+
+        차량 GPS 위치를 현재 road_bearing_deg 축으로 투영 → 정렬 → N bin 평균으로 polyline 생성.
+        Returns (road_pts [[lat,lon],...], snap_along_m) or None.
+        """
+        with self._lock:
+            if (len(self._gps_trace) < ROAD_PTS_REFINE_MIN_SAMPLES
+                    or self.road_bearing_deg is None
+                    or cam_lat is None or cam_lon is None):
+                return None
+
+            bearing_rad = math.radians(self.road_bearing_deg)
+            cos_b = math.cos(bearing_rad)
+            sin_b = math.sin(bearing_rad)
+            R_lat = 110574.0
+            R_lon = 111320.0 * math.cos(math.radians(cam_lat))
+
+            pts_along: list[tuple[float, float, float]] = []
+            for lat, lon in self._gps_trace:
+                d_north = (lat - cam_lat) * R_lat
+                d_east  = (lon - cam_lon) * R_lon
+                along = d_east * sin_b + d_north * cos_b
+                pts_along.append((along, lat, lon))
+
+            pts_along.sort(key=lambda x: x[0])
+
+            n = ROAD_PTS_REFINE_NBINS
+            bin_size = len(pts_along) / n
+            road_pts: list[list[float]] = []
+            for i in range(n):
+                start = int(i * bin_size)
+                end   = int((i + 1) * bin_size)
+                bucket = pts_along[start:end]
+                if not bucket:
+                    continue
+                mean_lat = sum(p[1] for p in bucket) / len(bucket)
+                mean_lon = sum(p[2] for p in bucket) / len(bucket)
+                road_pts.append([round(mean_lat, 7), round(mean_lon, 7)])
+
+            if len(road_pts) < 2:
+                return None
+
+            # snap_along_m: cumulative distance from road_pts[0] to camera projection
+            R_lat_m = 110574.0
+            cum = 0.0
+            best_d = float("inf")
+            snap_along_m = 0.0
+            for i in range(len(road_pts) - 1):
+                f, t = road_pts[i], road_pts[i + 1]
+                R_lon_m = 111320.0 * math.cos(math.radians(f[0]))
+                px = (cam_lon - f[1]) * R_lon_m
+                py = (cam_lat - f[0]) * R_lat_m
+                bx = (t[1] - f[1]) * R_lon_m
+                by = (t[0] - f[0]) * R_lat_m
+                seg_sq = bx * bx + by * by
+                tt = max(0.0, min(1.0, (px * bx + py * by) / seg_sq)) if seg_sq > 1e-9 else 0.0
+                d = math.hypot(px - tt * bx, py - tt * by)
+                seg_len = math.sqrt(seg_sq)
+                if d < best_d:
+                    best_d = d
+                    snap_along_m = cum + tt * seg_len
+                cum += seg_len
+
+            return road_pts, round(snap_along_m, 1)
+
+    def refine_bearing(self) -> float | None:
+        """Task 3: 흐름 벡터로 추정한 도로축으로 road_bearing_deg를 EMA 보정.
+
+        표본이 BEARING_REFINE_MIN_SAMPLES 미만이거나 bearing 미설정 시 None 반환.
+        성공 시 갱신된 road_bearing_deg 반환.
+        """
+        with self._lock:
+            if self._flow_n < BEARING_REFINE_MIN_SAMPLES or self.road_bearing_deg is None:
+                return None
+
+            axis_rad = 0.5 * math.atan2(self._flow_sin2, self._flow_cos2)
+            axis_deg = math.degrees(axis_rad)  # -90 ~ 90
+
+            # 180° 모호성 해소: 현재 bearing에 가까운 쪽 선택
+            cand1 = axis_deg % 360
+            cand2 = (axis_deg + 180.0) % 360
+            current = self.road_bearing_deg
+            diff1 = abs(((cand1 - current + 180) % 360) - 180)
+            diff2 = abs(((cand2 - current + 180) % 360) - 180)
+            chosen = cand1 if diff1 <= diff2 else cand2
+
+            # 각도 차이를 EMA로 점진 보정 (wrap-around 안전)
+            angle_diff = ((chosen - current + 180) % 360) - 180
+            self.road_bearing_deg = round(
+                (current + BEARING_REFINE_EMA_ALPHA * angle_diff) % 360, 2
+            )
+            return self.road_bearing_deg
 
     def _dwell_update(self, v: VehicleState) -> None:
         if v.is_parked:
@@ -560,6 +765,8 @@ class TrafficAnalytics:
                 self._pos_window.pop(tid, None)
                 self._speed_ema.pop(tid, None)
                 self._spd_log_last.pop(tid, None)
+                self._along_prev.pop(tid, None)
+                self._dir_ema.pop(tid, None)
         # 재등장한 track의 grace counter 초기화
         for tid in active:
             self._lost_frames.pop(tid, None)

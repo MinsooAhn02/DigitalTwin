@@ -263,6 +263,32 @@ def _snap_to_polyline(
     return best_snap_lat, best_snap_lon, best_bearing, best_d, best_seg_idx
 
 
+def _subsample_pts(pts: list[list[float]], max_pts: int = 10) -> list[list[float]]:
+    """Subsample a polyline to at most max_pts points using uniform cumulative-distance
+    spacing. Always preserves first and last points."""
+    if len(pts) <= max_pts:
+        return pts
+    R_lat_m = 110574.0
+    cum = [0.0]
+    for i in range(1, len(pts)):
+        R_lon_m = 111320.0 * math.cos(math.radians(pts[i - 1][0]))
+        cum.append(cum[-1] + math.hypot(
+            (pts[i][0] - pts[i - 1][0]) * R_lat_m,
+            (pts[i][1] - pts[i - 1][1]) * R_lon_m,
+        ))
+    total = cum[-1]
+    result = [pts[0]]
+    for k in range(1, max_pts - 1):
+        target = total * k / (max_pts - 1)
+        # Find the point in pts closest to target cumulative distance
+        best_i = min(range(len(cum)), key=lambda i: abs(cum[i] - target))
+        if pts[best_i] != result[-1]:
+            result.append(pts[best_i])
+    if pts[-1] != result[-1]:
+        result.append(pts[-1])
+    return result
+
+
 def _road_corridor_pts(
     pts: list[list[float]],
     snap_lat: float,
@@ -324,6 +350,13 @@ def _road_corridor_pts(
 
     # Combine in F→T order: backward-end → … → snap → … → forward-end
     corridor = list(reversed(bwd_pts)) + [snap_pt] + fwd_pts
+
+    # Limit point density so the perpendicular-offset polygon in the frontend
+    # doesn't self-intersect at curves. 10 points ≈ one per 30 m on a ±150 m corridor —
+    # enough to show the road curve without adjacent offsets crossing each other.
+    if len(corridor) > 10:
+        corridor = _subsample_pts(corridor, max_pts=10)
+
     return corridor, round(bwd_acc, 1)
 
 
@@ -370,18 +403,20 @@ def _extend_pts_with_adjacent(
                     continue
                 if diff < best_diff_:
                     best_diff_ = diff
-                    if row["shape_pts"]:
+                    # shape_pts 우선, 없으면 F→T 2점 fallback
+                    sp = row["shape_pts"] if "shape_pts" in row.keys() else None
+                    if sp:
                         try:
-                            npts = json.loads(row["shape_pts"])
+                            npts = json.loads(sp)
                             if len(npts) >= 2:
                                 best_pts_ = npts
+                                continue
                         except Exception:
                             pass
-                    if best_pts_ is None:
-                        best_pts_ = [
-                            [float(row["f_lat"]), float(row["f_lon"])],
-                            [float(row["t_lat"]), float(row["t_lon"])],
-                        ]
+                    best_pts_ = [
+                        [float(row["f_lat"]), float(row["f_lon"])],
+                        [float(row["t_lat"]), float(row["t_lon"])],
+                    ]
         return best_pts_
 
     try:
@@ -492,14 +527,16 @@ def _snap_for_link(link: LinkInfo, lat: float, lon: float) -> tuple[float, float
             if len(pts) >= 2:
                 s_lat, s_lon, _, _, _ = _snap_to_polyline(lat, lon, pts)
                 return s_lat, s_lon
-        # Fallback: F→T two-point segment
+    except Exception:
+        pass
+    # Fallback: F→T two-point segment from nodes join
+    try:
         if link["f_lat"] is not None and link["t_lat"] is not None:
             seg = [[link["f_lat"], link["f_lon"]], [link["t_lat"], link["t_lon"]]]
             s_lat, s_lon, _, _, _ = _snap_to_polyline(lat, lon, seg)
             return s_lat, s_lon
     except Exception:
         pass
-    # Last resort: use centroid
     return link["cx_lat"], link["cx_lon"]
 
 
@@ -558,27 +595,17 @@ def get_road_snap(
             "SELECT shape_pts FROM links WHERE link_id = ?", (link["link_id"],)
         ).fetchone()
         if row and row["shape_pts"]:
-            pts = json.loads(row["shape_pts"])   # [[lat, lon], ...]
+            pts = json.loads(row["shape_pts"])
             if len(pts) >= 2:
-                # Extend with adjacent links so the corridor never runs short at
-                # link boundaries (prevents nearly-square polygons when snap is
-                # close to F_NODE or T_NODE).
                 pts = _extend_pts_with_adjacent(pts, link)
                 snap_lat, snap_lon, local_bearing, _, seg_idx = _snap_to_polyline(lat, lon, pts)
                 road_pts, snap_along_m = _road_corridor_pts(pts, snap_lat, snap_lon, seg_idx)
-            elif link["f_lat"] is not None:
-                # Fallback: 2-point F→T segment
-                f_lat, f_lon = link["f_lat"], link["f_lon"]
-                t_lat, t_lon = link["t_lat"], link["t_lon"]
-                seg_pts = [[f_lat, f_lon], [t_lat, t_lon]]
-                seg_pts = _extend_pts_with_adjacent(seg_pts, link)
-                snap_lat, snap_lon, local_bearing, _, seg_idx = _snap_to_polyline(lat, lon, seg_pts)
-                road_pts, snap_along_m = _road_corridor_pts(seg_pts, snap_lat, snap_lon, seg_idx)
-        elif link["f_lat"] is not None:
-            # shape_pts column absent (old DB) — use F→T segment
-            f_lat, f_lon = link["f_lat"], link["f_lon"]
-            t_lat, t_lon = link["t_lat"], link["t_lon"]
-            seg_pts = [[f_lat, f_lon], [t_lat, t_lon]]
+        # Fallback: F→T nodes if shape_pts absent (old DB)
+        if road_pts is None and link["f_lat"] is not None and link["t_lat"] is not None:
+            seg_pts: list[list[float]] = [
+                [link["f_lat"], link["f_lon"]],
+                [link["t_lat"], link["t_lon"]],
+            ]
             seg_pts = _extend_pts_with_adjacent(seg_pts, link)
             snap_lat, snap_lon, local_bearing, _, seg_idx = _snap_to_polyline(lat, lon, seg_pts)
             road_pts, snap_along_m = _road_corridor_pts(seg_pts, snap_lat, snap_lon, seg_idx)

@@ -1,69 +1,69 @@
 {
-  "source": "[국도1] 평택 진위역",
+  "source": "[국도39호선] 고양 주교지하차도",
   "inference_backend": "tensorrt",
   "tracker": "BotSort",
-  "frames_processed": 940,
-  "elapsed_s": 96.0,
+  "frames_processed": 4559,
+  "elapsed_s": 935.9,
   "latency_ms": {
     "yolo_isolated": {
       "n": 0
     },
     "track": {
-      "n": 940,
-      "mean": 26.932,
-      "median": 24.908,
-      "p95": 45.288,
-      "min": 7.231,
-      "max": 727.825
+      "n": 4559,
+      "mean": 31.061,
+      "median": 27.494,
+      "p95": 46.82,
+      "min": 6.961,
+      "max": 1377.192
     },
     "transform": {
-      "n": 940,
-      "mean": 0.073,
-      "median": 0.067,
-      "p95": 0.159,
+      "n": 4559,
+      "mean": 0.093,
+      "median": 0.077,
+      "p95": 0.196,
       "min": 0.001,
-      "max": 0.592
+      "max": 1.165
     },
     "analytics": {
-      "n": 940,
-      "mean": 0.144,
-      "median": 0.135,
-      "p95": 0.32,
-      "min": 0.023,
-      "max": 0.822
+      "n": 4559,
+      "mean": 0.181,
+      "median": 0.155,
+      "p95": 0.38,
+      "min": 0.024,
+      "max": 4.154
     },
     "end_to_end": {
-      "n": 940,
-      "mean": 27.149,
-      "median": 25.17,
-      "p95": 45.534,
-      "min": 7.362,
-      "max": 728.738
+      "n": 4559,
+      "mean": 31.335,
+      "median": 27.738,
+      "p95": 47.245,
+      "min": 7.066,
+      "max": 1377.533
     }
   },
-  "throughput_fps": 36.8,
+  "throughput_fps": 31.9,
   "tracking": {
-    "frames_processed": 940,
-    "unique_tracks": 46,
-    "id_appearances": 150,
-    "mean_lifetime_frames": 86.15,
-    "median_lifetime_frames": 59.0,
-    "max_lifetime_frames": 537
+    "frames_processed": 4559,
+    "unique_tracks": 328,
+    "id_appearances": 683,
+    "mean_lifetime_frames": 73.91,
+    "median_lifetime_frames": 61.0,
+    "max_lifetime_frames": 933
   },
   "speed": {
-    "n": 2793,
-    "mean": 97.512,
-    "median": 117.8,
-    "p95": 168.4,
+    "n": 17103,
+    "mean": 84.003,
+    "median": 75.1,
+    "p95": 172.5,
     "min": 1.8,
-    "max": 178.5,
-    "pct_moving_obs": 70.5,
-    "total_vehicle_obs": 3963
+    "max": 179.7,
+    "pct_moving_obs": 70.6,
+    "total_vehicle_obs": 24241
   },
   "detection_class_totals": {
-    "bus": 366,
-    "car": 3294,
-    "truck": 303
+    "car": 21041,
+    "truck": 2923,
+    "bus": 277
   },
   "speed_scale_snapshot": {
     "16c3b5b2fa97": {
@@ -240,6 +240,14 @@
       "speed_scale": 2.1251,
       "converged": false,
       "updated_at": "2026-06-05T07:16:57.613401+00:00"
+    },
+    "78b7a3163847": {
+      "speed_scale": 0.9974,
+      "updated_at": "2026-06-05T08:59:28.797371+00:00"
+    },
+    "218e59e6b733": {
+      "speed_scale": 0.9943,
+      "updated_at": "2026-06-05T09:02:05.996742+00:00"
     }
   }
 }

@@ -518,6 +518,7 @@ class VehicleDetector:
 
         self._half = self._device == "cuda" and selection.backend not in ("tensorrt", "onnx")
         self._lock = threading.Lock()
+        self._state_lock = threading.Lock()   # 트래커 상태 전용 (track/reset 직렬화)
         self._track_frame_count: int = 0
         self._last_dets_np: np.ndarray = np.empty((0, 6))
         self._last_tracks: sv.Detections = sv.Detections.empty()
@@ -589,88 +590,94 @@ class VehicleDetector:
         """
         YOLO predict → ROI 필터 → boxmot tracker update → sv.Detections 반환.
         YOLO_DETECT_INTERVAL 프레임마다 한 번만 추론, 비탐지 프레임은 tracker 상태 보존을 위해 스킵.
+
+        _state_lock으로 전체를 직렬화하여 reset_tracker()와의 data race 및
+        live_loop/ws_detect 동시 호출(race condition)을 방지한다.
         """
-        self._track_frame_count += 1
-        should_detect = (self._track_frame_count - 1) % self._detect_interval == 0
-        tracker_input = np.empty((0, 6), dtype=np.float32)
+        with self._state_lock:
+            self._track_frame_count += 1
+            should_detect = (self._track_frame_count - 1) % self._detect_interval == 0
+            tracker_input = np.empty((0, 6), dtype=np.float32)
 
-        # 1. YOLO_DETECT_INTERVAL 마다 YOLO 추론
-        if should_detect:
-            with self._lock:
-                results = self.model.predict(
-                    frame,
-                    imgsz=YOLO_IMGSZ, conf=YOLO_CONF, iou=YOLO_IOU,
-                    classes=self.CLASS_IDS, device=self._inference_device,
-                    half=self._half, verbose=False,
-                )[0]
-            dets = sv.Detections.from_ultralytics(results)
-            logger.debug("YOLO raw: %d dets, backend=%s", len(dets), self._backend)
-            dets = self._apply_roi(dets, frame)
-            logger.debug("After ROI: %d dets", len(dets))
-            if len(dets) == 0:
-                self._yolo_miss_streak += 1
-                # Grace 기간: tracker.update() 자체를 건너뜀.
-                # update(empty)를 호출하면 ByteTrack/OcSort가 기존 트랙을 'lost' 처리하고
-                # 다음 real detect 때 새 raw ID를 부여 → IDStabilizer 오매칭 → 중복 ID 발생.
-                # tracker state를 보존해야 real detect 때 동일 raw ID로 재매칭 가능.
-                if self._yolo_miss_streak <= _YOLO_MISS_GRACE and len(self._last_tracks) > 0:
-                    return self._last_tracks
-            else:
-                self._yolo_miss_streak = 0
-            self._last_dets_np = _sv_to_boxmot(dets)
-            tracker_input = self._last_dets_np
-            if len(tracker_input) > 0:
-                logger.debug("Tracker input[0]: %s", tracker_input[0])
+            # 1. YOLO_DETECT_INTERVAL 마다 YOLO 추론
+            if should_detect:
+                with self._lock:
+                    results = self.model.predict(
+                        frame,
+                        imgsz=YOLO_IMGSZ, conf=YOLO_CONF, iou=YOLO_IOU,
+                        classes=self.CLASS_IDS, device=self._inference_device,
+                        half=self._half, verbose=False,
+                    )[0]
+                dets = sv.Detections.from_ultralytics(results)
+                logger.debug("YOLO raw: %d dets, backend=%s", len(dets), self._backend)
+                dets = self._apply_roi(dets, frame)
+                logger.debug("After ROI: %d dets", len(dets))
+                if len(dets) == 0:
+                    self._yolo_miss_streak += 1
+                    # Grace 기간: tracker.update() 자체를 건너뜀.
+                    # update(empty)를 호출하면 ByteTrack/OcSort가 기존 트랙을 'lost' 처리하고
+                    # 다음 real detect 때 새 raw ID를 부여 → IDStabilizer 오매칭 → 중복 ID 발생.
+                    # tracker state를 보존해야 real detect 때 동일 raw ID로 재매칭 가능.
+                    if self._yolo_miss_streak <= _YOLO_MISS_GRACE and len(self._last_tracks) > 0:
+                        return self._last_tracks
+                else:
+                    self._yolo_miss_streak = 0
+                self._last_dets_np = _sv_to_boxmot(dets)
+                tracker_input = self._last_dets_np
+                if len(tracker_input) > 0 and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Tracker input[0]: %s", tracker_input[0])
 
-        # 2. boxmot tracker update
-        # 비탐지 프레임: 마지막 탐지 결과로 tracker를 갱신해 Kalman 예측 유지.
-        # update(empty)는 ByteTrack이 모든 트랙을 LOST로 처리하므로 사용 금지.
-        # 마지막 탐지 bbox를 재전달하면 IOU 매칭으로 기존 트랙 ID가 유지됨.
-        if not should_detect:
-            if len(self._last_dets_np) > 0:
-                try:
-                    tracks = self._tracker.update(self._last_dets_np, frame)
-                    result = _boxmot_to_sv(tracks)
-                    if self._tracker_tier in ("cpu", "low"):
-                        result = _dedup_tracks(result)
-                        result = self._id_stabilizer.update(result, frame.shape[:2])
-                    self._last_tracks = result
-                except Exception:
-                    pass
-            return self._last_tracks
+            # 2. boxmot tracker update
+            # 비탐지 프레임: 마지막 탐지 결과로 tracker를 갱신해 Kalman 예측 유지.
+            # update(empty)는 ByteTrack이 모든 트랙을 LOST로 처리하므로 사용 금지.
+            # 마지막 탐지 bbox를 재전달하면 IOU 매칭으로 기존 트랙 ID가 유지됨.
+            if not should_detect:
+                if len(self._last_dets_np) > 0:
+                    try:
+                        tracks = self._tracker.update(self._last_dets_np, frame)
+                        result = _boxmot_to_sv(tracks)
+                        if self._tracker_tier in ("cpu", "low"):
+                            result = _dedup_tracks(result)
+                            result = self._id_stabilizer.update(result, frame.shape[:2])
+                        self._last_tracks = result
+                    except Exception:
+                        pass
+                return self._last_tracks
 
-        try:
-            tracks = self._tracker.update(tracker_input, frame)
-            logger.debug(
-                "Tracker output: shape=%s  tracks=%s",
-                tracks.shape if tracks is not None else None,
-                tracks[:, :5] if tracks is not None and tracks.ndim == 2 and len(tracks) > 0 else "[]",
-            )
-        except Exception as exc:
-            logger.warning("Tracker update 실패: %s", exc)
-            return self._last_tracks
+            try:
+                tracks = self._tracker.update(tracker_input, frame)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Tracker output: shape=%s  tracks=%s",
+                        tracks.shape if tracks is not None else None,
+                        tracks[:, :5] if tracks is not None and tracks.ndim == 2 and len(tracks) > 0 else "[]",
+                    )
+            except Exception as exc:
+                logger.warning("Tracker update 실패: %s", exc)
+                return self._last_tracks
 
-        result = _boxmot_to_sv(tracks)
+            result = _boxmot_to_sv(tracks)
 
-        # ReID 없는 tier(cpu/low): 중복 트랙 제거 후 ID 복원
-        if self._tracker_tier in ("cpu", "low"):
-            result = _dedup_tracks(result)
-            result = self._id_stabilizer.update(result, frame.shape[:2])
+            # ReID 없는 tier(cpu/low): 중복 트랙 제거 후 ID 복원
+            if self._tracker_tier in ("cpu", "low"):
+                result = _dedup_tracks(result)
+                result = self._id_stabilizer.update(result, frame.shape[:2])
 
-        self._last_tracks = result
-        return result
+            self._last_tracks = result
+            return result
 
     def reset_tracker(self) -> None:
-        self._last_tracks = sv.Detections.empty()
-        self._last_dets_np = np.empty((0, 6))
-        self._track_frame_count = 0
-        self._yolo_miss_streak = 0
-        self._id_stabilizer.reset()
-        try:
-            self._tracker.reset()
-            logger.info("Tracker reset: %s", self._tracker_name)
-        except Exception as exc:
-            logger.warning("Tracker reset 실패: %s", exc)
+        with self._state_lock:
+            self._last_tracks = sv.Detections.empty()
+            self._last_dets_np = np.empty((0, 6))
+            self._track_frame_count = 0
+            self._yolo_miss_streak = 0
+            self._id_stabilizer.reset()
+            try:
+                self._tracker.reset()
+                logger.info("Tracker reset: %s", self._tracker_name)
+            except Exception as exc:
+                logger.warning("Tracker reset 실패: %s", exc)
 
     @property
     def tracker_info(self) -> dict:

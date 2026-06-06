@@ -1362,7 +1362,7 @@ def _yolo_detect_annotate(
         f"{float(detections.confidence[i]):.0%}"
         for i in range(len(detections))
     ]
-    annotated = _box_ann.annotate(frame, detections)
+    annotated = _box_ann.annotate(frame.copy(), detections)
     annotated = _label_ann.annotate(annotated, detections, labels)
     cv2.putText(annotated, f"boxmot  {len(detections)} vehicles",
                 (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 80), 2)
@@ -2124,7 +2124,7 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
             f"{float(tracked.confidence[i]):.0%}"
             for i in range(len(tracked))
         ]
-        ann = _box_ann.annotate(frame, tracked)
+        ann = _box_ann.annotate(frame.copy(), tracked)
         ann = _label_ann.annotate(ann, tracked, labels)
         cv2.putText(ann, f"vehicles: {len(tracked)}", (8, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 80), 2)

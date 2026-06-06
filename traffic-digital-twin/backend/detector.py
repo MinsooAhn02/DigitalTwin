@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import importlib.util
 import logging
 import math
+import os
 from pathlib import Path
 import shutil
 import threading
@@ -488,8 +489,14 @@ class IDStabilizer:
 # ── Video source ───────────────────────────────────────────────────────────
 
 def open_video_source(url: str) -> cv2.VideoCapture:
+    # FFmpeg 기본 analyzeduration=5s, probesize=5MB → HLS 스트림 열기 최대 5초 지연.
+    # 짧은 값으로 덮어써 초기 지연을 ~0.5s 이하로 줄인다.
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+        "analyzeduration;500000|probesize;32768"
+    )
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     if cap.isOpened():
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         logger.info("Stream connected: %s", url)
         return cap
     raise RuntimeError(f"Failed to open stream: {url}")
@@ -726,10 +733,6 @@ class VideoStream:
             self._cap = None
         self._url = url
         self._cap = open_video_source(url)
-        # NOTE: CAP_PROP_BUFFERSIZE=1 은 의도적으로 설정하지 않는다.
-        # 최신 프레임으로 건너뛰면 연속 프레임 간 움직임이 커져 BoT-SORT CMC(ECC)가
-        # 수렴 실패하고 추적 정확도가 떨어진다. 속도 시간축은 PTS/벽시계로 이미 보정되므로
-        # 버퍼를 강제로 줄일 필요가 없다.
         self._frame_id = 0
         self._pos_msec = 0.0
         logger.info("Camera switched: %s", url)

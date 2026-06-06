@@ -46,24 +46,22 @@
 \newlabel{alg:speed}{{2}{4}{Speed Estimation}{algorithm.2}{}}
 \@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Key speed/analytics constants (\texttt  {config.py}).}}{4}{table.1}\protected@file@percent }
 \newlabel{tab:const}{{I}{4}{Key speed/analytics constants (\texttt {config.py})}{table.1}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-D}}Online Self-Calibration}{4}{subsection.4.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-E}}Aggregation, Congestion, and History}{4}{subsection.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-D}}Per-Camera Scale Correction}{4}{subsection.4.4}\protected@file@percent }
 \@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Camera-level congestion: monitored cameras are recoloured (normal/busy/congested) and adjacent congested cameras are grouped into a severity-shaded region.}}{4}{figure.5}\protected@file@percent }
 \newlabel{fig:congestion}{{5}{4}{Camera-level congestion: monitored cameras are recoloured (normal/busy/congested) and adjacent congested cameras are grouped into a severity-shaded region}{figure.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-E}}Aggregation, Congestion, and History}{4}{subsection.4.5}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-F}}Visualization}{4}{subsection.4.6}\protected@file@percent }
 \citation{its_openapi}
-\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Per-stage latency (ms) and throughput. Fill from \texttt  {eval\textunderscore \allowbreak  latency.csv}.}}{5}{table.2}\protected@file@percent }
-\newlabel{tab:latency}{{II}{5}{Per-stage latency (ms) and throughput. Fill from \texttt {eval\_latency.csv}}{table.2}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Tracking stability and speed distribution. Fill from \texttt  {eval\textunderscore \allowbreak  tracking.csv} / \texttt  {eval\textunderscore \allowbreak  speed.csv}.}}{5}{table.3}\protected@file@percent }
-\newlabel{tab:track}{{III}{5}{Tracking stability and speed distribution. Fill from \texttt {eval\_tracking.csv} / \texttt {eval\_speed.csv}}{table.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Per-stage latency (ms) and throughput (4{,}559-frame eval run).}}{5}{table.2}\protected@file@percent }
+\newlabel{tab:latency}{{II}{5}{Per-stage latency (ms) and throughput (4{,}559-frame eval run)}{table.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Tracking stability, speed distribution, and detection breakdown (eval run).}}{5}{table.3}\protected@file@percent }
+\newlabel{tab:track}{{III}{5}{Tracking stability, speed distribution, and detection breakdown (eval run)}{table.3}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {V}Evaluation}{5}{section.5}\protected@file@percent }
 \newlabel{sec:eval}{{V}{5}{Evaluation}{section.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Calibrated speed and accumulated \texttt  {speed\textunderscore \allowbreak  scale} factors (37 cameras, \texttt  {speed\textunderscore \allowbreak  scale.json}). ITS reference values drive the update loop live and are not archived in the eval snapshot; all factors are marked unconverged at this snapshot.}}{5}{table.4}\protected@file@percent }
+\newlabel{tab:speed}{{IV}{5}{Calibrated speed and accumulated \texttt {speed\_scale} factors (37 cameras, \texttt {speed\_scale.json}). ITS reference values drive the update loop live and are not archived in the eval snapshot; all factors are marked unconverged at this snapshot}{table.4}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {VI}Discussion and Limitations}{5}{section.6}\protected@file@percent }
 \newlabel{sec:discuss}{{VI}{5}{Discussion and Limitations}{section.6}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Measured vs.\ ITS segment speed (per camera). Fill from the live \texttt  {our\textunderscore \allowbreak  avg\textunderscore \allowbreak  kph}/\texttt  {its\textunderscore \allowbreak  speed\textunderscore \allowbreak  kph}/\texttt  {speed\textunderscore \allowbreak  error\textunderscore \allowbreak  pct} broadcast and \texttt  {speed\textunderscore \allowbreak  scale.json}.}}{5}{table.4}\protected@file@percent }
-\newlabel{tab:speed}{{IV}{5}{Measured vs.\ ITS segment speed (per camera). Fill from the live \texttt {our\_avg\_kph}/\texttt {its\_speed\_kph}/\texttt {speed\_error\_pct} broadcast and \texttt {speed\_scale.json}}{table.4}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {VII}Conclusion}{5}{section.7}\protected@file@percent }
-\newlabel{sec:concl}{{VII}{5}{Conclusion}{section.7}{}}
 \bibstyle{IEEEtran}
 \bibdata{refs}
 \bibcite{yolo26}{1}
@@ -84,5 +82,7 @@
 \bibcite{deckgl}{16}
 \bibcite{maplibre}{17}
 \bibcite{fastapi}{18}
+\@writefile{toc}{\contentsline {section}{\numberline {VII}Conclusion}{6}{section.7}\protected@file@percent }
+\newlabel{sec:concl}{{VII}{6}{Conclusion}{section.7}{}}
 \@writefile{toc}{\contentsline {section}{References}{6}{section*.1}\protected@file@percent }
 \gdef \@abspage@last{6}

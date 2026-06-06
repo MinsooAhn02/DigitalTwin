@@ -54,7 +54,7 @@ BACKEND_DIR = Path(__file__).resolve().parent
 VARIANT_PRIORITY = ("x", "l", "m", "s", "n")
 
 # YOLO가 연속으로 빈 결과를 반환할 때 이전 트랙을 유지하는 최대 detect 프레임 수
-# detect 2회 연속 miss = 최대 6프레임(~0.2초) 공백 방지
+# detect 3회 연속 miss = 최대 9프레임(~0.3초) 공백 방지
 _YOLO_MISS_GRACE: int = 3
 
 # ── Tracker tier config ────────────────────────────────────────────────────

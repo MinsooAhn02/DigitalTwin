@@ -393,7 +393,7 @@ reported direction may not match the camera's field of view---so the loop adapts
 slowly:
 \begin{equation}
 \textit{target} = \textit{scale}\cdot \frac{v_\text{ITS}}{\bar v_\text{ours}},\quad
-\textit{scale} \gets (1{-}\alpha)\,\textit{scale} + \alpha\,\textit{target},
+\textit{scale} \gets \alpha\,\textit{scale} + (1{-}\alpha)\,\textit{target},
 \end{equation}
 with $\alpha{=}0.99$, clamped to $[0.3,5.0]$, using a 10-minute rolling average
 ($\ge$50 samples) and a coefficient-of-variation guard ($\le$0.4) to skip volatile
@@ -430,10 +430,11 @@ severity-shaded region.}
 
 \subsection{Visualization}
 The deck.gl map layers congestion polygons, vehicle trails, the FOV polygon,
-status-coloured camera icons, and vehicle markers. The FOV polygon uses one of three
-strategies in priority order: the manually clicked GPS ring; a curved corridor that
-follows the road centreline (mirroring the backend transform); or, when uncalibrated,
-a default trapezoid.
+status-coloured camera icons, and vehicle markers. The FOV polygon uses one of four
+strategies in priority order: (1)~the ROI GPS ring broadcast from the backend;
+(2)~the manually clicked calibration ring; (3)~a straight-sided rectangle derived
+from near/far distance and road width (\texttt{computeCalibPolygon}); or,
+when uncalibrated, (4)~a default trapezoid.
 
 The sidebar's vehicle list provides \emph{direction-filter tabs} (All / Inbound /
 Outbound) that filter the displayed rows by the LineZone-derived direction; the

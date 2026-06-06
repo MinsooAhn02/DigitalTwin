@@ -86,7 +86,7 @@ def _circle_polygon(lat: float, lon: float, radius_m: float, segments: int = 12)
 def _severity(members: list[dict]) -> str:
     """클러스터 멤버들의 status/차량수로 심각도 산출.
 
-    THRESH_BUSY=3, THRESH_CONGESTED=6 (BackgroundMonitor 기준) 재사용.
+    THRESH_BUSY=6, THRESH_CONGESTED=14 (BackgroundMonitor 기준) 재사용.
     """
     congested = sum(1 for m in members if m.get("status") == "congested")
     total = sum(int(m.get("vehicle_count", 0)) for m in members)

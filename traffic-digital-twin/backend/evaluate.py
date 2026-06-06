@@ -45,6 +45,7 @@ import cv2
 import numpy as np
 
 _BACKEND_DIR = Path(__file__).resolve().parent
+_LOGS_DIR    = _BACKEND_DIR / "logs"
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
@@ -88,7 +89,7 @@ def _write_csv(path: Path, headers: list[str], rows: list[list]) -> None:
 
 # ── core run ─────────────────────────────────────────────────────────────────
 def run(args) -> None:
-    outdir = Path(args.outdir) if args.outdir else _BACKEND_DIR
+    outdir = Path(args.outdir) if args.outdir else _LOGS_DIR
     outdir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading detector (this loads the YOLO model)…")

@@ -1,0 +1,46 @@
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── 가상환경 ─────────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── 런타임 로그 / 프로파일 (backend/logs/) ───────────────────────────────────
+backend/logs/
+!backend/logs/.gitkeep
+
+# ── 런타임 생성 캘리브레이션 데이터 ─────────────────────────────────────────
+backend/calibration_data.json
+backend/speed_scale.json
+backend/vehicle_calib.json
+backend/camera_pose.json
+backend/roi_config.json
+
+# ── 런타임 생성 DB / 플래그 파일 ─────────────────────────────────────────────
+backend/history.sqlite
+backend/speed_debug.on
+backend/*.engine
+backend/.yolo_model
+backend/.runtime_profile.json
+
+# ── YOLO / ML 모델 ──────────────────────────────────────────────────────────
+*.pt
+*.engine
+*.onnx
+*.wts
+
+# ── 프론트엔드 ───────────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+
+# ── OS / IDE ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

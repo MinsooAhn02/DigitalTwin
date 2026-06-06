@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 BACKEND_DIR = Path(__file__).resolve().parent
+LOGS_DIR    = BACKEND_DIR / "logs"
 
 
 # ── stats / formatting helpers (shared with evaluate.py) ─────────────────────
@@ -204,7 +205,7 @@ class LiveMetrics:
                 summary["speed_scale_snapshot"] = {}
 
         if write:
-            d = outdir or BACKEND_DIR
+            d = outdir or LOGS_DIR
             d.mkdir(parents=True, exist_ok=True)
             (d / "eval_summary.json").write_text(
                 json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

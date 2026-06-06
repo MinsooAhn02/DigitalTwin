@@ -58,5 +58,17 @@
     "frame_h": 480,
     "n_updates": 1,
     "updated_at": "2026-06-05T09:02:33.011074+00:00"
+  },
+  "7d7e5c9a0fee": {
+    "H_m": 14.8296,
+    "pitch_deg": 10.1166,
+    "yaw_deg": 19.5601,
+    "focal_px": 576.0,
+    "x0_m": -8.6185,
+    "residual_px": 7.31,
+    "frame_w": 720,
+    "frame_h": 480,
+    "n_updates": 1,
+    "updated_at": "2026-06-06T10:40:42.795671+00:00"
   }
 }

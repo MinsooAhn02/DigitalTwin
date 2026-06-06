@@ -1,69 +1,69 @@
 {
-  "source": "[국도39호선] 고양 주교지하차도",
+  "source": "[국도 45호선] 용인 원천교차로",
   "inference_backend": "tensorrt",
   "tracker": "BotSort",
-  "frames_processed": 4559,
-  "elapsed_s": 935.9,
+  "frames_processed": 2155,
+  "elapsed_s": 2196.3,
   "latency_ms": {
     "yolo_isolated": {
       "n": 0
     },
     "track": {
-      "n": 4559,
-      "mean": 31.061,
-      "median": 27.494,
-      "p95": 46.82,
-      "min": 6.961,
-      "max": 1377.192
+      "n": 2155,
+      "mean": 36.624,
+      "median": 34.945,
+      "p95": 55.835,
+      "min": 8.974,
+      "max": 783.283
     },
     "transform": {
-      "n": 4559,
-      "mean": 0.093,
-      "median": 0.077,
-      "p95": 0.196,
-      "min": 0.001,
-      "max": 1.165
+      "n": 2155,
+      "mean": 0.157,
+      "median": 0.136,
+      "p95": 0.343,
+      "min": 0.004,
+      "max": 1.451
     },
     "analytics": {
-      "n": 4559,
-      "mean": 0.181,
-      "median": 0.155,
-      "p95": 0.38,
-      "min": 0.024,
-      "max": 4.154
+      "n": 2155,
+      "mean": 0.443,
+      "median": 0.395,
+      "p95": 0.966,
+      "min": 0.049,
+      "max": 2.856
     },
     "end_to_end": {
-      "n": 4559,
-      "mean": 31.335,
-      "median": 27.738,
-      "p95": 47.245,
-      "min": 7.066,
-      "max": 1377.533
+      "n": 2155,
+      "mean": 37.224,
+      "median": 35.608,
+      "p95": 56.629,
+      "min": 9.231,
+      "max": 783.805
     }
   },
-  "throughput_fps": 31.9,
+  "throughput_fps": 26.9,
   "tracking": {
-    "frames_processed": 4559,
-    "unique_tracks": 328,
-    "id_appearances": 683,
-    "mean_lifetime_frames": 73.91,
-    "median_lifetime_frames": 61.0,
-    "max_lifetime_frames": 933
+    "frames_processed": 2155,
+    "unique_tracks": 63,
+    "id_appearances": 157,
+    "mean_lifetime_frames": 113.86,
+    "median_lifetime_frames": 107.0,
+    "max_lifetime_frames": 285
   },
   "speed": {
-    "n": 17103,
-    "mean": 84.003,
-    "median": 75.1,
-    "p95": 172.5,
-    "min": 1.8,
+    "n": 6371,
+    "mean": 124.918,
+    "median": 153.1,
+    "p95": 176.8,
+    "min": 4.2,
     "max": 179.7,
-    "pct_moving_obs": 70.6,
-    "total_vehicle_obs": 24241
+    "pct_moving_obs": 88.8,
+    "total_vehicle_obs": 7173
   },
   "detection_class_totals": {
-    "car": 21041,
-    "truck": 2923,
-    "bus": 277
+    "car": 7041,
+    "truck": 130,
+    "bus": 2
   },
   "speed_scale_snapshot": {
     "16c3b5b2fa97": {

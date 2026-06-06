@@ -51,6 +51,7 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -70,10 +71,44 @@ from analytics import TrafficAnalytics, VehicleState, set_speed_debug, speed_deb
 from transform import PerspectiveTransformer, CALIBRATION_PATH
 import roi_manager
 import metrics
+from perf import PerfStats, yappi_start, yappi_stop, YAPPI_AVAILABLE
 
 SPEED_SCALE_PATH    = Path(__file__).resolve().parent / "speed_scale.json"
 VEHICLE_CALIB_PATH  = Path(__file__).resolve().parent / "vehicle_calib.json"
 CAMERA_POSE_PATH    = Path(__file__).resolve().parent / "camera_pose.json"
+
+# JSON 설정 파일들의 read-modify-write를 원자화하는 공용 락 (TOCTOU 방지).
+# 동기 I/O이므로 asyncio.to_thread 안에서 호출하거나, 이벤트 루프에서 짧게 실행해야 한다.
+_json_file_lock = threading.Lock()
+
+# _live_process / _yolo_detect_annotate 두 스레드가 동시에 증가시키는 카운터 보호
+_frame_count_lock = threading.Lock()
+
+
+def _atomic_update_json(path: Path, key: str, value: dict) -> None:
+    """path JSON 파일의 key 항목을 원자적으로 read-modify-write (TOCTOU 방지)."""
+    with _json_file_lock:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        data[key] = value
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _atomic_delete_json(path: Path, key: str) -> None:
+    """path JSON 파일의 key 항목을 원자적으로 삭제 (TOCTOU 방지)."""
+    with _json_file_lock:
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if key not in data:
+            return
+        data.pop(key)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _load_vehicle_calib(cam_key: str) -> dict | None:
@@ -92,21 +127,13 @@ def _load_vehicle_calib(cam_key: str) -> dict | None:
 def _save_vehicle_calib(cam_key: str, params: dict) -> None:
     """vehicle scale model을 camera_key별로 JSON에 저장."""
     try:
-        data: dict = {}
-        if VEHICLE_CALIB_PATH.exists():
-            try:
-                data = json.loads(VEHICLE_CALIB_PATH.read_text(encoding="utf-8"))
-            except Exception:
-                pass
         B, C = float(params["B"]), float(params["C"])
-        data[cam_key] = {
+        value = {
             **params,
             "vp_y":       round(-C / B, 2),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        VEHICLE_CALIB_PATH.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        _atomic_update_json(VEHICLE_CALIB_PATH, cam_key, value)
         logger.info("vehicle_calib 저장: key=%s B=%.5f vp_y=%.1f", cam_key, B, -C / B)
     except Exception as exc:
         logger.warning("vehicle_calib 저장 실패: %s", exc)
@@ -128,21 +155,22 @@ def _load_camera_pose(cam_key: str) -> dict | None:
 def _save_camera_pose(cam_key: str, params: dict) -> None:
     """road-model 포즈를 camera_key별 JSON에 저장 (다음 세션 prior 재사용)."""
     try:
-        data: dict = {}
-        if CAMERA_POSE_PATH.exists():
-            try:
-                data = json.loads(CAMERA_POSE_PATH.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        prev = data.get(cam_key, {})
-        data[cam_key] = {
-            **params,
-            "n_updates":  int(prev.get("n_updates", 0)) + 1,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        CAMERA_POSE_PATH.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        with _json_file_lock:
+            data: dict = {}
+            if CAMERA_POSE_PATH.exists():
+                try:
+                    data = json.loads(CAMERA_POSE_PATH.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            prev = data.get(cam_key, {})
+            data[cam_key] = {
+                **params,
+                "n_updates":  int(prev.get("n_updates", 0)) + 1,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            CAMERA_POSE_PATH.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         logger.info("camera_pose 저장: key=%s H=%.1f pitch=%.1f residual=%.1fpx",
                     cam_key, params.get("H_m", 0), params.get("pitch_deg", 0),
                     params.get("residual_px", -1))
@@ -217,19 +245,10 @@ def _load_speed_scale(cam_key: str) -> float:
 def _save_speed_scale(cam_key: str, scale: float) -> None:
     """속도 보정 계수를 camera_key별로 JSON에 저장."""
     try:
-        data: dict = {}
-        if SPEED_SCALE_PATH.exists():
-            try:
-                data = json.loads(SPEED_SCALE_PATH.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        data[cam_key] = {
+        _atomic_update_json(SPEED_SCALE_PATH, cam_key, {
             "speed_scale": scale,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        SPEED_SCALE_PATH.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+            "updated_at":  datetime.now(timezone.utc).isoformat(),
+        })
     except Exception as exc:
         logger.warning("speed_scale 저장 실패: %s", exc)
 from nodelink import get_road_info, get_road_snap
@@ -261,7 +280,7 @@ from config import (
 from congestion import compute_clusters
 from history import HistoryStore, SnapshotRow, retention_cutoff
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 analytics    = TrafficAnalytics()
@@ -270,6 +289,8 @@ _transformer = PerspectiveTransformer()
 # history_sampler_loop(30s)가 backend/eval_*.csv + eval_summary.json 으로 flush.
 # GET /eval/report 로 즉시 스냅샷, POST /eval/reset 로 초기화.
 _metrics     = metrics.LiveMetrics()
+# 프레임별 파이프라인 타이밍 수집기 — 100프레임마다 perf_log.jsonl 자동 기록
+_perf_stats  = PerfStats()
 _clients: set[WebSocket] = set()
 
 _camera_queue: asyncio.Queue = asyncio.Queue()
@@ -1057,10 +1078,10 @@ async def switch_camera(body: CameraSwitch):
         logger.info("camera_pose prior 복원: H=%.1f pitch=%.1f (camera=%s)",
                     cp["H_m"], cp["pitch_deg"], cam_key)
 
-    # BoT-SORT 내부 상태 리셋
+    # BoT-SORT 내부 상태 리셋 (to_thread: _state_lock이 이벤트 루프를 블로킹하지 않도록)
     det = getattr(app.state, "detector", None)
     if det is not None:
-        det.reset_tracker()
+        await asyncio.to_thread(det.reset_tracker)
 
     # 새 카메라 위치 기준 ITS 구간속도 즉시 갱신 (비동기, 응답 안 기다림)
     global _its_speed_kph
@@ -1279,7 +1300,7 @@ async def ws_detect(ws: WebSocket):
 
             # 카메라 전환 시 tracker(LineZone) + BoT-SORT 상태 리셋
             if _cam_version != last_cam_ver:
-                detector.reset_tracker()
+                await asyncio.to_thread(detector.reset_tracker)
                 tracker = VehicleTracker()
                 last_cam_ver = _cam_version
                 fid = 0
@@ -1317,7 +1338,7 @@ async def ws_detect(ws: WebSocket):
         if _detect_clients == 0:
             det = getattr(app.state, "detector", None)
             if det is not None:
-                det.reset_tracker()
+                await asyncio.to_thread(det.reset_tracker)
                 logger.info("ws/detect 종료 → boxmot 트래커 리셋 (live_loop 재개 준비)")
         logger.info("YOLO 탐지 클라이언트 해제 (총 %d명)", _detect_clients)
 
@@ -1341,12 +1362,13 @@ def _yolo_detect_annotate(
         f"{float(detections.confidence[i]):.0%}"
         for i in range(len(detections))
     ]
-    annotated = _box_ann.annotate(frame.copy(), detections)
+    annotated = _box_ann.annotate(frame, detections)
     annotated = _label_ann.annotate(annotated, detections, labels)
     cv2.putText(annotated, f"boxmot  {len(detections)} vehicles",
                 (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 80), 2)
 
-    _frame_count += 1
+    with _frame_count_lock:
+        _frame_count += 1
     _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     return buf.tobytes(), detections, fw, fh
 
@@ -1421,21 +1443,12 @@ async def save_calibration(body: CalibBody):
 
     cam_key = roi_manager.camera_key(body.cctvurl)
 
-    # JSON 파일 저장
-    data: dict = {}
-    if CALIBRATION_PATH.exists():
-        try:
-            data = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    data[cam_key] = {
-        "pixel_pts": body.pixel_pts,
-        "gps_pts":   body.gps_pts,
+    # JSON 파일 저장 (원자적 read-modify-write)
+    _atomic_update_json(CALIBRATION_PATH, cam_key, {
+        "pixel_pts":  body.pixel_pts,
+        "gps_pts":    body.gps_pts,
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    CALIBRATION_PATH.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    })
 
     # 이미지 4 코너 → GPS 변환 (perspective transform 인라인 계산)
     corner_gps_pts: list[list[float]] = []
@@ -1473,15 +1486,7 @@ async def save_calibration(body: CalibBody):
 @app.delete("/calibration/{camera_key}")
 async def delete_calibration(camera_key: str):
     """캘리브레이션 삭제 (기본 근사값으로 롤백)."""
-    if CALIBRATION_PATH.exists():
-        try:
-            data = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
-            data.pop(camera_key, None)
-            CALIBRATION_PATH.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except Exception:
-            pass
+    _atomic_delete_json(CALIBRATION_PATH, camera_key)
     # 현재 카메라면 GPS center 근사값으로 롤백
     if _current_cam and roi_manager.camera_key(_current_cam.get("cctvurl", "")) == camera_key:
         _transformer.update_gps_center(_current_cam["lat"], _current_cam["lon"], bearing_deg=analytics.road_bearing_deg or 0.0)
@@ -1491,16 +1496,7 @@ async def delete_calibration(camera_key: str):
 @app.delete("/roi/{camera_key}")
 async def delete_roi(camera_key: str):
     """카메라의 ROI 삭제."""
-    if not roi_manager._CONFIG_PATH.exists():
-        return {"ok": True}
-    try:
-        data = json.loads(roi_manager._CONFIG_PATH.read_text(encoding="utf-8"))
-        data.pop(camera_key, None)
-        roi_manager._CONFIG_PATH.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except Exception:
-        pass
+    _atomic_delete_json(roi_manager._CONFIG_PATH, camera_key)
     det = getattr(app.state, "detector", None)
     if det is not None:
         det.set_roi(None)
@@ -1584,11 +1580,11 @@ async def stop_camera():
         await asyncio.to_thread(stream.release)
     det = getattr(app.state, "detector", None)
     if det is not None:
-        det.reset_tracker()
+        await asyncio.to_thread(det.reset_tracker)
     _current_cam = None
     _latest_frame_jpeg = None
     _latest_annotated_jpeg = None
-    _set_viewer_active(False)
+    await _set_viewer_active(False)
     logger.info("카메라 스트림 해제 (프론트엔드 요청)")
     return {"ok": True}
 
@@ -1598,23 +1594,23 @@ class _ViewerState(BaseModel):
     active: bool
 
 
-def _set_viewer_active(active: bool) -> None:
+async def _set_viewer_active(active: bool) -> None:
     global _live_viewer_active
     if _live_viewer_active == active:
         return
     _live_viewer_active = active
     if not active:
-        # 미시청 전환 → 재개 시 깨끗한 트래커 보장
+        # 미시청 전환 → 재개 시 깨끗한 트래커 보장 (to_thread: _state_lock 블로킹 방지)
         det = getattr(app.state, "detector", None)
         if det is not None:
-            det.reset_tracker()
+            await asyncio.to_thread(det.reset_tracker)
     logger.info("라이브 시청 상태: %s", "active" if active else "inactive")
 
 
 @app.post("/viewer-active")
 async def viewer_active(body: _ViewerState):
     """프론트가 (카메라 선택 × 페이지 visible) 상태를 보고 → 미시청 시 라이브 YOLO 중단."""
-    _set_viewer_active(body.active)
+    await _set_viewer_active(body.active)
     return {"ok": True}
 
 
@@ -1633,6 +1629,37 @@ async def speed_debug_toggle(state: str):
     elif state != "status":
         return {"error": "state must be on|off|status"}
     return speed_debug_status()
+
+
+# ── 파이프라인 타이밍 로그 ────────────────────────────────────────────
+@app.post("/debug/perf/reset")
+async def perf_reset():
+    """perf_log.jsonl 초기화 (새 측정 구간 시작)."""
+    _perf_stats.reset()
+    return {"ok": True, "msg": "perf_log.jsonl cleared"}
+
+
+@app.get("/debug/perf/latest")
+async def perf_latest():
+    """perf_log.jsonl 마지막 10줄 반환 (빠른 현황 확인)."""
+    from perf import PERF_LOG_PATH
+    if not PERF_LOG_PATH.exists():
+        return {"lines": []}
+    lines = PERF_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    return {"lines": [json.loads(l) for l in lines[-10:] if l.strip()]}
+
+
+# ── yappi 함수별 프로파일 ──────────────────────────────────────────────
+@app.post("/debug/profile/start")
+async def profile_start():
+    """yappi 프로파일링 시작 (전체 스레드). 먼저 pip install yappi 필요."""
+    return yappi_start()
+
+
+@app.post("/debug/profile/stop")
+async def profile_stop():
+    """yappi 프로파일링 중지 → profile_stats.txt 저장 + 상위 30개 함수 반환."""
+    return await asyncio.to_thread(yappi_stop)
 
 
 # ── 측정 리포트 (실행 중 자동 수집) ──────────────────────────────────
@@ -2090,13 +2117,14 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
     tracked, in_cnt, out_cnt, in_ids, out_ids = tracker.update(tracked, (w, h))
 
     # YOLO annotated 프레임 생성 → /video-stream-yolo 버퍼
+    _t0 = time.perf_counter()
     try:
         labels = [
             f"#{int(tracked.tracker_id[i])} {VEHICLE_CLASSES[int(tracked.class_id[i])]} "
             f"{float(tracked.confidence[i]):.0%}"
             for i in range(len(tracked))
         ]
-        ann = _box_ann.annotate(frame.copy(), tracked)
+        ann = _box_ann.annotate(frame, tracked)
         ann = _label_ann.annotate(ann, tracked, labels)
         cv2.putText(ann, f"vehicles: {len(tracked)}", (8, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 80), 2)
@@ -2105,6 +2133,7 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
             _latest_annotated_jpeg = buf.tobytes()
     except Exception:
         pass
+    _annotate_ms = (time.perf_counter() - _t0) * 1000.0
 
     _t0 = time.perf_counter()
     vehicles = _build_vehicles(tracked, frame_wh=(w, h))
@@ -2115,7 +2144,8 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
         x1, _, x2, y2 = v_state.bbox_xyxy
         _transformer.accumulate_scale_obs(y2, x2 - x1, v_state.class_name, h, w)
 
-    _frame_count += 1
+    with _frame_count_lock:
+        _frame_count += 1
 
     # 10프레임마다 재피팅 — 적응형 최소관측수(한계2 C): 교통량 적으면 자동 하향.
     _min_obs = (SCALE_MIN_OBS_SPARSE
@@ -2141,6 +2171,13 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
     result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt, in_ids, out_ids)
     _analytics_ms = (time.perf_counter() - _t0) * 1000.0
     _metrics.add_frame(result.vehicles, _track_ms, _transform_ms, _analytics_ms)
+    _perf_stats.record(
+        track_ms=_track_ms,
+        annotate_ms=_annotate_ms,
+        transform_ms=_transform_ms,
+        analytics_ms=_analytics_ms,
+        n_vehicles=len(vehicles),
+    )
     return _inject_its_speed(result.to_dict())
 
 

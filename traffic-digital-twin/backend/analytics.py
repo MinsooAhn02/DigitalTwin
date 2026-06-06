@@ -23,10 +23,11 @@ logger = logging.getLogger(__name__)
 # 켜는 법(둘 중 하나, 재시작 불필요):
 #   1) backend/ 에 빈 파일 'speed_debug.on' 생성  ← 권장(즉시 반영, env 타이밍 무관)
 #   2) 환경변수 SPEED_DEBUG=1 로 백엔드 시작
-# 끄는 법: 파일 삭제 / env 해제. 결과는 backend/speed_debug.log.
+# 끄는 법: 파일 삭제 / env 해제. 결과는 backend/logs/speed_debug.log.
 _SPD_DIR = Path(__file__).resolve().parent
+_LOGS_DIR = _SPD_DIR / "logs"
 _SPD_FLAG = _SPD_DIR / "speed_debug.on"
-_SPD_LOGFILE = _SPD_DIR / "speed_debug.log"
+_SPD_LOGFILE = _LOGS_DIR / "speed_debug.log"
 _spd_log = logging.getLogger("speed_debug")
 _spd_log.setLevel(logging.DEBUG)
 _spd_log.propagate = False
@@ -36,6 +37,7 @@ _spd_override: bool | None = None   # API 토글: None=env/플래그파일, True
 
 def _spd_attach_handler() -> None:
     if not _spd_log.handlers:
+        _LOGS_DIR.mkdir(parents=True, exist_ok=True)
         _h = logging.FileHandler(_SPD_LOGFILE, encoding="utf-8")
         _h.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         _spd_log.addHandler(_h)
@@ -95,7 +97,6 @@ from config import (
     PARKED_POSITION_RADIUS_PX,
     SPEED_WINDOW_FRAMES,
     SPEED_EMA_ALPHA,
-    SPEED_STOP_SPAN_S,
     SPEED_SPIKE_FACTOR,
     SPEED_MIN_KPH,
     SPEED_OUTLIER_MAD_K,
@@ -109,8 +110,6 @@ from config import (
     POS_JUMP_RESET_M,
     LANE_OFFSET_M,
 )
-
-from utils import haversine_m
 
 
 # ── 차량 단위 상태 ────────────────────────────────────────────────────

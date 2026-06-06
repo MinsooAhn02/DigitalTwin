@@ -116,6 +116,18 @@ family into `.runtime_profile.json`.
 | medium | BotSort | `osnet_x0_25_msmt17.pt` | appearance ReID; `cmc_method="sof"` (optical flow) to avoid ECC failures on low-texture night frames |
 | high | DeepOcSort | `osnet_x1_0_msmt17.pt` | appearance ReID, 8 GB+ |
 
+**Lock architecture.**
+Two locks guard `VehicleDetector` state:
+
+| Lock | Scope | Notes |
+|------|-------|-------|
+| `_lock` | `model.predict()` only | GPU inference serialization; held only inside `track()` |
+| `_state_lock` | all mutable tracker state (`_last_tracks`, `_last_dets_np`, `_track_frame_count`, `_yolo_miss_streak`, `_tracker.update()`, `_id_stabilizer`) | Wraps the **entire** `track()` body and the **entire** `reset_tracker()` body — prevents data race between the thread-pool thread running `track()` and the thread-pool thread running `reset_tracker()` |
+
+Nesting is always `_state_lock` (outer) → `_lock` (inner, for `model.predict()` only). `detect()` uses only `_lock` and never `_state_lock`, so there is no circular dependency and no deadlock risk.
+
+All `reset_tracker()` call sites in async functions use `await asyncio.to_thread(det.reset_tracker)` so that waiting on `_state_lock` happens on a thread-pool thread and never blocks the event loop (which could stall for ~100–300 ms while a GPU inference holds `_state_lock`).
+
 **`track(frame)` pipeline.**
 1. `should_detect = (frame_count-1) % detect_interval == 0`. `_detect_interval` is forced to **1** on
    TensorRT/ONNX (inference is cheap); only CPU honours `YOLO_DETECT_INTERVAL`.
@@ -245,7 +257,7 @@ sets `is_calibrated = False`.
 ### 4.4 `analytics.py` — metrics engine
 
 `VehicleState` (per vehicle): `track_id, class_name, bbox_xyxy, center_px, lat, lon, x_m, y_m,
-direction, speed_kph, is_speeding, dwell_frames, is_bottleneck, is_parked`.
+direction, speed_kph, is_speeding, dwell_frames, is_bottleneck, is_parked, lane_id` (`lane_id` defaults to -1; reserved for future lane assignment).
 `FrameAnalytics` (per frame): `frame_id, timestamp_ms, vehicles[], vehicle_count, avg_speed_kph,
 los_grade, in_count, out_count, class_counts`.
 
@@ -301,10 +313,35 @@ against the ITS segment speed:
 - **Volatility guard:** coefficient of variation > 0.4 ⇒ skip (traffic in transition).
 - `target = old_scale · ITS / our_avg`, **clamped to [0.3, 5.0]** (a clamp hit logs a warning —
   surfaces a badly-off homography instead of failing silently).
-- Learning rate (weight of new target) = `0.5` before convergence, `0.05` after (slow once stable).
-  Code: `scale = old_scale * alpha + target * (1 - alpha)` where `alpha = 0.95` (converged) / `0.5` (not converged).
-- Convergence: `_stable_count ≥ 3` consecutive updates with < 1 % change. The 10-min window is double
+- Fixed slow learning rate: `scale = old_scale * 0.99 + target * 0.01` (1 % new, 99 % old per update).
+  No convergence state is tracked; the rate is intentionally fixed to treat ITS as an imprecise soft
+  reference (ITS figures reflect ~1 km segment averages at 5-min intervals). The 10-min window is double
   the ITS 5-min aggregation so the ITS window is always contained regardless of poll phase.
+
+**Direction classification (`_assign_directions`, `_project_to_road_axis`).** Per vehicle, a signed
+along-axis delta (EMA over frames, deadzone `DIR_DEADZONE_M = 0.10 m`) determines direction:
+`delta > deadzone` → **Out** (moving in bearing direction), `delta < -deadzone` → **In** (approaching
+camera, against bearing). EMA coefficient `DIR_EMA_ALPHA = 0.4`. Falls back to the last LineZone crossing
+when `road_bearing_deg` is not set.
+
+**Road-shape learning.** Two mechanisms refine the road geometry from observed vehicle GPS:
+- `_accumulate_gps_trace`: collects GPS positions of all non-parked vehicles (up to 1 000 entries) for road centreline refinement.
+- `refine_road_pts`: bins accumulated GPS traces along the bearing axis into `ROAD_PTS_REFINE_NBINS = 10`
+  bins, averages each bin, and returns a refined road polyline plus a new `snap_along_m`. Requires
+  ≥ `ROAD_PTS_REFINE_MIN_SAMPLES = 50` points. **Note**: as of Phase 2 this refinement is explicitly
+  disabled in `live_loop` (`new_road = None`) to preserve the OSM/NodeLink centreline shape.
+
+**Bearing auto-refinement (`refine_bearing`).** Accumulates per-frame vehicle flow vectors (x_m, y_m
+deltas) using double-angle statistics (`_flow_sin2`, `_flow_cos2`) to estimate the road axis free of
+180° ambiguity. After ≥ `BEARING_REFINE_MIN_SAMPLES = 30` samples, the estimated axis is blended into
+`road_bearing_deg` with `BEARING_REFINE_EMA_ALPHA = 0.15`. Called from `live_loop` every
+`BEARING_REFINE_INTERVAL_FRAMES = 30` frames; a broadcast is sent only when the change exceeds
+`BEARING_BROADCAST_MIN_DEG = 1.5°`.
+
+**Speed debug logging.** `set_speed_debug(on)` / `speed_debug_status()` / `_spd_debug()` form a
+per-frame diagnostic subsystem (off by default). Enable by creating `backend/speed_debug.on` or setting
+`SPEED_DEBUG=1`; disable by deleting the file. Output goes to `backend/speed_debug.log`. Each track
+emits one line per frame (throttled to 0.2 s) showing decision code, dt, step, span, raw/scaled speed.
 
 ### 4.5 `nodelink.py` — national road network
 
@@ -359,14 +396,39 @@ older than `retention_cutoff(HISTORY_RETENTION_DAYS = 14)`.
 ### 4.9 `roi_manager.py`, `config.py`, `utils.py`
 - `roi_manager` — ROI polygons stored as **normalized** [0,1] coordinates (resolution-independent),
   keyed by `camera_key = md5(url)[:12]`; `roi_to_pixels` converts for `sv.PolygonZone`.
-- `config.py` — all constants (YOLO params + `YOLO_MODEL_FAMILY`, tracker buffers, speed thresholds,
-  LOS, history, congestion, ITS URLs/keys; pose calibration `POSE_RESIDUAL_MAX_PX`, scale
-  `SCALE_MIN_OBS`/`SCALE_MIN_OBS_SPARSE`/`SCALE_SPARSE_AFTER_FRAMES`, `SPEED_OUTLIER_MAD_K`, and the
-  seconds-based `SPEED_WINDOW_S`). Runtime profile (`.runtime_profile.json`, with `family`) overrides
-  capture/FPS/JPEG.
+  `save_roi()` wraps the entire read-modify-write under a module-level `_write_lock` (TOCTOU prevention).
+- `config.py` — all constants. Key groups:
+  - YOLO: `YOLO_MODEL_FAMILY`, `YOLO_CONF=0.30`, `YOLO_IOU=0.45`, `YOLO_DETECT_INTERVAL`
+  - Tracker: `TRACKER_TIER`, `BYTE_TRACK_FPS=30`, `BYTE_TRACK_BUFFER=30`
+  - Speed: `SPEED_WINDOW_S=0.7s` → `SPEED_WINDOW_FRAMES`, `SPEED_EMA_ALPHA=0.35`, `SPEED_SPIKE_FACTOR=2.5`, `SPEED_STOP_SPAN_S=1.0` (imported in analytics but stop-decay uses fixed 0.6 multiplier), `SPEED_MIN_KPH=5`, `MAX_REASONABLE_KPH=180`, `SPEED_JITTER_THRESHOLD_M=0.5`, `SPEED_OUTLIER_MAD_K=3.0`
+  - Pose/scale: `POSE_RESIDUAL_MAX_PX=8.0`, `SCALE_MIN_OBS=12`, `SCALE_MIN_OBS_SPARSE=8`, `SCALE_SPARSE_AFTER_FRAMES=600`
+  - Direction: `DIR_DEADZONE_M=0.10`, `DIR_EMA_ALPHA=0.4`
+  - Bearing refinement: `BEARING_REFINE_MIN_SAMPLES=30`, `BEARING_REFINE_EMA_ALPHA=0.15`, `BEARING_REFINE_INTERVAL_FRAMES=30`, `BEARING_BROADCAST_MIN_DEG=1.5`
+  - Road-shape learning: `ROAD_PTS_REFINE_MIN_SAMPLES=50`, `ROAD_PTS_REFINE_NBINS=10`
+  - Position smoothing: `POS_EMA_ALPHA=0.4`, `POS_JUMP_RESET_M=8.0`
+  - FOV polygon: `FAR_CAP_M=120.0` (ROI projection max), `FOV_EMA_MIN_SAMPLES=60`, `FOV_EMA_ALPHA=0.05`
+  - Lane offset: `LANE_OFFSET_M=1.75` (In/Out perpendicular separation)
+  - LOS: `LOS_THRESHOLDS {A≤3, B≤6, C≤9, D≤12, E≤15}`
+  - Dwell: `BOTTLENECK_DWELL_FRAMES=150`, `PARKED_FRAMES_THRESHOLD=300`, `PARKED_POSITION_RADIUS_PX=30`
+  - History: `HISTORY_SAMPLE_S=30`, `HISTORY_RETENTION_DAYS=14`, `CONGESTION_EPS_M=500`
+  - Loops: `ITS_POLL_INTERVAL=300s`, `HLS_REFRESH_INTERVAL=1800s`
+  Runtime profile (`.runtime_profile.json`, with `family`) overrides capture/FPS/JPEG.
 - `utils.py` — `haversine_m` geodesic distance.
 
 ### 4.10 `main.py` — server, endpoints, orchestration
+
+**Concurrency primitives in `main.py`.**
+
+| Object | Type | Purpose |
+|--------|------|---------|
+| `_json_file_lock` | `threading.Lock` | Serializes all JSON config read-modify-write operations across the three helpers below, preventing TOCTOU across concurrent async handlers |
+| `_frame_count_lock` | `threading.Lock` | Makes `_frame_count += 1` atomic in `_yolo_detect_annotate` and `_live_process` (both run in thread-pool threads) |
+| `_atomic_update_json(path, key, value)` | helper | Acquires `_json_file_lock`, reads, updates one key, writes back atomically — used by `_save_vehicle_calib`, `_save_speed_scale`, `save_calibration` endpoint |
+| `_atomic_delete_json(path, key)` | helper | Same lock, removes one key — used by `delete_calibration` and `delete_roi` endpoints |
+
+`_save_camera_pose` performs its own read-modify-write directly under `_json_file_lock` (not via the helpers, since it merges multiple sub-keys).
+
+`_set_viewer_active` is `async def` (converted from `def`) so it can `await asyncio.to_thread(det.reset_tracker)` without blocking the event loop. `stop_camera` and the `viewer_active` endpoint both call it with `await`.
 
 **REST endpoints.**
 | Method · path | Purpose |
@@ -384,8 +446,16 @@ older than `retention_cutoff(HISTORY_RETENTION_DAYS = 14)`.
 | `POST /stop-camera`, `GET /health`, `/runtime-config`, `/speed-debug/{state}` | control/diagnostics |
 
 **WebSockets.** `/ws` (broadcast sink) and `/ws/detect` (browser JPEG → annotate → analytics).
-Messages on `/ws`: `camera_ready`, `auto_calibrated`, `camera_error`, `background_status`,
-`congestion_clusters`, else a `FrameAnalytics` JSON.
+Messages on `/ws`:
+| Type | Trigger |
+|------|---------|
+| `camera_ready` | camera switch complete (road_name, bearing, snap, road_width, road_pts, roi_gps_ring, calibrated) |
+| `auto_calibrated` | pose solver succeeded or bearing changed (heading, near_m, far_m, road_width_m, roi_gps_ring) |
+| `camera_error` | stream open failed |
+| `background_status` | background camera status change |
+| `congestion_clusters` | cluster recompute after history tick |
+| `roi_updated` | ROI polygon changed (roi_gps_ring) |
+| (default) | `FrameAnalytics` JSON per frame |
 
 **`switch_camera`.** Bumps `_cam_version` (so `/ws/detect` resets its tracker), resets analytics,
 restores the saved per-camera `speed_scale`, the vehicle scale model (`vehicle_calib.json`) **and the
@@ -402,6 +472,12 @@ calibration the solved pose is written back to `camera_pose.json` (`_save_camera
 lane-detection attempts fail it falls back to `apply_prior_pose` (saved pose) before the GPS-grid
 approximation.
 
+**`live_loop` bearing auto-refinement.** Every `BEARING_REFINE_INTERVAL_FRAMES = 30` frames, calls
+`analytics.refine_bearing()`. If the refined bearing differs from the last broadcast by ≥
+`BEARING_BROADCAST_MIN_DEG = 1.5°`, an `auto_calibrated` message is sent with the new heading. Road-pts
+refinement (`refine_road_pts`) is intentionally **not applied** (Phase 2 decision: `new_road = None`) to
+preserve the OSM/NodeLink centreline shape over the bearing-binned polyline approximation.
+
 **Camera-pose / scale persistence.** `camera_pose.json` and `vehicle_calib.json` are keyed by
 `camera_key`; the per-frame scale refit (`_live_process`) uses the adaptive `min_obs` and `_save_*`
 writes update them so each session improves on the last. `_scale_switch_frame` records the switch frame
@@ -416,8 +492,9 @@ path uses wall-clock directly for the same reason.
 (not the geometric centre), culls Kalman ghost tracks outside the frame, and batches all
 pixel→GPS/metre transforms into single `cv2.perspectiveTransform` calls.
 
-**`_inject_its_speed`.** Adds `speed_scale`, `speed_scale_converged`, `our_avg_kph` (10-min rolling,
-needs ≥ 5 samples), `its_speed_kph`, and `speed_error_pct` to every broadcast.
+**`_inject_its_speed`.** Adds `speed_scale`, `our_avg_kph` (10-min rolling average, needs ≥ 5 samples),
+`its_speed_kph`, and `speed_error_pct` to every broadcast (ITS fields omitted when `_its_speed_kph` is
+`None`, i.e., no ITS poll has succeeded for the current camera).
 
 **Name parsing.** `_ROAD_NAME_RE` matches both `[국도 1호선]` (bracket) and plain `국도1호선`;
 `_NAME_BEARING` maps Korean direction words to degrees; 상행/하행 derive from the road bearing.
@@ -425,9 +502,9 @@ needs ≥ 5 samples), `its_speed_kph`, and `speed_error_pct` to every broadcast.
 IC/JC/TG/SA, section number, NB↑/SB↓/Both↕).
 
 **`BackgroundMonitor`.** Each camera is an independent `asyncio.Task` polling every `POLL_S = 8 s`
-with `detector.detect()` (no tracker, so no contention; detect is lock-serialized). Status:
-`normal` (≤3), `busy` (>3), `congested` (>6). Emits `background_status` only when (status, count)
-changes.
+with `detector.detect()` (no tracker, so no contention; detect is lock-serialized). Status thresholds
+(`THRESH_BUSY = 6`, `THRESH_CONGESTED = 14`): `normal` (≤6), `busy` (7–14), `congested` (≥15).
+Emits `background_status` only when (status, count) changes.
 
 **`history_sampler_loop`.** Every 30 s collects bg + live snapshots, batches the INSERT, recomputes
 clusters and broadcasts `congestion_clusters` only when the signature changes, and prunes hourly.
@@ -500,9 +577,9 @@ Recharts line charts for vehicle count (average + peak) and average speed over 6
 (`document.hidden` + `visibilitychange`).
 
 ### 5.7 `useWebSocket.js`
-Single `/ws` connection with 3 s auto-reconnect. Demultiplexes 6 message types into
-`frameData, cameraReadyInfo (+counter), autoCalibInfo, backgroundStatus, congestionClusters` and an
-`error` string.
+Single `/ws` connection with 3 s auto-reconnect. Demultiplexes message types into
+`frameData, cameraReadyInfo (+counter), autoCalibInfo, backgroundStatus, congestionClusters, roiUpdated`
+and an `error` string.
 
 ### 5.7b `VehicleTable.jsx` — direction tabs
 The vehicle list now has a 3-tab toggle (`All / Inbound / Outbound`) above the table. A local
@@ -533,7 +610,8 @@ with a high-contrast variant for light/satellite maps.
 5. **Background monitoring** — `POST /background/add` → 8 s `detect()` task → `background_status` →
    icon colour; fed into congestion clustering and history.
 6. **Speed self-calibration** — every 5 min ITS segment speed → `calibrate_from_its` → `speed_scale`
-   converges (3× < 1 % change) and is saved per camera.
+   updated (fixed rate: 99% old + 1% new) and saved per camera. No convergence state is tracked; the
+   scale accumulates across sessions as a running soft-reference correction.
 7. **Road-model pose calibration** — on switch, lane edges + VP + NodeLink width/bearing →
    `camera_pose.solve_pose` → homography; the solved pose is saved to `camera_pose.json` and seeds the
    next session's solve (per-camera refinement). Edges too weak → saved prior; no prior → rough
@@ -543,9 +621,21 @@ with a high-contrast variant for light/satellite maps.
 
 ## 7. Design Decisions & Limitations
 
-- **Shared-tracker concurrency.** `live_loop` and `/ws/detect` share one `VehicleDetector`; concurrent
-  `track()` calls interleave frame sequences and corrupt tracking. `/ws/detect` activity makes
-  `live_loop` drain-only; `reset_tracker()` runs when `/ws/detect` ends.
+- **Shared-tracker concurrency.** `live_loop` and `/ws/detect` share one `VehicleDetector`; the
+  `_detect_clients` counter gates `live_loop` to drain-only when a browser detection client is active,
+  preventing two interleaved `track()` call sequences. In addition, `VehicleDetector` uses two
+  `threading.Lock` objects to prevent lower-level data races:
+  - `_state_lock` serializes the entire `track()` body and `reset_tracker()` against each other. This
+    handles the case where a camera-switch or session-teardown triggers `reset_tracker()` while a
+    thread-pool thread is mid-`track()`.
+  - `_lock` (inner) serializes `model.predict()` only (GPU inference).
+  All async call sites use `await asyncio.to_thread(det.reset_tracker)` so lock acquisition does not
+  block the event loop. Starvation of background cameras competing for `_lock` is possible in theory
+  (Python `threading.Lock` is not FIFO) but has negligible impact at current scale (≤ tens of cameras).
+- **JSON TOCTOU.** Three JSON config files (`calibration_data.json`, `speed_scale.json`,
+  `vehicle_calib.json`) and `roi_config.json` use read-modify-write patterns. All writes are serialized
+  under their respective `threading.Lock` (`_json_file_lock` in `main.py`, `_write_lock` in
+  `roi_manager.py`) to prevent concurrent coroutines from overwriting each other's keys.
 - **Homography error structure.** A 4-point homography is accurate inside the calibration quad but
   extrapolates with growing error toward the frame top (far vehicles). Mitigation is four-layered:
   (1) dual-matrix manual calibration with near+far points, (2) a 0.7 s OLS window to dilute single-frame

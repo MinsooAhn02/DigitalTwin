@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = Path(__file__).parent / "roi_config.json"
+_write_lock = threading.Lock()   # save_roi read-modify-write 원자화 (TOCTOU 방지)
 
 
 def camera_key(url: str) -> str:
@@ -42,16 +44,17 @@ def load_roi(camera_url: str) -> list[list[float]] | None:
 
 def save_roi(camera_url: str, polygon: list[list[float]], auto: bool = False) -> None:
     """ROI 정규화 좌표를 JSON에 저장."""
-    data = _load_config()
     key = camera_key(camera_url)
-    data[key] = {
-        "polygon": polygon,
-        "auto_generated": auto,
-        "last_updated": datetime.now(timezone.utc).isoformat(),
-    }
-    _CONFIG_PATH.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    with _write_lock:
+        data = _load_config()
+        data[key] = {
+            "polygon": polygon,
+            "auto_generated": auto,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        }
+        _CONFIG_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     logger.info("ROI 저장: key=%s (%s)", key, "자동" if auto else "수동")
 
 

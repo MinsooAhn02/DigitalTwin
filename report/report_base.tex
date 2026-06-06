@@ -169,7 +169,11 @@ The backend (FastAPI/Uvicorn) and a React/deck.gl frontend communicate over REST
 and WebSocket. Two inference paths can produce per-frame analytics and
 \emph{share a single detector}; a connection counter coordinates them so that the
 multi-object tracker is never driven by two interleaved frame streams
-(Fig.~\ref{fig:arch}).
+(Fig.~\ref{fig:arch}). A two-lock scheme inside the detector
+(\texttt{\_state\_lock} for tracker state, \texttt{\_lock} for GPU inference)
+prevents data races between thread-pool threads, and module-level write locks
+in \texttt{main.py} and \texttt{roi\_manager.py} atomize all JSON configuration
+read-modify-write operations.
 
 \begin{figure*}[t]
 \centering
@@ -250,8 +254,9 @@ the selected camera shows its field-of-view polygon and the located vehicles.}
 The detector loads the fastest available backend---TensorRT FP16 engine, then ONNX
 Runtime, then PyTorch---and exports \texttt{.pt}$\to$\texttt{.engine} on first run
 when a GPU is present. A tracker \emph{tier} is chosen by GPU memory: ByteTrack
-(CPU/low-VRAM), OC-SORT (occlusion-robust, no ReID), or BoT-SORT/DeepOC-SORT with
-OSNet appearance ReID on larger GPUs. For the non-ReID tiers we add two robustness
+(CPU-only, no CUDA), OC-SORT (low VRAM $\ge$3.5\,GB, occlusion-robust, no ReID),
+or BoT-SORT/DeepOC-SORT with OSNet appearance ReID on larger GPUs
+($\ge$6\,GB and $\ge$10\,GB respectively). For the non-ReID tiers we add two robustness
 layers: \texttt{\_dedup\_tracks} merges duplicate boxes (IoU\,$>$\,0.3 or centre
 distance\,$<$\,40\,px, keeping the older ID), and an \texttt{IDStabilizer}
 re-binds a vehicle's previous ID after a brief miss using nearest-centre matching
@@ -348,7 +353,8 @@ constants in Table~\ref{tab:const}.
 \begin{algorithmic}[1]
 \Require window $W$, prior EMA $v_e$, $\sigma \gets \texttt{speed\_scale}$
 \State \textbf{if} duplicate position \textbf{then} skip \Comment{dedup}
-\State \textbf{if} $\textit{step} > (V_{\max}/3.6\sigma)\,dt\cdot 1.5$ \textbf{then} drop sample, keep $W$ \Comment{jump guard}
+\State \textbf{if} $\textit{step} > (V_{\max}/3.6\sigma)\,dt\cdot 3.0$ \textbf{then} clear $W$ \Comment{teleport reset}
+\State \textbf{else if} $\textit{step} > (V_{\max}/3.6\sigma)\,dt\cdot 1.5$ \textbf{then} drop sample, keep $W$ \Comment{jump guard}
 \State \textbf{if} $dt > 2$\,s \textbf{then} clear $W$ \Comment{track gap}
 \State fit $\hat{v}$ by OLS on $W$ ($0.7$\,s); \textbf{if} $\mathrm{disp}(W){<}0.5$\,m \textbf{then} $\hat{v}\gets 0$ \Comment{OLS}
 \State $v_e \gets (1{-}\alpha)v_e + \alpha\hat{v}\sigma$, $\alpha{=}0.35$; reject spike; decay on stop \Comment{EMA}
@@ -393,7 +399,7 @@ reported direction may not match the camera's field of view---so the loop adapts
 slowly:
 \begin{equation}
 \textit{target} = \textit{scale}\cdot \frac{v_\text{ITS}}{\bar v_\text{ours}},\quad
-\textit{scale} \gets (1{-}\alpha)\,\textit{scale} + \alpha\,\textit{target},
+\textit{scale} \gets \alpha\,\textit{scale} + (1{-}\alpha)\,\textit{target},
 \end{equation}
 with $\alpha{=}0.99$, clamped to $[0.3,5.0]$, using a 10-minute rolling average
 ($\ge$50 samples) and a coefficient-of-variation guard ($\le$0.4) to skip volatile
@@ -430,13 +436,14 @@ severity-shaded region.}
 
 \subsection{Visualization}
 The deck.gl map layers congestion polygons, vehicle trails, the FOV polygon,
-status-coloured camera icons, and vehicle markers. The FOV polygon uses one of three
-strategies in priority order: the manually clicked GPS ring; a curved corridor that
-follows the road centreline (mirroring the backend transform); or, when uncalibrated,
-a default trapezoid.
+status-coloured camera icons, and vehicle markers. The FOV polygon uses one of four
+strategies in priority order: (1)~the ROI GPS ring broadcast from the backend;
+(2)~the manually clicked calibration ring; (3)~a straight-sided rectangle derived
+from near/far distance and road width (\texttt{computeCalibPolygon}); or,
+when uncalibrated, (4)~a default trapezoid.
 
 The sidebar's vehicle list provides \emph{direction-filter tabs} (All / Inbound /
-Outbound) that filter the displayed rows by the LineZone-derived direction; the
+Outbound) that filter the displayed rows by the movement-vector-based direction; the
 per-direction vehicle count is shown in each tab badge, and the min/avg/max speed
 summary is recomputed from the filtered set. Two collapsible cards (Auto Calibration
 Estimate, ITS Speed Comparison) include an info button that opens a modal explanation

@@ -202,7 +202,9 @@ LANE_OFFSET_M: float = 1.75    # 방향별 도로 중심선 수직 offset (half-
 # TRACKER_TIER: "auto" | "cpu" | "low" | "medium" | "high"
 #   auto   → GPU VRAM 크기 기준 자동 선택
 #   cpu    → ByteTrack  (ReID 없음, VRAM 불필요)
-#   low    → OcSort     (ReID 없음, 가림 강함)
+#   low    → OcSort     (ReID 없음, 가림 강함)  ← 교통 카운팅/속도 측정 용도에 최적
 #   medium → BotSort    (ReID 있음, 6~8 GB VRAM)
 #   high   → DeepOcSort (ReID 있음, 8 GB+ VRAM)
-TRACKER_TIER: str = os.getenv("TRACKER_TIER", "auto").strip().lower()
+# 프레임 밖 재진입 ReID가 불필요한 고정 CCTV 교통 분석 용도에는 "low"가 적합.
+# ReID가 필요하면 환경변수로 오버라이드: TRACKER_TIER=medium
+TRACKER_TIER: str = os.getenv("TRACKER_TIER", "low").strip().lower()

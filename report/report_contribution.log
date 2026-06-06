@@ -1,21 +1,21 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.28 (MiKTeX 25.12) (preloaded format=pdflatex 2026.6.1)  5 JUN 2026 18:18
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (MiKTeX 26.5) (preloaded format=pdflatex 2026.6.6)  6 JUN 2026 17:14
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
 **./report_contribution.tex
 (report_contribution.tex
 LaTeX2e <2025-11-01>
-L3 programming layer <2025-12-24>
+L3 programming layer <2026-04-28>
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/ieeetran\IEEEtran.cls
 Document Class: IEEEtran 2015/08/26 V1.8b by Michael Shell
 -- See the "IEEEtran_HOWTO" manual for usage information.
 -- http://www.michaelshell.org/tex/ieeetran/
-\@IEEEtrantmpdimenA=\dimen148
-\@IEEEtrantmpdimenB=\dimen149
-\@IEEEtrantmpdimenC=\dimen150
-\@IEEEtrantmpcountA=\count275
-\@IEEEtrantmpcountB=\count276
-\@IEEEtrantmpcountC=\count277
+\@IEEEtrantmpdimenA=\dimen150
+\@IEEEtrantmpdimenB=\dimen151
+\@IEEEtrantmpdimenC=\dimen152
+\@IEEEtrantmpcountA=\count276
+\@IEEEtrantmpcountB=\count277
+\@IEEEtrantmpcountC=\count278
 \@IEEEtrantmptoksA=\toks17
 LaTeX Font Info:    Trying to load font information for OT1+ptm on input line 5
 03.
@@ -24,13 +24,13 @@ File: ot1ptm.fd 2001/06/04 font definitions for OT1/ptm.
 )
 -- Using 8.5in x 11in (letter) paper.
 -- Using PDF output.
-\@IEEEnormalsizeunitybaselineskip=\dimen151
+\@IEEEnormalsizeunitybaselineskip=\dimen153
 -- This is a 10 point document.
 LaTeX Encoding Info:    Redeclaring text command \textunderscore (encoding ?) o
 n input line 937.
-\CLASSINFOnormalsizebaselineskip=\dimen152
-\CLASSINFOnormalsizeunitybaselineskip=\dimen153
-\IEEEnormaljot=\dimen154
+\CLASSINFOnormalsizebaselineskip=\dimen154
+\CLASSINFOnormalsizeunitybaselineskip=\dimen155
+\IEEEnormaljot=\dimen156
 LaTeX Font Info:    Font shape `OT1/ptm/bx/n' in size <5> not available
 (Font)              Font shape `OT1/ptm/b/n' tried instead on input line 1090.
 LaTeX Font Info:    Font shape `OT1/ptm/bx/it' in size <5> not available
@@ -81,39 +81,39 @@ LaTeX Font Info:    Font shape `OT1/ptm/bx/n' in size <24> not available
 LaTeX Font Info:    Font shape `OT1/ptm/bx/it' in size <24> not available
 (Font)              Font shape `OT1/ptm/b/it' tried instead on input line 1090.
 
-\IEEEquantizedlength=\dimen155
-\IEEEquantizedlengthdiff=\dimen156
-\IEEEquantizedtextheightdiff=\dimen157
-\IEEEilabelindentA=\dimen158
-\IEEEilabelindentB=\dimen159
-\IEEEilabelindent=\dimen160
-\IEEEelabelindent=\dimen161
-\IEEEdlabelindent=\dimen162
-\IEEElabelindent=\dimen163
-\IEEEiednormlabelsep=\dimen164
-\IEEEiedmathlabelsep=\dimen165
+\IEEEquantizedlength=\dimen157
+\IEEEquantizedlengthdiff=\dimen158
+\IEEEquantizedtextheightdiff=\dimen159
+\IEEEilabelindentA=\dimen160
+\IEEEilabelindentB=\dimen161
+\IEEEilabelindent=\dimen162
+\IEEEelabelindent=\dimen163
+\IEEEdlabelindent=\dimen164
+\IEEElabelindent=\dimen165
+\IEEEiednormlabelsep=\dimen166
+\IEEEiedmathlabelsep=\dimen167
 \IEEEiedtopsep=\skip49
-\c@section=\count278
-\c@subsection=\count279
-\c@subsubsection=\count280
-\c@paragraph=\count281
-\c@IEEEsubequation=\count282
+\c@section=\count279
+\c@subsection=\count280
+\c@subsubsection=\count281
+\c@paragraph=\count282
+\c@IEEEsubequation=\count283
 \abovecaptionskip=\skip50
 \belowcaptionskip=\skip51
-\c@figure=\count283
-\c@table=\count284
-\@IEEEeqnnumcols=\count285
-\@IEEEeqncolcnt=\count286
-\@IEEEsubeqnnumrollback=\count287
-\@IEEEquantizeheightA=\dimen166
-\@IEEEquantizeheightB=\dimen167
-\@IEEEquantizeheightC=\dimen168
-\@IEEEquantizeprevdepth=\dimen169
-\@IEEEquantizemultiple=\count288
+\c@figure=\count284
+\c@table=\count285
+\@IEEEeqnnumcols=\count286
+\@IEEEeqncolcnt=\count287
+\@IEEEsubeqnnumrollback=\count288
+\@IEEEquantizeheightA=\dimen168
+\@IEEEquantizeheightB=\dimen169
+\@IEEEquantizeheightC=\dimen170
+\@IEEEquantizeprevdepth=\dimen171
+\@IEEEquantizemultiple=\count289
 \@IEEEquantizeboxA=\box53
-\@IEEEtmpitemindent=\dimen170
-\IEEEPARstartletwidth=\dimen171
-\c@IEEEbiography=\count289
+\@IEEEtmpitemindent=\dimen172
+\IEEEPARstartletwidth=\dimen173
+\c@IEEEbiography=\count290
 \@IEEEtranrubishbin=\box54
 )
 ** ATTENTION: Overriding command lockouts (line 8).
@@ -133,23 +133,23 @@ Package: amstext 2024/11/17 v2.01 AMS text
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/amsmath\amsgen.sty
 File: amsgen.sty 1999/11/30 v2.0 generic functions
 \@emptytoks=\toks18
-\ex@=\dimen172
+\ex@=\dimen174
 ))
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/amsmath\amsbsy.sty
 Package: amsbsy 1999/11/29 v1.2d Bold Symbols
-\pmbraise@=\dimen173
+\pmbraise@=\dimen175
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/amsmath\amsopn.sty
 Package: amsopn 2022/04/08 v2.04 operator names
 )
-\inf@bad=\count290
+\inf@bad=\count291
 LaTeX Info: Redefining \frac on input line 233.
-\uproot@=\count291
-\leftroot@=\count292
+\uproot@=\count292
+\leftroot@=\count293
 LaTeX Info: Redefining \overline on input line 398.
 LaTeX Info: Redefining \colon on input line 409.
-\classnum@=\count293
-\DOTSCASE@=\count294
+\classnum@=\count294
+\DOTSCASE@=\count295
 LaTeX Info: Redefining \ldots on input line 495.
 LaTeX Info: Redefining \dots on input line 498.
 LaTeX Info: Redefining \cdots on input line 619.
@@ -159,30 +159,30 @@ LaTeX Info: Redefining \big on input line 721.
 LaTeX Info: Redefining \Big on input line 722.
 LaTeX Info: Redefining \bigg on input line 723.
 LaTeX Info: Redefining \Bigg on input line 724.
-\big@size=\dimen174
+\big@size=\dimen176
 LaTeX Font Info:    Redeclaring font encoding OML on input line 742.
 LaTeX Font Info:    Redeclaring font encoding OMS on input line 743.
-\macc@depth=\count295
+\macc@depth=\count296
 LaTeX Info: Redefining \bmod on input line 904.
 LaTeX Info: Redefining \pmod on input line 909.
 LaTeX Info: Redefining \smash on input line 939.
 LaTeX Info: Redefining \relbar on input line 969.
 LaTeX Info: Redefining \Relbar on input line 970.
-\c@MaxMatrixCols=\count296
+\c@MaxMatrixCols=\count297
 \dotsspace@=\muskip17
-\c@parentequation=\count297
-\dspbrk@lvl=\count298
+\c@parentequation=\count298
+\dspbrk@lvl=\count299
 \tag@help=\toks19
-\row@=\count299
-\column@=\count300
-\maxfields@=\count301
+\row@=\count300
+\column@=\count301
+\maxfields@=\count302
 \andhelp@=\toks20
-\eqnshift@=\dimen175
-\alignsep@=\dimen176
-\tagshift@=\dimen177
-\tagwidth@=\dimen178
-\totwidth@=\dimen179
-\lineht@=\dimen180
+\eqnshift@=\dimen177
+\alignsep@=\dimen178
+\tagshift@=\dimen179
+\tagwidth@=\dimen180
+\totwidth@=\dimen181
+\lineht@=\dimen182
 \@envbody=\toks21
 \multlinegap=\skip53
 \multlinetaggap=\skip54
@@ -207,7 +207,7 @@ Package: algorithm 2009/08/24 v0.1 Document Style `algorithm' - floating enviro
 nment
  (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/float\float.sty
 Package: float 2001/11/08 v1.3d Float enhancements (AL)
-\c@float@type=\count302
+\c@float@type=\count303
 \float@exts=\toks23
 \float@box=\box57
 \@float@everytoks=\toks24
@@ -217,7 +217,7 @@ Package: float 2001/11/08 v1.3d Float enhancements (AL)
 Package: ifthen 2024/03/16 v1.1e Standard LaTeX ifthen package (DPC)
 )
 \@float@every@algorithm=\toks25
-\c@algorithm=\count303
+\c@algorithm=\count304
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/algorithmicx\algpseudoc
 ode.sty
@@ -228,15 +228,15 @@ cx.sty
 Package: algorithmicx 2005/04/27 v1.2 Algorithmicx
 
 Document Style algorithmicx 1.2 - a greatly improved `algorithmic' style
-\c@ALG@line=\count304
-\c@ALG@rem=\count305
-\c@ALG@nested=\count306
+\c@ALG@line=\count305
+\c@ALG@rem=\count306
+\c@ALG@nested=\count307
 \ALG@tlm=\skip55
 \ALG@thistlm=\skip56
-\c@ALG@Lnr=\count307
-\c@ALG@blocknr=\count308
-\c@ALG@storecount=\count309
-\c@ALG@tmpcounter=\count310
+\c@ALG@Lnr=\count308
+\c@ALG@blocknr=\count309
+\c@ALG@storecount=\count310
+\c@ALG@tmpcounter=\count311
 \ALG@tmplength=\skip57
 )
 Document Style - pseudocode environments for use with the `algorithmicx' style
@@ -261,28 +261,28 @@ Package graphics Info: Driver file: pdftex.def on input line 106.
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/graphics-def\pdftex.def
 File: pdftex.def 2025/09/29 v1.2d Graphics/color driver for pdftex
 ))
-\Gin@req@height=\dimen181
-\Gin@req@width=\dimen182
+\Gin@req@height=\dimen183
+\Gin@req@width=\dimen184
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/booktabs\booktabs.sty
 Package: booktabs 2020/01/12 v1.61803398 Publication quality tables
-\heavyrulewidth=\dimen183
-\lightrulewidth=\dimen184
-\cmidrulewidth=\dimen185
-\belowrulesep=\dimen186
-\belowbottomsep=\dimen187
-\aboverulesep=\dimen188
-\abovetopsep=\dimen189
-\cmidrulesep=\dimen190
-\cmidrulekern=\dimen191
-\defaultaddspace=\dimen192
-\@cmidla=\count311
-\@cmidlb=\count312
-\@aboverulesep=\dimen193
-\@belowrulesep=\dimen194
-\@thisruleclass=\count313
-\@lastruleclass=\count314
-\@thisrulewidth=\dimen195
+\heavyrulewidth=\dimen185
+\lightrulewidth=\dimen186
+\cmidrulewidth=\dimen187
+\belowrulesep=\dimen188
+\belowbottomsep=\dimen189
+\aboverulesep=\dimen190
+\abovetopsep=\dimen191
+\cmidrulesep=\dimen192
+\cmidrulekern=\dimen193
+\defaultaddspace=\dimen194
+\@cmidla=\count312
+\@cmidlb=\count313
+\@aboverulesep=\dimen195
+\@belowrulesep=\dimen196
+\@thisruleclass=\count314
+\@lastruleclass=\count315
+\@thisrulewidth=\dimen197
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/base\textcomp.sty
 Package: textcomp 2024/04/24 v2.1b Standard LaTeX package
@@ -313,8 +313,8 @@ y
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/utilities\pgfutil
 -common.tex
 \pgfutil@everybye=\toks27
-\pgfutil@tempdima=\dimen196
-\pgfutil@tempdimb=\dimen197
+\pgfutil@tempdima=\dimen198
+\pgfutil@tempdimb=\dimen199
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/utilities\pgfutil
 -latex.def
@@ -344,26 +344,26 @@ Package: pgfsys 2025-08-29 v3.1.11a (3.1.11a)
 libraryfiltered.code.tex
 \pgfkeys@tmptoks=\toks30
 ))
-\pgf@x=\dimen198
-\pgf@y=\dimen199
-\pgf@xa=\dimen256
-\pgf@ya=\dimen257
-\pgf@xb=\dimen258
-\pgf@yb=\dimen259
-\pgf@xc=\dimen260
-\pgf@yc=\dimen261
-\pgf@xd=\dimen262
-\pgf@yd=\dimen263
+\pgf@x=\dimen256
+\pgf@y=\dimen257
+\pgf@xa=\dimen258
+\pgf@ya=\dimen259
+\pgf@xb=\dimen260
+\pgf@yb=\dimen261
+\pgf@xc=\dimen262
+\pgf@yc=\dimen263
+\pgf@xd=\dimen264
+\pgf@yd=\dimen265
 \w@pgf@writea=\write3
 \r@pgf@reada=\read2
-\c@pgf@counta=\count315
-\c@pgf@countb=\count316
-\c@pgf@countc=\count317
-\c@pgf@countd=\count318
+\c@pgf@counta=\count316
+\c@pgf@countb=\count317
+\c@pgf@countc=\count318
+\c@pgf@countd=\count319
 \t@pgf@toka=\toks31
 \t@pgf@tokb=\toks32
 \t@pgf@tokc=\toks33
-\pgf@sys@id@count=\count319
+\pgf@sys@id@count=\count320
 
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/systemlayer\pgf.c
 fg
@@ -382,8 +382,8 @@ File: pgfsys-common-pdf.def 2025-08-29 v3.1.11a (3.1.11a)
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/systemlayer\pgfsy
 ssoftpath.code.tex
 File: pgfsyssoftpath.code.tex 2025-08-29 v3.1.11a (3.1.11a)
-\pgfsyssoftpath@smallbuffer@items=\count320
-\pgfsyssoftpath@bigbuffer@items=\count321
+\pgfsyssoftpath@smallbuffer@items=\count321
+\pgfsyssoftpath@bigbuffer@items=\count322
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/systemlayer\pgfsy
 sprotocol.code.tex
@@ -399,8 +399,8 @@ Package: pgfcore 2025-08-29 v3.1.11a (3.1.11a)
 code.tex)
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfmathparse
 r.code.tex
-\pgfmath@dimen=\dimen264
-\pgfmath@count=\count322
+\pgfmath@dimen=\dimen266
+\pgfmath@count=\count323
 \pgfmath@box=\box60
 \pgfmath@toks=\toks34
 \pgfmath@stack@operand=\toks35
@@ -428,39 +428,39 @@ ions.integerarithmetics.code.tex)
 code.tex)
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfmathfloat
 .code.tex
-\c@pgfmathroundto@lastzeros=\count323
+\c@pgfmathroundto@lastzeros=\count324
 ))
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfint.code.
 tex)
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclayer\pgfcor
 epoints.code.tex
 File: pgfcorepoints.code.tex 2025-08-29 v3.1.11a (3.1.11a)
-\pgf@picminx=\dimen265
-\pgf@picmaxx=\dimen266
-\pgf@picminy=\dimen267
-\pgf@picmaxy=\dimen268
-\pgf@pathminx=\dimen269
-\pgf@pathmaxx=\dimen270
-\pgf@pathminy=\dimen271
-\pgf@pathmaxy=\dimen272
-\pgf@xx=\dimen273
-\pgf@xy=\dimen274
-\pgf@yx=\dimen275
-\pgf@yy=\dimen276
-\pgf@zx=\dimen277
-\pgf@zy=\dimen278
+\pgf@picminx=\dimen267
+\pgf@picmaxx=\dimen268
+\pgf@picminy=\dimen269
+\pgf@picmaxy=\dimen270
+\pgf@pathminx=\dimen271
+\pgf@pathmaxx=\dimen272
+\pgf@pathminy=\dimen273
+\pgf@pathmaxy=\dimen274
+\pgf@xx=\dimen275
+\pgf@xy=\dimen276
+\pgf@yx=\dimen277
+\pgf@yy=\dimen278
+\pgf@zx=\dimen279
+\pgf@zy=\dimen280
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclayer\pgfcor
 epathconstruct.code.tex
 File: pgfcorepathconstruct.code.tex 2025-08-29 v3.1.11a (3.1.11a)
-\pgf@path@lastx=\dimen279
-\pgf@path@lasty=\dimen280
+\pgf@path@lastx=\dimen281
+\pgf@path@lasty=\dimen282
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclayer\pgfcor
 epathusage.code.tex
 File: pgfcorepathusage.code.tex 2025-08-29 v3.1.11a (3.1.11a)
-\pgf@shorten@end@additional=\dimen281
-\pgf@shorten@start@additional=\dimen282
+\pgf@shorten@end@additional=\dimen283
+\pgf@shorten@start@additional=\dimen284
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclayer\pgfcor
 escopes.code.tex
@@ -468,19 +468,19 @@ File: pgfcorescopes.code.tex 2025-08-29 v3.1.11a (3.1.11a)
 \pgfpic=\box61
 \pgf@hbox=\box62
 \pgf@layerbox@main=\box63
-\pgf@picture@serial@count=\count324
+\pgf@picture@serial@count=\count325
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclayer\pgfcor
 egraphicstate.code.tex
 File: pgfcoregraphicstate.code.tex 2025-08-29 v3.1.11a (3.1.11a)
-\pgflinewidth=\dimen283
+\pgflinewidth=\dimen285
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclayer\pgfcor
 etransformations.code.tex
 File: pgfcoretransformations.code.tex 2025-08-29 v3.1.11a (3.1.11a)
-\pgf@pt@x=\dimen284
-\pgf@pt@y=\dimen285
-\pgf@pt@temp=\dimen286
+\pgf@pt@x=\dimen286
+\pgf@pt@y=\dimen287
+\pgf@pt@temp=\dimen288
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclayer\pgfcor
 equick.code.tex
@@ -497,14 +497,14 @@ File: pgfcorepathprocessing.code.tex 2025-08-29 v3.1.11a (3.1.11a)
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclayer\pgfcor
 earrows.code.tex
 File: pgfcorearrows.code.tex 2025-08-29 v3.1.11a (3.1.11a)
-\pgfarrowsep=\dimen287
+\pgfarrowsep=\dimen289
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclayer\pgfcor
 eshade.code.tex
 File: pgfcoreshade.code.tex 2025-08-29 v3.1.11a (3.1.11a)
-\pgf@max=\dimen288
-\pgf@sys@shading@range@num=\count325
-\pgf@shadingcount=\count326
+\pgf@max=\dimen290
+\pgf@sys@shading@range@num=\count326
+\pgf@shadingcount=\count327
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclayer\pgfcor
 eimage.code.tex
@@ -543,8 +543,8 @@ File: pgfmoduleplot.code.tex 2025-08-29 v3.1.11a (3.1.11a)
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/pgf/compatibility\pgfco
 mp-version-0-65.sty
 Package: pgfcomp-version-0-65 2025-08-29 v3.1.11a (3.1.11a)
-\pgf@nodesepstart=\dimen289
-\pgf@nodesepend=\dimen290
+\pgf@nodesepstart=\dimen291
+\pgf@nodesepend=\dimen292
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/pgf/compatibility\pgfco
 mp-version-1-18.sty
@@ -562,8 +562,8 @@ ty
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/utilities\pgffor.
 code.tex
 Package: pgffor 2025-08-29 v3.1.11a (3.1.11a)
-\pgffor@iter=\dimen291
-\pgffor@skip=\dimen292
+\pgffor@iter=\dimen293
+\pgffor@skip=\dimen294
 \pgffor@stack=\toks37
 \pgffor@toks=\toks38
 ))
@@ -574,34 +574,34 @@ Package: tikz 2025-08-29 v3.1.11a (3.1.11a)
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries\pgflibr
 aryplothandlers.code.tex
 File: pgflibraryplothandlers.code.tex 2025-08-29 v3.1.11a (3.1.11a)
-\pgf@plot@mark@count=\count327
-\pgfplotmarksize=\dimen293
+\pgf@plot@mark@count=\count328
+\pgfplotmarksize=\dimen295
 )
-\tikz@lastx=\dimen294
-\tikz@lasty=\dimen295
-\tikz@lastxsaved=\dimen296
-\tikz@lastysaved=\dimen297
-\tikz@lastmovetox=\dimen298
-\tikz@lastmovetoy=\dimen299
-\tikzleveldistance=\dimen300
-\tikzsiblingdistance=\dimen301
+\tikz@lastx=\dimen296
+\tikz@lasty=\dimen297
+\tikz@lastxsaved=\dimen298
+\tikz@lastysaved=\dimen299
+\tikz@lastmovetox=\dimen300
+\tikz@lastmovetoy=\dimen301
+\tikzleveldistance=\dimen302
+\tikzsiblingdistance=\dimen303
 \tikz@figbox=\box66
 \tikz@figbox@bg=\box67
 \tikz@tempbox=\box68
 \tikz@tempbox@bg=\box69
-\tikztreelevel=\count328
-\tikznumberofchildren=\count329
-\tikznumberofcurrentchild=\count330
-\tikz@fig@count=\count331
+\tikztreelevel=\count329
+\tikznumberofchildren=\count330
+\tikznumberofcurrentchild=\count331
+\tikz@fig@count=\count332
 
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/modules\pgfmodule
 matrix.code.tex
 File: pgfmodulematrix.code.tex 2025-08-29 v3.1.11a (3.1.11a)
-\pgfmatrixcurrentrow=\count332
-\pgfmatrixcurrentcolumn=\count333
-\pgf@matrix@numberofcolumns=\count334
+\pgfmatrixcurrentrow=\count333
+\pgfmatrixcurrentcolumn=\count334
+\pgf@matrix@numberofcolumns=\count335
 )
-\tikz@expandcount=\count335
+\tikz@expandcount=\count336
 
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendlayer/tik
 z/libraries\tikzlibrarytopaths.code.tex
@@ -618,10 +618,10 @@ File: pgflibraryshapes.geometric.code.tex 2025-08-29 v3.1.11a (3.1.11a)
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries\pgflibr
 aryarrows.meta.code.tex
 File: pgflibraryarrows.meta.code.tex 2025-08-29 v3.1.11a (3.1.11a)
-\pgfarrowinset=\dimen302
-\pgfarrowlength=\dimen303
-\pgfarrowwidth=\dimen304
-\pgfarrowlinewidth=\dimen305
+\pgfarrowinset=\dimen304
+\pgfarrowlength=\dimen305
+\pgfarrowwidth=\dimen306
+\pgfarrowlinewidth=\dimen307
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendlayer/tik
 z/libraries\tikzlibrarypositioning.code.tex
@@ -638,7 +638,7 @@ File: tikzlibrarybackgrounds.code.tex 2025-08-29 v3.1.11a (3.1.11a)
 \pgf@layerboxsaved@background=\box71
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/hyperref\hyperref.sty
-Package: hyperref 2025-07-12 v7.01o Hypertext links for LaTeX
+Package: hyperref 2026-04-24 v7.01q Hypertext links for LaTeX
 
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/iftex\iftex.sty
 Package: iftex 2024/12/12 v1.0g TeX engine tests
@@ -674,7 +674,7 @@ Package pdftexcmds Info: \pdfdraftmode found.
 Package: hycolor 2020-01-27 v1.10 Color options for hyperref/bookmark (HO)
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/hyperref\nameref.sty
-Package: nameref 2025-06-21 v2.57 Cross-referencing by name of section
+Package: nameref 2026-01-29 v2.58 Cross-referencing by name of section
 
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/refcount\refcount.sty
 Package: refcount 2019/12/15 v3.6 Data extraction from label references (HO)
@@ -686,48 +686,48 @@ Package: gettitlestring 2019/12/15 v1.6 Cleanup title references (HO)
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/kvoptions\kvoptions.sty
 Package: kvoptions 2022-06-15 v3.15 Key value format for package options (HO)
 ))
-\c@section@level=\count336
+\c@section@level=\count337
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/etoolbox\etoolbox.sty
 Package: etoolbox 2025/10/02 v2.5m e-TeX tools for LaTeX (JAW)
-\etb@tempcnta=\count337
+\etb@tempcnta=\count338
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/stringenc\stringenc.s
 ty
 Package: stringenc 2019/11/29 v1.12 Convert strings between diff. encodings (HO
 )
 )
-\@linkdim=\dimen306
-\Hy@linkcounter=\count338
-\Hy@pagecounter=\count339
+\@linkdim=\dimen308
+\Hy@linkcounter=\count339
+\Hy@pagecounter=\count340
  (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/hyperref\pd1enc.def
-File: pd1enc.def 2025-07-12 v7.01o Hyperref: PDFDocEncoding definition (HO)
+File: pd1enc.def 2026-04-24 v7.01q Hyperref: PDFDocEncoding definition (HO)
 Now handling font encoding PD1 ...
 ... no UTF-8 mapping file for font encoding PD1
 ) (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/intcalc\intcalc.sty
 Package: intcalc 2019/12/15 v1.3 Expandable calculations with integers (HO)
 )
-\Hy@SavedSpaceFactor=\count340
+\Hy@SavedSpaceFactor=\count341
  (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/hyperref\puenc.def
-File: puenc.def 2025-07-12 v7.01o Hyperref: PDF Unicode definition (HO)
+File: puenc.def 2026-04-24 v7.01q Hyperref: PDF Unicode definition (HO)
 Now handling font encoding PU ...
 ... no UTF-8 mapping file for font encoding PU
 )
-Package hyperref Info: Hyper figures OFF on input line 4195.
-Package hyperref Info: Link nesting OFF on input line 4200.
-Package hyperref Info: Hyper index ON on input line 4203.
-Package hyperref Info: Plain pages OFF on input line 4210.
-Package hyperref Info: Backreferencing OFF on input line 4215.
+Package hyperref Info: Hyper figures OFF on input line 4199.
+Package hyperref Info: Link nesting OFF on input line 4204.
+Package hyperref Info: Hyper index ON on input line 4207.
+Package hyperref Info: Plain pages OFF on input line 4214.
+Package hyperref Info: Backreferencing OFF on input line 4219.
 Package hyperref Info: Implicit mode ON; LaTeX internals redefined.
-Package hyperref Info: Bookmarks ON on input line 4462.
-\c@Hy@tempcnt=\count341
+Package hyperref Info: Bookmarks ON on input line 4466.
+\c@Hy@tempcnt=\count342
 
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/url\url.sty
 \Urlmuskip=\muskip18
 Package: url 2013/09/16  ver 3.4  Verb mode for urls, etc.
 )
-LaTeX Info: Redefining \url on input line 4801.
-\XeTeXLinkMargin=\dimen307
+LaTeX Info: Redefining \url on input line 4805.
+\XeTeXLinkMargin=\dimen309
 
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/generic/bitset\bitset.sty
 Package: bitset 2019/12/09 v1.3 Handle bit-vector datatype (HO)
@@ -737,26 +737,26 @@ Package: bitset 2019/12/09 v1.3 Handle bit-vector datatype (HO)
 Package: bigintcalc 2019/12/15 v1.5 Expandable calculations on big integers (HO
 )
 ))
-\Fld@menulength=\count342
-\Field@Width=\dimen308
-\Fld@charsize=\dimen309
-Package hyperref Info: Hyper figures OFF on input line 6078.
-Package hyperref Info: Link nesting OFF on input line 6083.
-Package hyperref Info: Hyper index ON on input line 6086.
-Package hyperref Info: backreferencing OFF on input line 6093.
-Package hyperref Info: Link coloring OFF on input line 6098.
-Package hyperref Info: Link coloring with OCG OFF on input line 6103.
-Package hyperref Info: PDF/A mode OFF on input line 6108.
-\Hy@abspage=\count343
-\c@Item=\count344
-\c@Hfootnote=\count345
+\Fld@menulength=\count343
+\Field@Width=\dimen310
+\Fld@charsize=\dimen311
+Package hyperref Info: Hyper figures OFF on input line 6091.
+Package hyperref Info: Link nesting OFF on input line 6096.
+Package hyperref Info: Hyper index ON on input line 6099.
+Package hyperref Info: backreferencing OFF on input line 6106.
+Package hyperref Info: Link coloring OFF on input line 6111.
+Package hyperref Info: Link coloring with OCG OFF on input line 6116.
+Package hyperref Info: PDF/A mode OFF on input line 6121.
+\Hy@abspage=\count344
+\c@Item=\count345
+\c@Hfootnote=\count346
 )
 Package hyperref Info: Driver (autodetected): hpdftex.
 
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/hyperref\hpdftex.def
-File: hpdftex.def 2025-07-12 v7.01o Hyperref driver for pdfTeX
-\Fld@listcount=\count346
-\c@bookmark@seq@number=\count347
+File: hpdftex.def 2026-04-24 v7.01q Hyperref driver for pdfTeX
+\Fld@listcount=\count347
+\c@bookmark@seq@number=\count348
 
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/rerunfilecheck\rerunfil
 echeck.sty
@@ -775,16 +775,16 @@ Package uniquecounter Info: New unique counter `rerunfilecheck' on input line 2
 Package: microtype 2026/03/01 v3.2d Micro-typographical refinements (RS)
 \MT@toks=\toks39
 \MT@tempbox=\box72
-\MT@count=\count348
+\MT@count=\count349
 LaTeX Info: Redefining \noprotrusionifhmode on input line 1084.
 LaTeX Info: Redefining \leftprotrusion on input line 1085.
 \MT@prot@toks=\toks40
 LaTeX Info: Redefining \rightprotrusion on input line 1104.
 LaTeX Info: Redefining \textls on input line 1449.
-\MT@outer@kern=\dimen310
+\MT@outer@kern=\dimen312
 LaTeX Info: Redefining \microtypecontext on input line 2053.
 LaTeX Info: Redefining \textmicrotypecontext on input line 2070.
-\MT@listname@count=\count349
+\MT@listname@count=\count350
 
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/microtype\microtype-pdf
 tex.def
@@ -803,8 +803,8 @@ LaTeX Info: Redefining \microtypesetup on input line 3065.
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/l3backend\l3backend-pdf
 tex.def
-File: l3backend-pdftex.def 2025-10-09 L3 backend support: PDF output (pdfTeX)
-\l__color_backend_stack_int=\count350
+File: l3backend-pdftex.def 2026-02-18 L3 backend support: PDF output (pdfTeX)
+\l__color_backend_stack_int=\count351
 ) (report_contribution.aux)
 \openout1 = `report_contribution.aux'.
 
@@ -832,16 +832,16 @@ LaTeX Font Info:    ... okay on input line 43.
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/context/base/mkii\supp-pdf.mk
 ii
 [Loading MPS to PDF converter (version 2006.09.02).]
-\scratchcounter=\count351
-\scratchdimen=\dimen311
+\scratchcounter=\count352
+\scratchdimen=\dimen313
 \scratchbox=\box73
-\nofMPsegments=\count352
-\nofMParguments=\count353
+\nofMPsegments=\count353
+\nofMParguments=\count354
 \everyMPshowfont=\toks41
-\MPscratchCnt=\count354
-\MPscratchDim=\dimen312
-\MPnumerator=\count355
-\makeMPintoPDFobject=\count356
+\MPscratchCnt=\count355
+\MPscratchDim=\dimen314
+\MPnumerator=\count356
+\makeMPintoPDFobject=\count357
 \everyMPtoPDFconversion=\toks42
 )
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/epstopdf-pkg\epstopdf-b
@@ -880,6 +880,12 @@ Package microtype Info: No adjustment of character kerning.
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/microtype\mt-ptm.cfg
 File: mt-ptm.cfg 2006/04/20 v1.7 microtype config. file: Times (RS)
 )
+LaTeX Font Info:    Trying to load font information for OT1+pcr on input line 7
+7.
+
+(C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/psnfss\ot1pcr.fd
+File: ot1pcr.fd 2001/06/04 font definitions for OT1/pcr.
+)
 Overfull \hbox (1.1931pt too wide) in paragraph at lines 63--83
 \OT1/ptm/b/n/9 (-20) free end-to-end de-tec-tor (YOLOv8 [[]2[]] re-tained as le
 gacy fallback)---
@@ -907,251 +913,283 @@ File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/microtype\mt-msb.cfg
 File: mt-msb.cfg 2005/06/01 v1.0 microtype config. file: AMS symbols (b) (RS)
 )
-LaTeX Font Info:    Trying to load font information for OT1+pcr on input line 1
-17.
-
-(C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/psnfss\ot1pcr.fd
-File: ot1pcr.fd 2001/06/04 font definitions for OT1/pcr.
-)
 [1{C:/Users/dksal/AppData/Local/MiKTeX/fonts/map/pdftex/pdftex.map}{C:/Users/dk
 sal/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/base/8r.enc}
 
 
 ]
-<img/cctv_map.png, id=122, 1443.89438pt x 679.78969pt>
+<img/cctv_map.png, id=120, 1443.89438pt x 679.78969pt>
 File: img/cctv_map.png Graphic file (type png)
 <use img/cctv_map.png>
-Package pdftex.def Info: img/cctv_map.png  used on input line 238.
+Package pdftex.def Info: img/cctv_map.png  used on input line 240.
 (pdftex.def)             Requested size: 252.0pt x 118.63304pt.
-<img/yolo_detect.png, id=125, 536.75531pt x 355.3275pt>
+<img/yolo_detect.png, id=123, 536.75531pt x 355.3275pt>
 File: img/yolo_detect.png Graphic file (type png)
 <use img/yolo_detect.png>
-Package pdftex.def Info: img/yolo_detect.png  used on input line 262.
+Package pdftex.def Info: img/yolo_detect.png  used on input line 264.
 (pdftex.def)             Requested size: 252.0pt x 166.8196pt.
 Package hyperref Info: bookmark level for unknown algorithm defaults to 0 on in
-put line 286.
+put line 288.
  [2]
-<img/auto_calib.png, id=151, 536.75531pt x 437.38406pt>
+<img/auto_calib.png, id=152, 536.75531pt x 437.38406pt>
 File: img/auto_calib.png Graphic file (type png)
 <use img/auto_calib.png>
-Package pdftex.def Info: img/auto_calib.png  used on input line 324.
+Package pdftex.def Info: img/auto_calib.png  used on input line 326.
 (pdftex.def)             Requested size: 252.0pt x 205.34361pt.
  [3 <./img/cctv_map.png> <./img/yolo_detect.png> <./img/auto_calib.png>]
-<img/congestion_map.png, id=164, 454.69875pt x 454.69875pt>
+<img/congestion_map.png, id=167, 454.69875pt x 454.69875pt>
 File: img/congestion_map.png Graphic file (type png)
 <use img/congestion_map.png>
-Package pdftex.def Info: img/congestion_map.png  used on input line 420.
+Package pdftex.def Info: img/congestion_map.png  used on input line 425.
 (pdftex.def)             Requested size: 252.0pt x 252.0pt.
-
-Underfull \hbox (badness 1484) in paragraph at lines 444--451
+ [4 <./img/congestion_map.png>]
+Underfull \hbox (badness 1484) in paragraph at lines 450--457
 \OT1/ptm/m/n/10 (+20) ing, speed, and de-tec-tion statis-tics and flushes \OT1/
 pcr/m/n/10 eval_
  []
 
 
-Underfull \hbox (badness 2165) in paragraph at lines 444--451
-\OT1/ptm/m/n/10 (+20) de-mand via \OT1/pcr/m/n/10 GET /eval/report\OT1/ptm/m/n/
-10 (+20) ); an of-fline har-ness
+Underfull \hbox (badness 7081) in paragraph at lines 450--457
+\OT1/pcr/m/n/10 *.csv \OT1/ptm/m/n/10 (+20) and \OT1/pcr/m/n/10 eval_summary.js
+on \OT1/ptm/m/n/10 (+20) ev-ery 30s (also
  []
 
-[4 <./img/congestion_map.png>]
-Overfull \hbox (14.9604pt too wide) in paragraph at lines 508--517
+
+Underfull \hbox (badness 1721) in paragraph at lines 450--457
+\OT1/ptm/m/n/10 (+20) on de-mand via \OT1/pcr/m/n/10 GET /eval/report\OT1/ptm/m
+/n/10 (+20) ); an of-fline har-
+ []
+
+
+Underfull \hbox (badness 4569) in paragraph at lines 450--457
+\OT1/ptm/m/n/10 (+20) ness (\OT1/pcr/m/n/10 backend/evaluate.py\OT1/ptm/m/n/10 
+(+20) ) re-pro-duces the same
+ []
+
+
+Underfull \hbox (badness 4096) in paragraph at lines 450--457
+\OT1/ptm/m/n/10 (+20) met-rics over a fixed clip for con-trolled bench-marks.
+ []
+
+
+Underfull \hbox (badness 5563) in paragraph at lines 450--457
+\OT1/ptm/m/n/10 (+20) The sys-tem auto-selects the in-fer-ence back-end (Ten-
+ []
+
+
+Underfull \hbox (badness 3189) in paragraph at lines 458--461
+[]\OT1/ptm/m/it/10 (+20) Setup: \OT1/ptm/m/n/10 (+20) model \OT1/pcr/m/n/10 YOL
+O26m\OT1/ptm/m/n/10 (+20) , back-end \OT1/pcr/m/n/10 TensorRT \OT1/ptm/m/n/10 (
++20) (auto-
+ []
+
+
+Overfull \hbox (49.67746pt too wide) in paragraph at lines 487--511
  [][] 
  []
 
 
-Overfull \hbox (0.90376pt too wide) in paragraph at lines 545--557
+Overfull \hbox (62.72313pt too wide) in paragraph at lines 527--535
+ [][] 
+ []
+
+
+Overfull \hbox (0.90376pt too wide) in paragraph at lines 574--586
 \OT1/ptm/m/n/10 (-20) low il-lu-mi-na-tion, rain, lens con-tam-i-na-tion, and h
 ard-ware faults---
  []
 
 [5]
-Underfull \hbox (badness 7944) in paragraph at lines 604--611
+Underfull \hbox (badness 7944) in paragraph at lines 634--641
 []\OT1/ptm/m/it/10 (+20) BoxMOT in-te-gra-tion and tracker-tier ar-chi-tec-ture
 
  []
 
 
-Underfull \hbox (badness 1852) in paragraph at lines 604--611
+Underfull \hbox (badness 1852) in paragraph at lines 634--641
 \OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 detector.py\OT1/ptm/m/n/10 (+20) , \OT1/
 pcr/m/n/10 model_setup.py\OT1/ptm/m/n/10 (+20) ): added multi-
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 620--626
+Underfull \hbox (badness 10000) in paragraph at lines 650--656
 []\OT1/ptm/m/it/10 (+20) CCTV-based speed es-ti-ma-tor \OT1/ptm/m/n/10 (+20) (\
 OT1/pcr/m/n/10 analytics.py:_
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 620--626
+Underfull \hbox (badness 10000) in paragraph at lines 650--656
 \OT1/pcr/m/n/10 speed\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 main.py:_speed_tim
 estamp_ms\OT1/ptm/m/n/10 (+20) ):
  []
 
 
-Underfull \hbox (badness 2119) in paragraph at lines 620--626
+Underfull \hbox (badness 2119) in paragraph at lines 650--656
 \OT1/ptm/m/n/10 (+20) re-placed the naive dis-tance/time for-mula with the
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 630--634
+Underfull \hbox (badness 10000) in paragraph at lines 660--664
 []\OT1/ptm/m/it/10 (+20) ID-based track-ing ac-cu-racy \OT1/ptm/m/n/10 (+20) (\
 OT1/pcr/m/n/10 detector.py\OT1/ptm/m/n/10 (+20) ):
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 641--647
+Underfull \hbox (badness 10000) in paragraph at lines 671--677
 []\OT1/ptm/m/it/10 (+20) UI, i18n, and eval-u-a-tion har-ness \OT1/ptm/m/n/10 (
 +20) (fron-tend,
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 641--647
+Underfull \hbox (badness 10000) in paragraph at lines 671--677
 \OT1/pcr/m/n/10 evaluate.py\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 metrics.py\O
 T1/ptm/m/n/10 (+20) ): an-a-lyt-ics pan-els,
  []
 
 
-Underfull \hbox (badness 5924) in paragraph at lines 641--647
+Underfull \hbox (badness 5924) in paragraph at lines 671--677
 \OT1/pcr/m/n/10 CctvPlayer.jsx\OT1/ptm/m/n/10 (+20) , and the of-fline mea-sure
 -ment
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 647--652
+Underfull \hbox (badness 10000) in paragraph at lines 677--682
 []\OT1/ptm/m/it/10 (+20) Movement-vector di-rec-tion clas-si-fi-ca-tion
  []
 
 
-Underfull \vbox (badness 10000) has occurred while \output is active []
+Underfull \vbox (badness 4543) has occurred while \output is active []
 
  [6]
-Underfull \hbox (badness 3029) in paragraph at lines 676--685
+Underfull \hbox (badness 3029) in paragraph at lines 706--715
 []\OT1/ptm/b/n/10 (+20) Evidence. \OT1/pcr/m/n/10 detector.py \OT1/ptm/m/n/10 (
 +20) (\OT1/pcr/m/n/10 IDStabilizer\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 track
 \OT1/ptm/m/n/10 (+20) ,
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 676--685
+Underfull \hbox (badness 10000) in paragraph at lines 706--715
 \OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 _speed\OT1/ptm/m/n/10 (+20) , dwell/LOS,
  \OT1/pcr/m/n/10 _assign_directions\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 _
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 676--685
+Underfull \hbox (badness 10000) in paragraph at lines 706--715
 \OT1/pcr/m/n/10 smooth_positions\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 _apply_
 lane_offset\OT1/ptm/m/n/10 (+20) );
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 676--685
+Underfull \hbox (badness 10000) in paragraph at lines 706--715
 \OT1/pcr/m/n/10 main.py \OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 live_loop\OT1/pt
 m/m/n/10 (+20) , \OT1/pcr/m/n/10 _speed_timestamp_ms\OT1/ptm/m/n/10 (+20) ,
  []
 
 
-Underfull \hbox (badness 6461) in paragraph at lines 695--699
+Underfull \hbox (badness 6461) in paragraph at lines 725--729
 \OT1/ptm/m/n/10 (+20) the ini-tial \OT1/pcr/m/n/10 VehicleTracker \OT1/ptm/m/n/
 10 (+20) with a hor-i-zon-tal
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 699--706
+Underfull \hbox (badness 10000) in paragraph at lines 729--736
 []\OT1/ptm/m/it/10 (+20) Auto-calibration pipeline (full de-vel-op-ment)
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 699--706
+Underfull \hbox (badness 10000) in paragraph at lines 729--736
 \OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 transform.py\OT1/ptm/m/n/10 (+20) , \OT1
 /pcr/m/n/10 camera_pose.py\OT1/ptm/m/n/10 (+20) ): evolved
  []
 
 
-Underfull \hbox (badness 5771) in paragraph at lines 699--706
+Underfull \hbox (badness 5771) in paragraph at lines 729--736
 \OT1/ptm/m/n/10 (+20) cur-rent road-model pose solver---a four-parameter
  []
 
 
-Underfull \hbox (badness 2173) in paragraph at lines 699--706
+Underfull \hbox (badness 2173) in paragraph at lines 729--736
 \OT1/ptm/m/n/10 (+20) pin-hole fit ($\OML/cmm/m/it/10 H$\OT1/ptm/m/n/10 (+20) ,
  pitch, yaw, lat-eral off-set $\OML/cmm/m/it/10 x[]$\OT1/ptm/m/n/10 (+20) ) via
 
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 706--712
-[]\OT1/ptm/m/it/10 (+20) ITS speed-based auto-calibration loop
+Underfull \hbox (badness 10000) in paragraph at lines 736--744
+[]\OT1/ptm/m/it/10 (+20) Per-camera scale cor-rec-tion loop
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 706--712
+Underfull \hbox (badness 10000) in paragraph at lines 736--744
 \OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 analytics.py:calibrate_from_its\OT1/ptm/
 m/n/10 (+20) ):
  []
 
 
-Underfull \hbox (badness 1968) in paragraph at lines 706--712
-\OT1/pcr/m/n/10 speed_scale\OT1/ptm/m/n/10 (+20) , with con-ver-gence de-tec-ti
-on and a
+Underfull \hbox (badness 5374) in paragraph at lines 736--744
+\OT1/ptm/m/n/10 (+20) adap-ta-tion ($\OML/cmm/m/it/10 []\OT1/cmr/m/n/10 0\OML/
+cmm/m/it/10 :\OT1/cmr/m/n/10 99$\OT1/ptm/m/n/10 (+20) ) to han-dle ITS mea-sure
+-ment
  []
 
 
-Underfull \hbox (badness 4254) in paragraph at lines 712--718
+Underfull \hbox (badness 4254) in paragraph at lines 744--750
 \OT1/pcr/m/n/10 osm.py\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 transform.py\OT1/
 ptm/m/n/10 (+20) ): iden-ti-fied the MOCT
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 718--722
+Underfull \hbox (badness 10000) in paragraph at lines 750--754
 []\OT1/ptm/m/it/10 (+20) Two-stage curved pixel$\OMS/cmsy/m/n/10 !$\OT1/ptm/m/i
 t/10 (+20) GPS trans-form
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 718--722
+Underfull \hbox (badness 10000) in paragraph at lines 750--754
 \OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 transform.py:_pixel_to_gps_curved\OT1/pt
 m/m/n/10 (+20) ):
  []
 
 
-Underfull \hbox (badness 4229) in paragraph at lines 718--722
+Underfull \hbox (badness 4229) in paragraph at lines 750--754
 \OT1/ptm/m/n/10 (+20) arc-length in-ter-po-la-tion along the road cen-tre-line,
 
  []
 
 
-Underfull \hbox (badness 1810) in paragraph at lines 730--736
+Underfull \hbox (badness 1810) in paragraph at lines 762--768
 \OT1/pcr/m/n/10 CalibrationMode.jsx\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 Cctv
 Player.jsx \OT1/ptm/m/n/10 (+20) cal-i-
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 746--755
+Underfull \vbox (badness 10000) has occurred while \output is active []
+
+ [7]
+Underfull \hbox (badness 10000) in paragraph at lines 780--789
 []\OT1/ptm/b/n/10 (+20) Evidence. \OT1/pcr/m/n/10 tracker.py \OT1/ptm/m/n/10 (+
 20) (\OT1/pcr/m/n/10 VehicleTracker\OT1/ptm/m/n/10 (+20) ,
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 746--755
+Underfull \hbox (badness 10000) in paragraph at lines 780--789
 \OT1/pcr/m/n/10 to_corners\OT1/ptm/m/n/10 (+20) ); \OT1/pcr/m/n/10 transform.py
  \OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 _pixel_to_gps_
  []
 
 
-Underfull \hbox (badness 6236) in paragraph at lines 746--755
+Underfull \hbox (badness 6236) in paragraph at lines 780--789
 \OT1/pcr/m/n/10 curved\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 auto_calibrate_fr
 om_frame\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 update_
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 746--755
+Underfull \hbox (badness 10000) in paragraph at lines 780--789
 \OT1/pcr/m/n/10 from_calibration\OT1/ptm/m/n/10 (+20) ); \OT1/pcr/m/n/10 analyt
 ics.py:calibrate_
  []
 
-(report_contribution.bbl [7])
+(report_contribution.bbl)
 
 ** Conference Paper **
 Before submitting the final camera ready copy, remember to:
@@ -1168,41 +1206,44 @@ Before submitting the final camera ready copy, remember to:
 ] (report_contribution.aux)
  ***********
 LaTeX2e <2025-11-01>
-L3 programming layer <2025-12-24>
+L3 programming layer <2026-04-28>
  ***********
 Package rerunfilecheck Info: File `report_contribution.out' has not changed.
-(rerunfilecheck)             Checksum: 6C9AEFEFE2DF935328D523397231443E;2952.
+(rerunfilecheck)             Checksum: F86852B8BA4CFD6A7F54BA44636A9E84;2975.
  ) 
 Here is how much of TeX's memory you used:
- 25463 strings out of 467871
- 475880 string characters out of 5418377
- 918973 words of memory out of 5000000
- 53507 multiletter control sequences out of 15000+600000
- 691358 words of font info for 363 fonts, out of 8000000 for 9000
+ 25495 strings out of 467683
+ 477498 string characters out of 5414722
+ 923796 words of memory out of 5000000
+ 53731 multiletter control sequences out of 15000+600000
+ 690435 words of font info for 362 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 84i,12n,94p,1018b,814s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 84i,12n,94p,1018b,810s stack positions out of 10000i,1000n,20000p,200000b,200000s
 <C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/
 cmmi10.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/ams
 fonts/cm/cmmi6.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/pu
 blic/amsfonts/cm/cmmi7.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/
-type1/public/amsfonts/cm/cmmi9.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTe
-X/fonts/type1/public/amsfonts/cm/cmr10.pfb><C:/Users/dksal/AppData/Local/Progra
-ms/MiKTeX/fonts/type1/public/amsfonts/cm/cmr6.pfb><C:/Users/dksal/AppData/Local
-/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/cmr7.pfb><C:/Users/dksal/AppDat
-a/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/cmr9.pfb><C:/Users/dksal
-/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/cmsy10.pfb><C:/Us
-ers/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/cmsy7.pf
+type1/public/amsfonts/cm/cmmi8.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTe
+X/fonts/type1/public/amsfonts/cm/cmmi9.pfb><C:/Users/dksal/AppData/Local/Progra
+ms/MiKTeX/fonts/type1/public/amsfonts/cm/cmr10.pfb><C:/Users/dksal/AppData/Loca
+l/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/cmr6.pfb><C:/Users/dksal/AppDa
+ta/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/cmr7.pfb><C:/Users/dksa
+l/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/cmr9.pfb><C:/Use
+rs/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/cmsy10.pf
 b><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/
-cmsy9.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/courier
-/ucrb8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/couri
-er/ucrr8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/tim
-es/utmb8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/tim
-es/utmbi8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/ti
-mes/utmr8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/urw/ti
-mes/utmri8a.pfb>
-Output written on report_contribution.pdf (8 pages, 2141407 bytes).
+cmsy6.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsf
+onts/cm/cmsy7.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/pub
+lic/amsfonts/cm/cmsy8.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/t
+ype1/public/amsfonts/cm/cmsy9.pfb><C:/Users/dksal/AppData/Local/Programs/MiKTeX
+/fonts/type1/urw/courier/ucrb8a.pfb><C:/Users/dksal/AppData/Local/Programs/MiKT
+eX/fonts/type1/urw/courier/ucrr8a.pfb><C:/Users/dksal/AppData/Local/Programs/Mi
+KTeX/fonts/type1/urw/times/utmb8a.pfb><C:/Users/dksal/AppData/Local/Programs/Mi
+KTeX/fonts/type1/urw/times/utmbi8a.pfb><C:/Users/dksal/AppData/Local/Programs/M
+iKTeX/fonts/type1/urw/times/utmr8a.pfb><C:/Users/dksal/AppData/Local/Programs/M
+iKTeX/fonts/type1/urw/times/utmri8a.pfb>
+Output written on report_contribution.pdf (8 pages, 2170183 bytes).
 PDF statistics:
- 315 PDF objects out of 1000 (max. 8388607)
+ 334 PDF objects out of 1000 (max. 8388607)
  57 named destinations out of 1000 (max. 500000)
- 74409 words of extra memory for PDF output out of 89155 (max. 10000000)
+ 70825 words of extra memory for PDF output out of 74296 (max. 10000000)
 

@@ -63,7 +63,7 @@ dahyun.kwon@stonybrook.edu}
 \begin{abstract}
 We present a real-time traffic digital twin that converts live public CCTV feeds
 into an interactive, map-anchored view of road traffic. From a single clicked
-camera the system streams HLS video, detects vehicles with YOLO26~\cite{yolo26}---an NMS-free end-to-end detector
+camera the system streams HLS video, detects vehicles with Ultralytics YOLO26~\cite{yolo26}---an NMS-free end-to-end detector
 (YOLOv8~\cite{yolov8} retained as legacy fallback)---tracks them
 with a pluggable multi-object tracker (BoxMOT), and converts each vehicle's pixel
 position to a geographic coordinate through a perspective homography. Because
@@ -284,8 +284,11 @@ recover the true road centre. The chosen road's speed limit, lane count, and wid
 Overpass provides a width refinement when available.
 
 Given the centreline, the \emph{two-stage curved transform} maps a pixel
-$(u,v)$ to GPS along the road (Algorithm~\ref{alg:curved}): stage one maps the pixel
-to local metres via the metric homography; stage two decomposes the displacement
+$(u,v)$ to GPS along the road (Algorithm~\ref{alg:curved}).
+The metric homography $H_m$ is derived from the same four image--GPS
+correspondences as the GPS homography, but maps pixel coordinates to local
+ENU metres rather than geographic coordinates.
+Stage one maps the pixel to local metres via $H_m$; stage two decomposes the displacement
 from the snap point into along-road and lateral components, advances that arc length
 along the centreline, interpolates the on-road position, and re-applies the lateral
 offset perpendicular to the \emph{local} road bearing. This follows real road
@@ -295,7 +298,8 @@ curvature, unlike a single flat homography.
 \caption{Two-stage curved pixel$\to$GPS transform}
 \label{alg:curved}
 \begin{algorithmic}[1]
-\Require pixel $(u,v)$; metric homography $H_m$; centreline \textit{road\_pts};
+\Require pixel $(u,v)$; metric homography $H_m$; snap point $p_m$ (ENU\,m);
+         road bearing $b$ at snap; centreline \textit{road\_pts};
          \textit{snap\_along}; direction sign $s$
 \State $(x_m,y_m) \gets H_m \cdot (u,v)$
 \State $(dx,dy) \gets (x_m,y_m) - \textit{snap}_m$ \Comment{ENU from snap}
@@ -400,7 +404,7 @@ Cluster $\varepsilon$ & 500\,m (haversine) \\
 The absolute distance scale of an uncalibrated camera is unknowable from geometry
 alone, so a residual scale error persists after geometric calibration. The system
 maintains a per-camera \texttt{speed\_scale} factor that multiplies the geometric
-speed estimate (Algorithm~\ref{alg:speed}, line~5) and is updated online using the
+speed estimate (Algorithm~\ref{alg:speed}, line~6) and is updated online using the
 ITS official segment speed as a soft reference. The ITS signal carries inherent
 uncertainty---aggregated over $\approx$1\,km segments at 5-minute intervals, the
 reported direction may not match the camera's field of view---so the loop adapts
@@ -409,9 +413,10 @@ slowly:
 \textit{target} = \textit{scale}\cdot \frac{v_\text{ITS}}{\bar v_\text{ours}},\quad
 \textit{scale} \gets \alpha\,\textit{scale} + (1{-}\alpha)\,\textit{target},
 \end{equation}
-with $\alpha{=}0.99$, clamped to $[0.3,5.0]$, using a 10-minute rolling average
-($\ge$50 samples) and a coefficient-of-variation guard ($\le$0.4) to skip volatile
-traffic. The factor persists per camera and accumulates across sessions without
+with $\alpha{=}0.99$, clamped to $[0.3,5.0]$, using a 10-minute rolling window
+of continuous, per-frame speed observations, requiring at least 50 frames with
+valid vehicle detections to trigger the correction, and a coefficient-of-variation
+guard ($\le$0.4) to skip volatile traffic. The factor persists per camera and accumulates across sessions without
 resetting the geometric calibration. The slow rate means convergence requires extended
 operation; in the current deployment the factor captures geometric projection bias
 and serves as a running estimate rather than a converged ITS-validated correction
@@ -474,38 +479,62 @@ TensorRT\,10.16, ONNX\,Runtime\,1.25, Windows\,11. Absolute latency and FPS are
 hardware-specific; the relative ordering across tiers and backends is the
 transferable result.
 
-\textit{Run conditions.} Model \texttt{YOLO26m}, backend \texttt{TensorRT}
-(auto-selected), tracker \texttt{BotSort} (medium tier, $\ge$6\,GB VRAM),
-source: Goyang Jugyo Underpass, National Rd.\,39 (live ITS HLS),
-4{,}559 frames (935.9\,s). Speed and vehicle-count observations in
-Tables~\ref{tab:track} are single-session figures that reflect the specific
-camera, time of day, and traffic conditions at the time of measurement; they
-are included to confirm the pipeline produces plausible output, not as
-ground-truth benchmarks.
+\textit{Run conditions.} Model \texttt{YOLO26m}, source: National Route\,6
+Namyangju Dongmakgol Intersection (live ITS HLS, nighttime), 1{,}000 frames
+per run (20-frame warmup excluded). Backend and tracker are varied across runs
+as shown in Tables~\ref{tab:latency} and~\ref{tab:tracker}; all other
+conditions are held constant. Speed and vehicle-count figures in
+Table~\ref{tab:track} are from the TensorRT\,+\,OC-SORT run and reflect
+nighttime traffic at this specific location; they are included to confirm the
+pipeline produces plausible output, not as ground-truth benchmarks.
 
 \begin{table}[t]
-\caption{Per-stage latency (ms) and throughput (4{,}559-frame eval run,
-RTX\,4070 Laptop + TensorRT\,10.16 + BotSort). Figures are hardware-specific.}
+\caption{Inference backend comparison (OC-SORT tracker fixed, 1{,}000 frames,
+RTX\,4070 Laptop). Track stage includes YOLO\,+\,BoxMOT end-to-end.}
 \label{tab:latency}
 \centering
 \small
-\begin{tabular}{@{}lccc@{}}
+\begin{tabular}{@{}lrrr@{}}
 \toprule
-Stage & Mean & Median & p95 \\
+Backend & Mean\,(ms) & p95\,(ms) & FPS \\
 \midrule
-YOLO (isolated)        & \multicolumn{3}{c}{fused into Track stage (TensorRT)} \\
-Track (YOLO+BotSort)   & 31.1 & 27.5 & 46.8 \\
-Transform              &  0.09 &  0.08 &  0.20 \\
-Analytics              &  0.18 &  0.16 &  0.38 \\
-\textbf{End-to-end}    & \textbf{31.3} & \textbf{27.7} & \textbf{47.2} \\
-\midrule
-\multicolumn{4}{@{}l}{\textbf{Throughput}: 31.9 FPS} \\
+TensorRT FP16  &  6.7 &  8.7 & 147.6 \\
+PyTorch (CUDA) &  8.4 & 11.6 & 117.6 \\
+ONNX Runtime   & 13.9 & 16.8 &  71.5 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[t]
-\caption{Tracking stability, speed distribution, and detection breakdown (eval run).}
+\caption{Tracker comparison (TensorRT FP16 backend fixed, 1{,}000 frames).
+BoT-SORT overhead is from OSNet appearance ReID; ByteTrack shows more ID
+creation events due to the absence of re-identification.}
+\label{tab:tracker}
+\centering
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Tracker & Mean\,(ms) & FPS & Uniq.\,IDs & ID\,events & Mean\,life\,(fr.) \\
+\midrule
+ByteTrack &  6.6 & 150.9 & 27 & 286 &  35.6 \\
+OC-SORT   &  6.6 & 150.2 &  8 &  18 &  80.0 \\
+BoT-SORT  & 10.7 &  93.4 &  5 &  16 & 132.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+TensorRT FP16 achieves the lowest latency (6.7\,ms mean), 2.1$\times$ faster
+than ONNX Runtime and 1.25$\times$ faster than PyTorch on the same GPU.
+ByteTrack and OC-SORT are iso-latency ($\approx$6.6\,ms), but OC-SORT's
+occlusion-centric cost function reduces ID creation events from 286 to 18
+and more than doubles mean track lifetime (35.6\,$\to$\,80.0 frames); BoT-SORT
+adds OSNet ReID, further reducing ID events to 16 and improving lifetime to
+132.0 frames at the cost of 1.6$\times$ higher latency (10.7\,ms) and a
+wider p95 (18.5\,ms vs 8.9\,ms).
+
+\begin{table}[t]
+\caption{Tracking stability, speed distribution, and detection breakdown
+(TensorRT\,+\,OC-SORT run, 1{,}000 frames, nighttime).}
 \label{tab:track}
 \centering
 \small
@@ -513,24 +542,23 @@ Analytics              &  0.18 &  0.16 &  0.38 \\
 \toprule
 Metric & Value \\
 \midrule
-Frames processed              & 4{,}559 \\
-Unique tracks                 & 328 \\
-Track creation events (re-entries + re-acquisitions) & 683 (2.08$\times$ unique tracks) \\
-Mean track lifetime (frames)  & 73.9 \\
-Median track lifetime (frames) & 61.0 \\
-Max track lifetime (frames)   & 933 \\
+Frames processed              & 1{,}000 \\
+Unique tracks                 & 12 \\
+Track creation events (re-entries + re-acquisitions) & 58 (4.83$\times$ unique tracks) \\
+Mean track lifetime (frames)  & 124.2 \\
+Median track lifetime (frames) & 131.5 \\
+Max track lifetime (frames)   & 229 \\
 \midrule
-Vehicle speed -- mean (km/h)  & 84.0 \\
-Vehicle speed -- median (km/h) & 75.1 \\
-Vehicle speed -- p95 (km/h)   & 172.5$^{\dagger}$ \\
-\% moving observations        & 70.6\,\% \\
-Total speed observations      & 17{,}103 of 24{,}241 detections$^{\ddagger}$ \\
+Vehicle speed -- mean (km/h)  & 90.9 \\
+Vehicle speed -- median (km/h) & 78.2 \\
+Vehicle speed -- p95 (km/h)   & 174.2$^{\dagger}$ \\
+\% moving observations        & 79.6\,\% \\
+Total speed observations      & 1{,}186 of 1{,}490 detections$^{\ddagger}$ \\
 \midrule
-Detections -- car             & 21{,}041 \\
-Detections -- truck           & 2{,}923 \\
-Detections -- bus             & 277 \\
+Detections -- car             & 1{,}424 \\
+Detections -- truck           & 66 \\
 \bottomrule
-\multicolumn{2}{@{}p{\linewidth}}{\footnotesize $^{\dagger}$Far-field outliers; median 75.1\,km/h is representative.} \\
+\multicolumn{2}{@{}p{\linewidth}}{\footnotesize $^{\dagger}$Far-field outliers; median 78.2\,km/h is representative.} \\
 \multicolumn{2}{@{}p{\linewidth}}{\footnotesize $^{\ddagger}$Speed requires $\ge W$ frames of track history; single-frame detections excluded.} \\
 \end{tabular}
 \end{table}

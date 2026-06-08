@@ -33,6 +33,8 @@ import supervision as sv
 import torch
 from ultralytics import YOLO
 
+import os as _os
+
 from config import (
     TRACKER_TIER,
     YOLO_AUTO_EXPORT_ENGINE,
@@ -47,6 +49,9 @@ from config import (
     BYTE_TRACK_BUFFER,
     BYTE_TRACK_FPS,
 )
+
+# 측정용: "tensorrt" | "onnx" | "pytorch" 로 강제 선택. 비어있으면 자동(우선순위대로).
+YOLO_FORCE_BACKEND = _os.getenv("YOLO_FORCE_BACKEND", "").lower()
 from roi_manager import roi_to_pixels
 
 logger = logging.getLogger(__name__)
@@ -156,9 +161,10 @@ def resolve_model_selection() -> ModelSelection:
     """
     우선순위: TensorRT > ONNX Runtime > PyTorch
     각 포맷 파일이 없으면 자동 export 시도.
+    YOLO_FORCE_BACKEND 환경변수로 backend 강제 지정 가능 (측정용).
     """
-    trt_ok = _can_use_tensorrt()
-    onnx_ok = _can_use_onnx()
+    trt_ok  = _can_use_tensorrt() and YOLO_FORCE_BACKEND not in ("onnx", "pytorch")
+    onnx_ok = _can_use_onnx()     and YOLO_FORCE_BACKEND != "pytorch"
     pt_fallback: Path | None = None
 
     for stem in _candidate_stems():

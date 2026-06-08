@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (MiKTeX 26.5) (preloaded format=pdflatex 2026.6.6)  8 JUN 2026 23:06
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (MiKTeX 26.5) (preloaded format=pdflatex 2026.6.6)  8 JUN 2026 23:29
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -913,12 +913,12 @@ sal/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/base/8r.enc}
 
 
 ]
-<img/cctv_map.png, id=119, 1443.89438pt x 679.78969pt>
+<img/cctv_map.png, id=107, 1443.89438pt x 679.78969pt>
 File: img/cctv_map.png Graphic file (type png)
 <use img/cctv_map.png>
 Package pdftex.def Info: img/cctv_map.png  used on input line 246.
 (pdftex.def)             Requested size: 252.0pt x 118.63304pt.
-<img/yolo_detect.png, id=122, 536.75531pt x 355.3275pt>
+<img/yolo_detect.png, id=110, 536.75531pt x 355.3275pt>
 File: img/yolo_detect.png Graphic file (type png)
 <use img/yolo_detect.png>
 Package pdftex.def Info: img/yolo_detect.png  used on input line 271.
@@ -926,13 +926,13 @@ Package pdftex.def Info: img/yolo_detect.png  used on input line 271.
 Package hyperref Info: bookmark level for unknown algorithm defaults to 0 on in
 put line 298.
  [2]
-<img/auto_calib.png, id=152, 536.75531pt x 437.38406pt>
+<img/auto_calib.png, id=140, 536.75531pt x 437.38406pt>
 File: img/auto_calib.png Graphic file (type png)
 <use img/auto_calib.png>
 Package pdftex.def Info: img/auto_calib.png  used on input line 342.
 (pdftex.def)             Requested size: 252.0pt x 205.34361pt.
  [3 <./img/cctv_map.png> <./img/yolo_detect.png>]
-<img/congestion_map.png, id=166, 454.69875pt x 454.69875pt>
+<img/congestion_map.png, id=154, 454.69875pt x 454.69875pt>
 File: img/congestion_map.png Graphic file (type png)
 <use img/congestion_map.png>
 Package pdftex.def Info: img/congestion_map.png  used on input line 443.
@@ -966,218 +966,23 @@ Overfull \hbox (0.90376pt too wide) in paragraph at lines 640--652
 ard-ware faults---
  []
 
-[6]
-Underfull \hbox (badness 7944) in paragraph at lines 700--707
-[]\OT1/ptm/m/it/10 (+20) BoxMOT in-te-gra-tion and tracker-tier ar-chi-tec-ture
+(report_contribution.bbl [6]) [7
 
+]
+Underfull \hbox (badness 1609) in paragraph at lines 721--729
+\OT1/ptm/m/n/10 (+20) ges-tion clus-ter-ing, SQLite his-tory store, and back-
  []
 
 
-Underfull \hbox (badness 1852) in paragraph at lines 700--707
-\OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 detector.py\OT1/ptm/m/n/10 (+20) , \OT1/
-pcr/m/n/10 model_setup.py\OT1/ptm/m/n/10 (+20) ): added multi-
+Underfull \hbox (badness 2173) in paragraph at lines 721--729
+\OT1/ptm/m/n/10 (+20) across the dual-path in-fer-ence pipeline, in-tro-duced
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 716--722
-[]\OT1/ptm/m/it/10 (+20) CCTV-based speed es-ti-ma-tor \OT1/ptm/m/n/10 (+20) (\
-OT1/pcr/m/n/10 analytics.py:_
+Underfull \hbox (badness 1603) in paragraph at lines 729--734
+\OT1/ptm/m/n/10 (+20) LineZone-only di-rec-tion scheme with a con-tin-u-ous
  []
 
-
-Underfull \hbox (badness 10000) in paragraph at lines 716--722
-\OT1/pcr/m/n/10 speed\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 main.py:_speed_tim
-estamp_ms\OT1/ptm/m/n/10 (+20) ):
- []
-
-
-Underfull \hbox (badness 2119) in paragraph at lines 716--722
-\OT1/ptm/m/n/10 (+20) re-placed the naive dis-tance/time for-mula with the
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 726--730
-[]\OT1/ptm/m/it/10 (+20) ID-based track-ing ac-cu-racy \OT1/ptm/m/n/10 (+20) (\
-OT1/pcr/m/n/10 detector.py\OT1/ptm/m/n/10 (+20) ):
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 730--743
-\OT1/pcr/m/n/10 congestion.py\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 history.py
-\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 detector.py\OT1/ptm/m/n/10 (+20) ,
- []
-
-
-Underfull \hbox (badness 7151) in paragraph at lines 730--743
-\OT1/ptm/m/n/10 (+20) shared-detector co-or-di-na-tion, con-ges-tion clus-ter-i
-ng,
- []
-
-
-Underfull \hbox (badness 4556) in paragraph at lines 730--743
-\OT1/pcr/m/n/10 reset_tracker() \OT1/ptm/m/n/10 (+20) thread-pool threads; \OT1
-/pcr/m/n/10 _json_
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 730--743
-\OT1/pcr/m/n/10 file_lock \OT1/ptm/m/n/10 (+20) and \OT1/pcr/m/n/10 roi_manager
-._write_lock
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 746--752
-[]\OT1/ptm/m/it/10 (+20) UI, i18n, and eval-u-a-tion har-ness \OT1/ptm/m/n/10 (
-+20) (fron-tend,
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 746--752
-\OT1/pcr/m/n/10 evaluate.py\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 metrics.py\O
-T1/ptm/m/n/10 (+20) ): an-a-lyt-ics pan-els,
- []
-
-
-Underfull \hbox (badness 5924) in paragraph at lines 746--752
-\OT1/pcr/m/n/10 CctvPlayer.jsx\OT1/ptm/m/n/10 (+20) , and the of-fline mea-sure
--ment
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 752--757
-[]\OT1/ptm/m/it/10 (+20) Movement-vector di-rec-tion clas-si-fi-ca-tion
- []
-
-
-Underfull \hbox (badness 3029) in paragraph at lines 781--790
-[]\OT1/ptm/b/n/10 (+20) Evidence. \OT1/pcr/m/n/10 detector.py \OT1/ptm/m/n/10 (
-+20) (\OT1/pcr/m/n/10 IDStabilizer\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 track
-\OT1/ptm/m/n/10 (+20) ,
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 781--790
-\OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 _speed\OT1/ptm/m/n/10 (+20) , dwell/LOS,
- \OT1/pcr/m/n/10 _assign_directions\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 _
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 781--790
-\OT1/pcr/m/n/10 smooth_positions\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 _apply_
-lane_offset\OT1/ptm/m/n/10 (+20) );
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 781--790
-\OT1/pcr/m/n/10 main.py \OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 live_loop\OT1/pt
-m/m/n/10 (+20) , \OT1/pcr/m/n/10 _speed_timestamp_ms\OT1/ptm/m/n/10 (+20) ,
- []
-
-
-Underfull \vbox (badness 4543) has occurred while \output is active []
-
- [7]
-Underfull \hbox (badness 6461) in paragraph at lines 800--804
-\OT1/ptm/m/n/10 (+20) the ini-tial \OT1/pcr/m/n/10 VehicleTracker \OT1/ptm/m/n/
-10 (+20) with a hor-i-zon-tal
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 804--811
-[]\OT1/ptm/m/it/10 (+20) Auto-calibration pipeline (full de-vel-op-ment)
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 804--811
-\OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 transform.py\OT1/ptm/m/n/10 (+20) , \OT1
-/pcr/m/n/10 camera_pose.py\OT1/ptm/m/n/10 (+20) ): evolved
- []
-
-
-Underfull \hbox (badness 5771) in paragraph at lines 804--811
-\OT1/ptm/m/n/10 (+20) cur-rent road-model pose solver---a four-parameter
- []
-
-
-Underfull \hbox (badness 2173) in paragraph at lines 804--811
-\OT1/ptm/m/n/10 (+20) pin-hole fit ($\OML/cmm/m/it/10 H$\OT1/ptm/m/n/10 (+20) ,
- pitch, yaw, lat-eral off-set $\OML/cmm/m/it/10 x[]$\OT1/ptm/m/n/10 (+20) ) via
-
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 811--819
-[]\OT1/ptm/m/it/10 (+20) Per-camera scale cor-rec-tion loop
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 811--819
-\OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 analytics.py:calibrate_from_its\OT1/ptm/
-m/n/10 (+20) ):
- []
-
-
-Underfull \hbox (badness 5374) in paragraph at lines 811--819
-\OT1/ptm/m/n/10 (+20) adap-ta-tion ($\OML/cmm/m/it/10 []\OT1/cmr/m/n/10 0\OML/
-cmm/m/it/10 :\OT1/cmr/m/n/10 99$\OT1/ptm/m/n/10 (+20) ) to han-dle ITS mea-sure
--ment
- []
-
-
-Underfull \hbox (badness 4254) in paragraph at lines 819--825
-\OT1/pcr/m/n/10 osm.py\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 transform.py\OT1/
-ptm/m/n/10 (+20) ): iden-ti-fied the MOCT
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 825--829
-[]\OT1/ptm/m/it/10 (+20) Two-stage curved pixel$\OMS/cmsy/m/n/10 !$\OT1/ptm/m/i
-t/10 (+20) GPS trans-form
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 825--829
-\OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 transform.py:_pixel_to_gps_curved\OT1/pt
-m/m/n/10 (+20) ):
- []
-
-
-Underfull \hbox (badness 4229) in paragraph at lines 825--829
-\OT1/ptm/m/n/10 (+20) arc-length in-ter-po-la-tion along the road cen-tre-line,
-
- []
-
-
-Underfull \hbox (badness 1810) in paragraph at lines 837--843
-\OT1/pcr/m/n/10 CalibrationMode.jsx\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 Cctv
-Player.jsx \OT1/ptm/m/n/10 (+20) cal-i-
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 855--864
-[]\OT1/ptm/b/n/10 (+20) Evidence. \OT1/pcr/m/n/10 tracker.py \OT1/ptm/m/n/10 (+
-20) (\OT1/pcr/m/n/10 VehicleTracker\OT1/ptm/m/n/10 (+20) ,
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 855--864
-\OT1/pcr/m/n/10 to_corners\OT1/ptm/m/n/10 (+20) ); \OT1/pcr/m/n/10 transform.py
- \OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 _pixel_to_gps_
- []
-
-
-Underfull \hbox (badness 6236) in paragraph at lines 855--864
-\OT1/pcr/m/n/10 curved\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 auto_calibrate_fr
-om_frame\OT1/ptm/m/n/10 (+20) , \OT1/pcr/m/n/10 update_
- []
-
-
-Underfull \hbox (badness 10000) in paragraph at lines 855--864
-\OT1/pcr/m/n/10 from_calibration\OT1/ptm/m/n/10 (+20) ); \OT1/pcr/m/n/10 analyt
-ics.py:calibrate_
- []
-
-(report_contribution.bbl [8])
 
 ** Conference Paper **
 Before submitting the final camera ready copy, remember to:
@@ -1189,7 +994,7 @@ Before submitting the final camera ready copy, remember to:
  uses only Type 1 fonts and that every step in the generation
  process uses the appropriate paper size.
 
-[9
+[8
 
 ] (report_contribution.aux)
  ***********
@@ -1197,14 +1002,14 @@ LaTeX2e <2025-11-01>
 L3 programming layer <2026-04-28>
  ***********
 Package rerunfilecheck Info: File `report_contribution.out' has not changed.
-(rerunfilecheck)             Checksum: F86852B8BA4CFD6A7F54BA44636A9E84;2975.
+(rerunfilecheck)             Checksum: 2F646495257E2A9D843723E685DB2ED9;2052.
  ) 
 Here is how much of TeX's memory you used:
- 25497 strings out of 467683
- 477520 string characters out of 5414722
- 926736 words of memory out of 5000000
- 53732 multiletter control sequences out of 15000+600000
- 690363 words of font info for 362 fonts, out of 8000000 for 9000
+ 25489 strings out of 467683
+ 477439 string characters out of 5414722
+ 926695 words of memory out of 5000000
+ 53728 multiletter control sequences out of 15000+600000
+ 690414 words of font info for 360 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
  84i,12n,94p,1018b,810s stack positions out of 10000i,1000n,20000p,200000b,200000s
 <C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/
@@ -1229,9 +1034,9 @@ KTeX/fonts/type1/urw/times/utmb8a.pfb><C:/Users/dksal/AppData/Local/Programs/Mi
 KTeX/fonts/type1/urw/times/utmbi8a.pfb><C:/Users/dksal/AppData/Local/Programs/M
 iKTeX/fonts/type1/urw/times/utmr8a.pfb><C:/Users/dksal/AppData/Local/Programs/M
 iKTeX/fonts/type1/urw/times/utmri8a.pfb>
-Output written on report_contribution.pdf (9 pages, 2178493 bytes).
+Output written on report_contribution.pdf (8 pages, 2169005 bytes).
 PDF statistics:
- 342 PDF objects out of 1000 (max. 8388607)
- 59 named destinations out of 1000 (max. 500000)
- 70825 words of extra memory for PDF output out of 74296 (max. 10000000)
+ 325 PDF objects out of 1000 (max. 8388607)
+ 58 named destinations out of 1000 (max. 500000)
+ 70801 words of extra memory for PDF output out of 74296 (max. 10000000)
 

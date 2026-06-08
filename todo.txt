@@ -1,5 +1,96 @@
-1. bytrack 보다 나은점 설명
-2. yolo 8에서 26으로 바꾼 이유 설명
-3. report 다시 쓰기 - 조사해서 comparsion 넣기
-4. 각각 로직 설명
-5. 
+======================================================
+  TRAFFIC DIGITAL TWIN — 할 일 & 논문 작성 체크리스트
+======================================================
+
+──────────────────────────────────────────────────────
+A. 측정 (낮에 교통량 있을 때 실행)
+──────────────────────────────────────────────────────
+
+[ ] 서버 없이 백엔드만 켜서 HLS URL 얻기
+      uvicorn main:app --host 0.0.0.0 --port 8000  (traffic-digital-twin/backend 에서)
+
+[ ] Tab B — Backend 3종 비교 (OC-SORT 고정, 300 frames each)
+      engine  →  logs/backend_engine/eval_summary.json
+      onnx    →  logs/backend_onnx/eval_summary.json
+      pt      →  logs/backend_pt/eval_summary.json
+
+[ ] Tab C — Tracker 3종 비교 (TensorRT 고정, 300 frames each)
+      cpu(ByteTrack)   →  logs/tracker_cpu/eval_summary.json
+      low(OC-SORT)     →  logs/tracker_low/eval_summary.json
+      medium(BotSort)  →  logs/tracker_medium/eval_summary.json
+
+  주의: ITS HLS URL 토큰 30분 만료 → 6번 측정 30분 안에 완료
+  명령어: todo.txt 옆 measure_commands.txt 참고 (또는 Claude한테 물어보기)
+
+──────────────────────────────────────────────────────
+B. 측정값으로 채울 tex 표
+──────────────────────────────────────────────────────
+
+[ ] Tab B 결과 → report에 새 표 추가
+      행: TensorRT / ONNX Runtime / PyTorch
+      열: Track mean(ms) / Track p95(ms) / FPS
+      위치: tab:latency 바로 아래 or 대체
+
+[ ] Tab C 결과 → report에 새 표 추가
+      행: ByteTrack / OC-SORT / BotSort
+      열: Track mean(ms) / FPS / Unique tracks / Mean lifetime(frames)
+      위치: tab:track 근처
+
+  ※ 이 표들은 "정확도"가 아니라 latency vs stability 트레이드오프 설명용
+  ※ 논문에 이미 "single-session, hardware-specific" caveat 명시돼 있음
+
+──────────────────────────────────────────────────────
+C. 논문 아직 안 쓴 설명들
+──────────────────────────────────────────────────────
+
+[ ] ByteTrack 대비 OC-SORT / BotSort 나은 점 설명
+      → OC-SORT: occlusion 중에도 ID 유지 (observation-centric re-ID)
+      → BotSort: OSNet appearance ReID로 외형 기반 재매칭 → ID switch 감소
+      → ByteTrack: 빠르지만 ReID 없어서 occlusion 후 ID switch 많음
+      위치: Related Work §2 또는 Implementation §4.1
+
+[ ] YOLOv8 → YOLO26 교체 이유 설명
+      → NMS-free end-to-end 구조 → per-frame bbox 일관성 높음
+      → ground-contact point jitter 감소 → speed estimate 안정
+      → TensorRT graph 단순 (NMS layer 없음) → latency 낮고 variance 작음
+      → YOLOv8은 legacy fallback으로 유지
+      위치: Related Work §2 (이미 일부 있음, 보강 필요)
+
+[ ] 각 로직 설명 보강
+      → speed estimation 5단계 (Algorithm 2) — 이미 있음, 충분한지 검토
+      → curved transform 2단계 (Algorithm 1) — 이미 있음
+      → auto-calibration pose solver — 이미 있음
+      → vehicle_calib.json (B, C 모델) — 이번 세션에 추가함 ✓
+      → _resolve_hls_url (HLS redirect) — 이번 세션에 추가함 ✓
+
+──────────────────────────────────────────────────────
+D. 논문 현재 상태 (완료된 것)
+──────────────────────────────────────────────────────
+
+[x] tab:latency — BotSort + TensorRT 단일 run 데이터 있음
+      (4,559 frames, Goyang Jugyo Underpass, 31.9 FPS)
+      ※ eval_summary.json의 현재 데이터와 불일치 → B/C 측정 후 업데이트 필요
+
+[x] tab:track — tracking stability + speed + detection 데이터 있음
+
+[x] tab:scale — speed_scale 37개 카메라 분포 (측정 불필요, 이미 완료)
+
+[x] Hardware 스펙 문단 — RTX 4070 Laptop, TensorRT 10.16, ONNX 1.25
+
+[x] Run conditions 문단 — single-session caveat 명시
+
+[x] vehicle_calib.json 설명 추가 (§4.2)
+
+[x] _resolve_hls_url 설명 추가 (§3 Server path)
+
+[x] tab:track overflow 수정 (p{} column spec)
+
+──────────────────────────────────────────────────────
+E. 우선순위
+──────────────────────────────────────────────────────
+
+  1순위: 낮에 측정 실행 (A) → B/C 표 완성
+  2순위: ByteTrack vs OC-SORT vs BotSort 비교 설명 작성 (C)
+  3순위: YOLOv8 → YOLO26 교체 이유 보강 (C)
+
+======================================================

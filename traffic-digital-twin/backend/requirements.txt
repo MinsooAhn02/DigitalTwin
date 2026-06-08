@@ -6,7 +6,7 @@
 # ── Deep Learning / Vision ──────────────────────────────────────────
 ultralytics>=8.4.0          # YOLOv8 detection (8.4.41 검증)
 supervision>=0.27.0         # ByteTrack + annotators (0.27.0.post2 검증)
-boxmot==12.0.2              # ByteTrack / OcSort / BotSort / DeepOcSort trackers
+boxmot>=12.0.11,<13.0.0     # ByteTrack / OcSort / BotSort / DeepOcSort trackers (12.0.11+ numpy 2.x 호환)
 
 # ── Web Framework ────────────────────────────────────────────────────
 fastapi>=0.111.0            # (0.136.1 검증)

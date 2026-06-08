@@ -409,6 +409,7 @@ export default function App() {
           onCalibTabChange={setCalibTabActive}
           switching={switching}
           cameraStatus={cameraStatus}
+          cameraReadyInfo={cameraReadyInfo}
         />
       </div>
 

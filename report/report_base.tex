@@ -457,15 +457,27 @@ Measurements are produced from the real pipeline in two ways. While the system r
 tracking, speed, and detection statistics and flushes \texttt{eval\_*.csv} and
 \texttt{eval\_summary.json} every 30\,s (also on demand via \texttt{GET /eval/report});
 an offline harness (\texttt{backend/evaluate.py}) reproduces the same metrics over a
-fixed clip for controlled benchmarks. The system auto-selects the inference backend
-(TensorRT\,$\to$\,ONNX Runtime\,$\to$\,PyTorch) and tracker tier (ByteTrack\,/\,OC-SORT\,/\,BotSort\,/\,DeepOC-SORT, chosen by GPU VRAM at runtime).
+live HLS source for controlled benchmarks. The system auto-selects the inference backend
+(TensorRT\,$\to$\,ONNX Runtime\,$\to$\,PyTorch) and tracker tier (ByteTrack\,/\,OC-SORT\,/\,BotSort\,/\,DeepOC-SORT by GPU VRAM).
 
-\textit{Setup:} model \texttt{YOLO26m}, backend \texttt{TensorRT} (auto-selected),
-tracker \texttt{BotSort} (medium tier, $\ge$6\,GB VRAM), source: Goyang Jugyo
-Underpass, National Rd.\ 39 (live HLS), 4{,}559 frames (935.9\,s).
+\textit{Hardware.} All timing figures are from a single machine: NVIDIA GeForce
+RTX\,4070 Laptop GPU (8\,GB VRAM, compute capability 8.9), driver 610.47,
+TensorRT\,10.16, ONNX\,Runtime\,1.25, Windows\,11. Absolute latency and FPS are
+hardware-specific; the relative ordering across tiers and backends is the
+transferable result.
+
+\textit{Run conditions.} Model \texttt{YOLO26m}, backend \texttt{TensorRT}
+(auto-selected), tracker \texttt{BotSort} (medium tier, $\ge$6\,GB VRAM),
+source: Goyang Jugyo Underpass, National Rd.\,39 (live ITS HLS),
+4{,}559 frames (935.9\,s). Speed and vehicle-count observations in
+Tables~\ref{tab:track} are single-session figures that reflect the specific
+camera, time of day, and traffic conditions at the time of measurement; they
+are included to confirm the pipeline produces plausible output, not as
+ground-truth benchmarks.
 
 \begin{table}[t]
-\caption{Per-stage latency (ms) and throughput (4{,}559-frame eval run).}
+\caption{Per-stage latency (ms) and throughput (4{,}559-frame eval run,
+RTX\,4070 Laptop + TensorRT\,10.16 + BotSort). Figures are hardware-specific.}
 \label{tab:latency}
 \centering
 \small
@@ -489,13 +501,13 @@ Analytics              &  0.18 &  0.16 &  0.38 \\
 \label{tab:track}
 \centering
 \small
-\begin{tabular}{@{}ll@{}}
+\begin{tabular}{@{}p{0.45\linewidth}p{0.48\linewidth}@{}}
 \toprule
 Metric & Value \\
 \midrule
 Frames processed              & 4{,}559 \\
 Unique tracks                 & 328 \\
-Track creation events (re-entries\,+\,re-acquisitions) & 683 (2.08$\times$ unique tracks) \\
+Track creation events (re-entries + re-acquisitions) & 683 (2.08$\times$ unique tracks) \\
 Mean track lifetime (frames)  & 73.9 \\
 Median track lifetime (frames) & 61.0 \\
 Max track lifetime (frames)   & 933 \\
@@ -510,31 +522,42 @@ Detections -- car             & 21{,}041 \\
 Detections -- truck           & 2{,}923 \\
 Detections -- bus             & 277 \\
 \bottomrule
-\multicolumn{2}{@{}l}{\footnotesize $^{\dagger}$Far-field outliers; median 75.1\,km/h is representative.} \\
-\multicolumn{2}{@{}l}{\footnotesize $^{\ddagger}$Speed requires $\ge W$ frames of track history; single-frame detections excluded.} \\
+\multicolumn{2}{@{}p{\linewidth}}{\footnotesize $^{\dagger}$Far-field outliers; median 75.1\,km/h is representative.} \\
+\multicolumn{2}{@{}p{\linewidth}}{\footnotesize $^{\ddagger}$Speed requires $\ge W$ frames of track history; single-frame detections excluded.} \\
 \end{tabular}
 \end{table}
 
-\textbf{Speed accuracy.} Because no per-vehicle ground truth exists for public CCTV,
-the system maintains a per-camera \texttt{speed\_scale} via an online ITS-referenced
-update loop. Table~\ref{tab:speed} reports the calibrated measured average for the
-evaluation camera (speed already multiplied by the current \texttt{speed\_scale}) and
-the factors accumulated across all 37 active cameras; convergence has not been reached
-at the time of evaluation (see Section~\ref{sec:discuss}).
+\textbf{Per-camera scale calibration.}
+Because no per-vehicle ground truth exists for public CCTV, the system maintains a
+per-camera \texttt{speed\_scale} updated online via the ITS-referenced loop.
+Table~\ref{tab:scale} summarises the factors accumulated across all 37 cameras whose
+streams have been monitored (\texttt{speed\_scale.json}); none had converged at
+the time of writing (see Section~\ref{sec:discuss}).
+The majority (51\,\%) fall within $\pm$20\,\% of 1.0, confirming that the geometric
+calibration is roughly correct for most cameras; the long left tail (38\,\% below 0.8)
+reflects cameras with steep pitch or far-field observation zones that compress apparent
+displacement, while the small right tail (11\,\% above 1.2) corresponds to
+wide-angle or low-mounted cameras that exaggerate it.
 
 \begin{table}[t]
-\caption{Calibrated speed and accumulated \texttt{speed\_scale} factors (37 cameras,
-\texttt{speed\_scale.json}). ITS reference values drive the update loop live and are not
-archived in the eval snapshot; all factors are marked unconverged at this snapshot.}
-\label{tab:speed}
+\caption{Distribution of learned \texttt{speed\_scale} factors across 37 cameras
+(\texttt{speed\_scale.json}). Values below~1.0 indicate geometric underestimation
+of displacement (common when the camera axis is oblique to the road); values
+above~1.0 indicate overestimation. All factors are unconverged at this snapshot.}
+\label{tab:scale}
 \centering
 \small
-\begin{tabular}{@{}lccc@{}}
+\begin{tabular}{@{}lrr@{}}
 \toprule
-Camera & Calibrated avg (km/h) & n\_obs & \texttt{speed\_scale} \\
+Range & Cameras & Share \\
 \midrule
-Jugyo Underpass (eval) & 84.0 & 17{,}103 & 0.846 (unconverged) \\
-All 37 cameras         & ---  & ---       & 0.34\,--\,2.25 (mean 0.90) \\
+$<0.5$          &  4 & 10.8\,\% \\
+$0.5$--$0.8$    & 10 & 27.0\,\% \\
+$0.8$--$1.2$    & 19 & 51.4\,\% \\
+$>1.2$          &  4 & 10.8\,\% \\
+\midrule
+\multicolumn{3}{@{}l}{Min / Max: 0.34\,/\,2.25} \\
+\multicolumn{3}{@{}l}{Mean / Median: 0.90\,/\,0.85} \\
 \bottomrule
 \end{tabular}
 \end{table}

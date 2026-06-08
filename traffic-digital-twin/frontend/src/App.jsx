@@ -35,7 +35,7 @@ function trailReducer(state, vehicles) {
 }
 
 export default function App() {
-  const { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo, backgroundStatus, congestionClusters } = useWebSocket();
+  const { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo, backgroundStatus, congestionClusters, cameraStatus } = useWebSocket();
   const { t, lang, setLang } = useLang();
   const [trailMap, dispatchTrail]         = useReducer(trailReducer, new Map());
   const [cctvList, setCctvList]           = useState([]);
@@ -407,6 +407,8 @@ export default function App() {
           onCancelGps={() => { setCalMode(null); setPendingGps(null); }}
           onCalibSaved={handleCalibSaved}
           onCalibTabChange={setCalibTabActive}
+          switching={switching}
+          cameraStatus={cameraStatus}
         />
       </div>
 

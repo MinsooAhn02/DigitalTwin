@@ -82,5 +82,29 @@
     "frame_h": 480,
     "n_updates": 1,
     "updated_at": "2026-06-08T07:19:43.130924+00:00"
+  },
+  "52fb5523e7dc": {
+    "H_m": 10.6558,
+    "pitch_deg": 23.5038,
+    "yaw_deg": 27.1405,
+    "focal_px": 576.0,
+    "x0_m": -4.7743,
+    "residual_px": 4.42,
+    "frame_w": 720,
+    "frame_h": 480,
+    "n_updates": 1,
+    "updated_at": "2026-06-08T09:09:21.412069+00:00"
+  },
+  "c6cc1068bf8b": {
+    "H_m": 9.0401,
+    "pitch_deg": 15.8792,
+    "yaw_deg": 27.5609,
+    "focal_px": 576.0,
+    "x0_m": -5.0178,
+    "residual_px": 3.0,
+    "frame_w": 720,
+    "frame_h": 480,
+    "n_updates": 1,
+    "updated_at": "2026-06-08T09:16:19.554654+00:00"
   }
 }

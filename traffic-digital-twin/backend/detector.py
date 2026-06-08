@@ -488,7 +488,29 @@ class IDStabilizer:
 
 # ── Video source ───────────────────────────────────────────────────────────
 
+def _resolve_hls_url(url: str) -> str:
+    """ITS CCTV URL이 302 redirect면 실제 m3u8 URL을 반환.
+
+    FFmpeg는 redirect를 따라가지만 m3u8 내 상대경로 세그먼트를 원본 URL 기준으로
+    잘못 조합해 첫 .ts 세그먼트 로드에 실패한다. redirect를 미리 해결하면 이를 방지.
+    """
+    import httpx
+    try:
+        with httpx.Client(timeout=5.0, follow_redirects=False) as client:
+            resp = client.get(url, headers={"User-Agent": "Mozilla/5.0", "Referer": url})
+            if resp.status_code in (301, 302, 303, 307, 308):
+                location = resp.headers.get("location", "")
+                if location:
+                    logger.info("HLS redirect 해결: %s → %s", url, location)
+                    return location
+    except Exception as exc:
+        logger.debug("HLS redirect 확인 실패, 원본 URL 사용: %s", exc)
+    return url
+
+
 def open_video_source(url: str) -> cv2.VideoCapture:
+    # 302 redirect URL을 미리 resolve해 FFmpeg의 상대경로 세그먼트 오조합 방지
+    url = _resolve_hls_url(url)
     # FFmpeg 기본 analyzeduration=5s, probesize=5MB → HLS 스트림 열기 최대 5초 지연.
     # 짧은 값으로 덮어써 초기 지연을 ~0.5s 이하로 줄인다.
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
@@ -683,8 +705,10 @@ class VehicleDetector:
             try:
                 self._tracker.reset()
                 logger.info("Tracker reset: %s", self._tracker_name)
-            except Exception as exc:
-                logger.warning("Tracker reset 실패: %s", exc)
+            except Exception:
+                # boxmot tracker는 reset() 미지원 → 재생성으로 완전 초기화
+                self._tracker = _build_tracker(self._tracker_tier, self._inference_device)
+                logger.info("Tracker recreated (reset unsupported): %s", self._tracker_name)
 
     @property
     def tracker_info(self) -> dict:

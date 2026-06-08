@@ -123,6 +123,8 @@ const TRANSLATIONS = {
     "cctv.roi.set":      "● Configured",
     "cctv.cal.done":     "● Done",
     "cctv.stream.loading":     "Connecting stream…",
+    "cctv.stream.retrying":    "Reconnecting…",
+    "cctv.stream.failed":      "Connection failed",
     "cctv.stream.error":       "Stream connection failed",
     "cctv.stream.unsupported": "HLS not supported in this browser",
     // ── CalibBar ─────────────────────────────────────────────────────
@@ -277,6 +279,8 @@ const TRANSLATIONS = {
     "cctv.roi.set":      "● 설정됨",
     "cctv.cal.done":     "● 완료",
     "cctv.stream.loading":     "스트림 연결 중…",
+    "cctv.stream.retrying":    "재연결 중…",
+    "cctv.stream.failed":      "연결 실패",
     "cctv.stream.error":       "스트림 연결 실패",
     "cctv.stream.unsupported": "HLS 미지원 브라우저",
     // ── CalibBar ─────────────────────────────────────────────────────

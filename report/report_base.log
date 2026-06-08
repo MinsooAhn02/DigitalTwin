@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (MiKTeX 26.5) (preloaded format=pdflatex 2026.6.6)  6 JUN 2026 17:12
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (MiKTeX 26.5) (preloaded format=pdflatex 2026.6.6)  8 JUN 2026 23:06
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -886,11 +886,6 @@ LaTeX Font Info:    Trying to load font information for OT1+pcr on input line 7
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/psnfss\ot1pcr.fd
 File: ot1pcr.fd 2001/06/04 font definitions for OT1/pcr.
 )
-Overfull \hbox (1.1931pt too wide) in paragraph at lines 62--82
-\OT1/ptm/b/n/9 (-20) free end-to-end de-tec-tor (YOLOv8 [[]2[]] re-tained as le
-gacy fallback)---
- []
-
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/microtype\mt-cmr.cfg
 File: mt-cmr.cfg 2013/05/19 v2.2 microtype config. file: Computer Modern Roman 
 (RS)
@@ -918,88 +913,60 @@ sal/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/base/8r.enc}
 
 
 ]
-<img/cctv_map.png, id=108, 1443.89438pt x 679.78969pt>
+<img/cctv_map.png, id=107, 1443.89438pt x 679.78969pt>
 File: img/cctv_map.png Graphic file (type png)
 <use img/cctv_map.png>
-Package pdftex.def Info: img/cctv_map.png  used on input line 239.
+Package pdftex.def Info: img/cctv_map.png  used on input line 245.
 (pdftex.def)             Requested size: 252.0pt x 118.63304pt.
-<img/yolo_detect.png, id=111, 536.75531pt x 355.3275pt>
+<img/yolo_detect.png, id=110, 536.75531pt x 355.3275pt>
 File: img/yolo_detect.png Graphic file (type png)
 <use img/yolo_detect.png>
-Package pdftex.def Info: img/yolo_detect.png  used on input line 263.
+Package pdftex.def Info: img/yolo_detect.png  used on input line 270.
 (pdftex.def)             Requested size: 252.0pt x 166.8196pt.
 Package hyperref Info: bookmark level for unknown algorithm defaults to 0 on in
-put line 287.
+put line 297.
  [2]
 <img/auto_calib.png, id=140, 536.75531pt x 437.38406pt>
 File: img/auto_calib.png Graphic file (type png)
 <use img/auto_calib.png>
-Package pdftex.def Info: img/auto_calib.png  used on input line 325.
+Package pdftex.def Info: img/auto_calib.png  used on input line 341.
 (pdftex.def)             Requested size: 252.0pt x 205.34361pt.
- [3 <./img/cctv_map.png> <./img/yolo_detect.png> <./img/auto_calib.png>]
-<img/congestion_map.png, id=155, 454.69875pt x 454.69875pt>
+ [3 <./img/cctv_map.png> <./img/yolo_detect.png>]
+<img/congestion_map.png, id=154, 454.69875pt x 454.69875pt>
 File: img/congestion_map.png Graphic file (type png)
 <use img/congestion_map.png>
-Package pdftex.def Info: img/congestion_map.png  used on input line 424.
+Package pdftex.def Info: img/congestion_map.png  used on input line 442.
 (pdftex.def)             Requested size: 252.0pt x 252.0pt.
- [4 <./img/congestion_map.png>]
-Underfull \hbox (badness 1484) in paragraph at lines 449--456
+ [4 <./img/auto_calib.png>]
+Underfull \hbox (badness 1484) in paragraph at lines 467--474
 \OT1/ptm/m/n/10 (+20) ing, speed, and de-tec-tion statis-tics and flushes \OT1/
 pcr/m/n/10 eval_
  []
 
 
-Underfull \hbox (badness 7081) in paragraph at lines 449--456
-\OT1/pcr/m/n/10 *.csv \OT1/ptm/m/n/10 (+20) and \OT1/pcr/m/n/10 eval_summary.js
-on \OT1/ptm/m/n/10 (+20) ev-ery 30s (also
+Underfull \hbox (badness 2165) in paragraph at lines 467--474
+\OT1/ptm/m/n/10 (+20) de-mand via \OT1/pcr/m/n/10 GET /eval/report\OT1/ptm/m/n/
+10 (+20) ); an of-fline har-ness
  []
 
 
-Underfull \hbox (badness 1721) in paragraph at lines 449--456
-\OT1/ptm/m/n/10 (+20) on de-mand via \OT1/pcr/m/n/10 GET /eval/report\OT1/ptm/m
-/n/10 (+20) ); an of-fline har-
+Underfull \hbox (badness 5147) in paragraph at lines 467--474
+\OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 backend/evaluate.py\OT1/ptm/m/n/10 (+20)
+ ) re-pro-duces the same met-
  []
 
 
-Underfull \hbox (badness 4569) in paragraph at lines 449--456
-\OT1/ptm/m/n/10 (+20) ness (\OT1/pcr/m/n/10 backend/evaluate.py\OT1/ptm/m/n/10 
-(+20) ) re-pro-duces the same
- []
-
-
-Underfull \hbox (badness 4096) in paragraph at lines 449--456
-\OT1/ptm/m/n/10 (+20) met-rics over a fixed clip for con-trolled bench-marks.
- []
-
-
-Underfull \hbox (badness 5563) in paragraph at lines 449--456
+Underfull \hbox (badness 5563) in paragraph at lines 467--474
 \OT1/ptm/m/n/10 (+20) The sys-tem auto-selects the in-fer-ence back-end (Ten-
  []
 
-
-Underfull \hbox (badness 3189) in paragraph at lines 457--460
-[]\OT1/ptm/m/it/10 (+20) Setup: \OT1/ptm/m/n/10 (+20) model \OT1/pcr/m/n/10 YOL
-O26m\OT1/ptm/m/n/10 (+20) , back-end \OT1/pcr/m/n/10 TensorRT \OT1/ptm/m/n/10 (
-+20) (auto-
- []
-
-
-Overfull \hbox (49.67746pt too wide) in paragraph at lines 486--510
- [][] 
- []
-
-
-Overfull \hbox (62.72313pt too wide) in paragraph at lines 526--534
- [][] 
- []
-
-
-Overfull \hbox (0.90376pt too wide) in paragraph at lines 573--585
+[5 <./img/congestion_map.png>]
+Overfull \hbox (0.90376pt too wide) in paragraph at lines 639--651
 \OT1/ptm/m/n/10 (-20) low il-lu-mi-na-tion, rain, lens con-tam-i-na-tion, and h
 ard-ware faults---
  []
 
-[5] (report_base.bbl)
+(report_base.bbl [6])
 
 ** Conference Paper **
 Before submitting the final camera ready copy, remember to:
@@ -1011,7 +978,9 @@ Before submitting the final camera ready copy, remember to:
  uses only Type 1 fonts and that every step in the generation
  process uses the appropriate paper size.
 
-[6] (report_base.aux)
+[7
+
+] (report_base.aux)
  ***********
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-04-28>
@@ -1020,11 +989,11 @@ Package rerunfilecheck Info: File `report_base.out' has not changed.
 (rerunfilecheck)             Checksum: 2F646495257E2A9D843723E685DB2ED9;2052.
  ) 
 Here is how much of TeX's memory you used:
- 25460 strings out of 467683
- 476970 string characters out of 5414722
- 923705 words of memory out of 5000000
- 53726 multiletter control sequences out of 15000+600000
- 689243 words of font info for 346 fonts, out of 8000000 for 9000
+ 25459 strings out of 467683
+ 476965 string characters out of 5414722
+ 926645 words of memory out of 5000000
+ 53727 multiletter control sequences out of 15000+600000
+ 689052 words of font info for 344 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
  84i,12n,94p,1010b,810s stack positions out of 10000i,1000n,20000p,200000b,200000s
 <C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/
@@ -1049,9 +1018,9 @@ KTeX/fonts/type1/urw/times/utmb8a.pfb><C:/Users/dksal/AppData/Local/Programs/Mi
 KTeX/fonts/type1/urw/times/utmbi8a.pfb><C:/Users/dksal/AppData/Local/Programs/M
 iKTeX/fonts/type1/urw/times/utmr8a.pfb><C:/Users/dksal/AppData/Local/Programs/M
 iKTeX/fonts/type1/urw/times/utmri8a.pfb>
-Output written on report_base.pdf (6 pages, 2151262 bytes).
+Output written on report_base.pdf (7 pages, 2158736 bytes).
 PDF statistics:
- 294 PDF objects out of 1000 (max. 8388607)
- 51 named destinations out of 1000 (max. 500000)
+ 304 PDF objects out of 1000 (max. 8388607)
+ 53 named destinations out of 1000 (max. 500000)
  70801 words of extra memory for PDF output out of 74296 (max. 10000000)
 

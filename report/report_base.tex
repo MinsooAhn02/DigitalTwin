@@ -510,15 +510,16 @@ BoT-SORT overhead is from OSNet appearance ReID; ByteTrack shows more ID
 creation events due to the absence of re-identification.}
 \label{tab:tracker}
 \centering
-\small
-\begin{tabular}{@{}lrrrrr@{}}
+\scriptsize
+\begin{tabular}{@{}lrrrrrr@{}}
 \toprule
-Tracker & Mean\,(ms) & FPS & Uniq.\,IDs & ID\,events & Mean\,life\,(fr.) \\
+Tracker & Mean\,(ms) & p95\,(ms) & FPS & IDs & ID\,ev. & Life\,(fr.) \\
 \midrule
-ByteTrack &  6.6 & 150.9 & 27 & 286 &  35.6 \\
-OC-SORT   &  6.6 & 150.2 &  8 &  18 &  80.0 \\
-BoT-SORT  & 10.7 &  93.4 &  5 &  16 & 132.0 \\
+ByteTrack &  6.6 &  7.8 & 150.9 & 27 & 286 &  35.6 \\
+OC-SORT   &  6.6 &  8.9 & 150.2 &  8 &  18 &  80.0 \\
+BoT-SORT  & 10.7 & 18.5 &  93.4 &  5 &  16 & 132.0 \\
 \bottomrule
+\multicolumn{7}{@{}l}{\scriptsize IDs = unique track IDs; ID ev. = ID creation events; Life = mean lifetime.}\\
 \end{tabular}
 \end{table}
 
@@ -557,9 +558,10 @@ Total speed observations      & 1{,}186 of 1{,}490 detections$^{\ddagger}$ \\
 Detections -- car             & 1{,}424 \\
 Detections -- truck           & 66 \\
 \bottomrule
-\multicolumn{2}{@{}p{\linewidth}}{\footnotesize $^{\dagger}$Far-field outliers; median 78.2\,km/h is representative.} \\
-\multicolumn{2}{@{}p{\linewidth}}{\footnotesize $^{\ddagger}$Speed requires $\ge W$ frames of track history; single-frame detections excluded.} \\
 \end{tabular}
+\vspace{2pt}
+{\footnotesize $^{\dagger}$Far-field outliers; median 78.2\,km/h is representative.\\
+$^{\ddagger}$Speed requires ${\ge}W$ track-history frames; single-frame detections excluded.}
 \end{table}
 
 \textbf{Per-camera scale calibration.}

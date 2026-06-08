@@ -2077,11 +2077,14 @@ async def live_loop(detector, stream) -> None:
             continue
 
         t0 = time.perf_counter()
-        payload = await asyncio.to_thread(
-            _live_process, frame_id, frame, detector, tracker, stream.pos_msec
-        )
-        if payload:
-            await _broadcast(payload)
+        try:
+            payload = await asyncio.to_thread(
+                _live_process, frame_id, frame, detector, tracker, stream.pos_msec
+            )
+            if payload:
+                await _broadcast(payload)
+        except Exception as exc:
+            logger.warning("live_process 오류 (루프 유지): %s", exc)
 
         # Task 3: bearing auto-refinement from observed vehicle flow
         # Phase 2: refine_road_pts 호출 결과를 road_pts에 반영하지 않음

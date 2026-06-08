@@ -135,7 +135,7 @@ const btnStyle = {
   color: "#e2e8f0", cursor: "pointer",
 };
 
-export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCancelGps, onCalibSaved, onCalibTabChange, switching, cameraStatus }) {
+export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCancelGps, onCalibSaved, onCalibTabChange, switching, cameraStatus, cameraReadyInfo }) {
   const { t } = useLang();
   const videoRef  = useRef(null);
   const hlsRef    = useRef(null);
@@ -156,7 +156,18 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
   const [mjpegLoading, setMjpegLoading]   = useState(false);
   const [yoloLoading, setYoloLoading]     = useState(false);
 
-  // camera_ready 도착 시 (cameraStatus → null) 로딩 해제
+  // camera_ready 도착 시 로딩 해제
+  // cameraReadyInfo.camera_key와 현재 카메라의 cam_key가 일치할 때만 해제해
+  // 빠른 전환 시 이전 카메라의 camera_ready가 현재 로딩을 잘못 클리어하는 race condition 방지
+  useEffect(() => {
+    if (!cameraReadyInfo?.camera_key) return;
+    if (!cctv?.cam_key || cameraReadyInfo.camera_key === cctv.cam_key) {
+      setMjpegLoading(false);
+      setYoloLoading(false);
+    }
+  }, [cameraReadyInfo]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 에러 복구 fallback: cameraStatus null 전환 시에도 해제
   useEffect(() => {
     if (cameraStatus === null) {
       setMjpegLoading(false);
@@ -180,8 +191,8 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
     setStreamKey(k => k + 1);
     setMjpegLoading(true);
     setYoloLoading(true);
-    // 최대 30s 대기 (backend HLS redirect + 연결에 시간 소요)
-    const t = setTimeout(() => { setMjpegLoading(false); setYoloLoading(false); }, 30000);
+    // 최대 8s fallback (camera_ready로 먼저 해제되므로 여기까지 오는 경우는 드묾)
+    const t = setTimeout(() => { setMjpegLoading(false); setYoloLoading(false); }, 8000);
     return () => clearTimeout(t);
   }, [cctv?.cctvurl]);  // eslint-disable-line react-hooks/exhaustive-deps
 

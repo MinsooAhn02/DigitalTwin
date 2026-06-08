@@ -1,46 +1,5 @@
-[X] 도로 위에 polygon 있도록 개선
-[X] 자동 calibration 개선
-[X] 카메라 방향 정확도 개선
-[X] polygon 모양 정확도 개선 (직선 -> 곡선)
-[X] polygon이랑 차량 gps 범위가 일치하지않음 -> polygon 내에서 차량이 움직이도록 수정
-[X] 버그 수정 (YOLO 정확도, 카운트 불일치, 하드코딩 언어, 지도 기본값, CCTV 검색 위치,
-     CCTV 이름 full name, 영어 모드 한글 빈박스, 카메라 선택 배너 위치)
-
-── 활용도 확장 로드맵 ─────────────────────────────────────────
-[A] [X] 다중 CCTV 백그라운드 모니터링
-      [X] BackgroundMonitor 클래스 (backend/main.py) — 8초 주기 detect, asyncio Task 독립 실행
-      [X] 지도 아이콘 색상: 회색(비모니터링) / 초록(정상) / 주황(혼잡) / 빨강(정체)
-      [X] 사이드바 탭 구조 (Live View | Background) + 배지 카운트
-      [X] Background 탭: MonitorPanel — 검색 추가, 상태 목록, 제거
-      [X] 현재 보는 카메라 → 배너 📡 버튼 / Background 탭 빠른 추가
-      [X] CCTV 영어 이름 중복 해결 (위도순 번호 부여)
-      [X] 접이식 카드 (도로정보, 자동캘리브, ITS비교)
-      [ ] 이상 감지 시 알림 (과속/병목 — 현재 상태만 표시, 알림 미구현)
-
-[B] [X] 클러스터링 & 정체 구간 자동 탐지
-      [X] 카메라 단위 클러스터링 (congestion.py) — haversine 그리디 DBSCAN, eps 500m
-          * bg 카메라는 개별 차량 GPS/속도 없음 → 차량 단위 대신 카메라 단위로 구현
-          * "속도 급저하" → 카메라 status(busy/congested) 기반 근사
-      [X] 정체 구간 지도 폴리곤 오버레이 (MapView PolygonLayer, convex hull)
-      [X] 심각도 레벨 (경미/중간/심각) 색상 구분 (SEVERITY_COLORS)
-      [X] history_sampler_loop 에서 변경 시에만 congestion_clusters WS 브로드캐스트
-
-[C] [X] 데이터 저장 & 히스토리 분석
-      [X] 단일 주기 샘플러(history_sampler_loop, 30s)가 bg+live 스냅샷 SQLite 누적
-          * on_frame_result 대신 샘플러로 통합 — batched write, 보존정책(14일) 포함
-      [X] 시간대별 차량 수 / 평균속도 시계열 차트 (HistoryPanel, Recharts)
-      [X] 피크타임 자동 탐지(ReferenceLine), CSV 내보내기(/history/export.csv)
-
-[D] [] 특정 차량 추적 (색상 + 크기 기반 Re-ID)
-      - YOLO bbox 색상 히스토그램 추출
-      - "이 차량 마킹" → 유사 차량 하이라이트 (단일/다중 카메라)
-      - 추적 이력 사이드바에 표시
-──────────────────────────────────────────────────────────────
-
-[] 속도 정확도 개선
-
-*아직 부족한 부분*
-- polygon이랑 차량 gps 범위 완전 일치하지 않는 경우 있음
-- 도로 인식이 근처 도로가 되는 경우   ex) [국도43호선] 광주 엄미1리정류장근처 -> 근처 고속도로로 인식되고, 국도 차량이 거기에 표시됨
-- 움직이는 차량의 속도가 대부분 0으로 찍히는 cctv도 있음
-- CCTV 영어 이름: IC/JC 없는 일반 도로 카메라는 "CCTV xxxxxx" 형태로만 표시됨
+1. bytrack 보다 나은점 설명
+2. yolo 8에서 26으로 바꾼 이유 설명
+3. report 다시 쓰기 - 조사해서 comparsion 넣기
+4. 각각 로직 설명
+5. 

@@ -13,8 +13,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import math
+import threading
 from pathlib import Path
-from functools import lru_cache
 from typing import TypedDict
 
 _DB_PATH = Path(__file__).resolve().parent.parent.parent / "node-link-data" / "nodelink.sqlite"
@@ -68,17 +68,22 @@ def _dist_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return math.hypot(dlat, dlon)
 
 
-@lru_cache(maxsize=1)
+_tl = threading.local()
+
 def _get_conn() -> sqlite3.Connection:
-    if not _DB_PATH.exists():
-        raise FileNotFoundError(
-            f"nodelink.sqlite not found at {_DB_PATH}.\n"
-            "Run:  python scripts/build_nodelink_db.py"
-        )
-    con = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA query_only = 1")
-    return con
+    # asyncio.to_thread으로 여러 스레드가 동시에 호출되므로 스레드당 1개의 커넥션 유지.
+    # lru_cache 단일 커넥션은 동시 접근 시 sqlite3.InterfaceError 유발.
+    if not hasattr(_tl, "conn"):
+        if not _DB_PATH.exists():
+            raise FileNotFoundError(
+                f"nodelink.sqlite not found at {_DB_PATH}.\n"
+                "Run:  python scripts/build_nodelink_db.py"
+            )
+        con = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA query_only = 1")
+        _tl.conn = con
+    return _tl.conn
 
 
 def _bbox(lat: float, lon: float, radius_km: float) -> tuple[float, float, float, float]:

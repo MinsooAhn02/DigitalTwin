@@ -1538,7 +1538,8 @@ async def video_stream_yolo():
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
         last_sent: bytes | None = None
         while True:
-            jpeg = _latest_annotated_jpeg
+            # annotated 프레임이 없으면(미시청 상태 등) raw 프레임으로 폴백
+            jpeg = _latest_annotated_jpeg or _latest_frame_jpeg
             sleep_s = 1.0 / max(_stream_fps, 1.0)
             if jpeg is None or jpeg is last_sent:
                 await asyncio.sleep(sleep_s)
@@ -1815,17 +1816,36 @@ async def live_loop(detector, stream) -> None:
     target_interval = 1.0 / FPS
     skip_budget    = 0
     _reconnect_fails = 0  # 연속 reconnect 실패 횟수
+    _switch_retry_cam: dict | None = None   # 전환 실패 시 재시도할 cam 정보
+    _switch_retry_count: int = 0
+    _switch_retry_at: float = 0.0           # 재시도 허용 시각 (monotonic)
+    _SWITCH_MAX_RETRY = 2
+    _SWITCH_RETRY_DELAY = 2.0               # 재시도 간격 (초). FFmpeg timeout 10s 기준 총 ~24s
     global _stream_fps
 
     logger.info("Live 루프 대기 중 — 지도에서 CCTV를 클릭하여 스트림을 시작하세요")
 
     while True:
         # 카메라 전환 요청 처리 — 큐에 쌓인 항목 중 최신 것만 사용
+        now_mono = time.monotonic()
         if not _camera_queue.empty():
             cam = _camera_queue.get_nowait()
-            # 큐에 추가 항목이 있으면 가장 마지막 것만 사용 (중간 전환 스킵)
             while not _camera_queue.empty():
                 cam = _camera_queue.get_nowait()
+            # 새 요청이 오면 재시도 카운터 리셋
+            _switch_retry_cam = cam
+            _switch_retry_count = 0
+            _switch_retry_at = now_mono
+        elif (_switch_retry_cam is not None
+              and _switch_retry_count < _SWITCH_MAX_RETRY
+              and now_mono >= _switch_retry_at):
+            cam = _switch_retry_cam
+            logger.info("카메라 전환 재시도 (%d/%d): %s",
+                        _switch_retry_count + 1, _SWITCH_MAX_RETRY, cam.get("url", ""))
+        else:
+            cam = None
+
+        if cam is not None:
             try:
                 await asyncio.to_thread(stream.switch_to, cam["url"])
                 snap_lat = cam.get("snap_lat", cam["lat"])
@@ -1953,9 +1973,21 @@ async def live_loop(detector, stream) -> None:
                     **({"roi_gps_ring": _roi_ring} if _roi_ring else {}),
                 })
                 logger.info("카메라 전환 완료, camera_ready 신호 전송")
+                _switch_retry_cam = None   # 성공 → 재시도 대기 해제
+                _switch_retry_count = 0
             except RuntimeError as e:
-                logger.warning("카메라 전환 실패: %s", e)
-                await _broadcast({"type": "camera_error", "message": str(e)})
+                _switch_retry_count += 1
+                if _switch_retry_count < _SWITCH_MAX_RETRY:
+                    _switch_retry_at = time.monotonic() + _SWITCH_RETRY_DELAY
+                    logger.warning(
+                        "카메라 전환 실패 (%d/%d), %.0fs 후 재시도: %s",
+                        _switch_retry_count, _SWITCH_MAX_RETRY, _SWITCH_RETRY_DELAY, e,
+                    )
+                    await _broadcast({"type": "camera_error", "message": str(e), "retrying": True})
+                else:
+                    logger.warning("카메라 전환 최대 재시도 초과, 포기: %s", e)
+                    _switch_retry_cam = None
+                    await _broadcast({"type": "camera_error", "message": str(e), "retrying": False})
 
         if not stream.is_open:
             await asyncio.sleep(0.5)
@@ -1974,8 +2006,14 @@ async def live_loop(detector, stream) -> None:
                     await _refresh_stream_url(stream)
             continue
 
-        # 라이브 미시청 시: 스트림만 keep-alive(위 read_frame 으로 수행됨),
-        # YOLO·자동캘리브·JPEG 인코딩·broadcast 모두 스킵해 GPU/CPU 낭비 차단.
+        # MJPEG 스트림 버퍼는 뷰어 활성 여부와 무관하게 항상 업데이트.
+        # 미시청 상태에서도 /video-stream 접속 시 즉시 영상이 나오도록 함.
+        global _latest_frame_jpeg
+        _mjpeg_ok, _mjpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if _mjpeg_ok:
+            _latest_frame_jpeg = _mjpeg_buf.tobytes()
+
+        # 라이브 미시청 시: YOLO·자동캘리브·broadcast 스킵해 GPU/CPU 낭비 차단.
         # _clients 가 비면(브라우저 종료) visibilitychange 없이도 자동 정지.
         if not (_current_cam and _live_viewer_active and _clients):
             await asyncio.sleep(0.5)
@@ -2027,11 +2065,7 @@ async def live_loop(detector, stream) -> None:
                     logger.info("차선 감지 실패 — GPS 근사 캘리브레이션 유지 (road_width=%.1fm)",
                                 _auto_calib_road_width_m)
 
-        # MJPEG 스트림용 버퍼 업데이트 (모든 프레임, 탐지 여부 무관)
-        global _latest_frame_jpeg
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        if ok:
-            _latest_frame_jpeg = buf.tobytes()
+        # _latest_frame_jpeg 는 viewer-active 체크 전에 이미 업데이트됨
 
         if skip_budget > 0:
             skip_budget -= 1

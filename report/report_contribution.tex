@@ -228,7 +228,9 @@ and broadcasts the analytics JSON to all clients.
 stream directly with OpenCV/FFmpeg and run the same pipeline. It is gated twice: it
 skips tracking while a browser detection client is active (to protect the shared
 tracker), and it skips all GPU work when no one is watching (the frontend reports
-tab visibility).
+tab visibility). Before opening any HLS URL the detector pre-resolves HTTP\,302
+redirects (\texttt{\_resolve\_hls\_url}), so FFmpeg receives a direct endpoint and
+does not silently fail on delivery-layer redirect chains.
 
 \textbf{Background services.} Periodic loops refresh expiring HLS tokens (30\,min),
 poll the ITS segment speed for self-calibration (5\,min), and snapshot all monitored
@@ -322,8 +324,13 @@ pitch, yaw, lateral offset~$x_0$) via \texttt{scipy.optimize.least\_squares}
 success the solved pose is converted to four image--GPS corner pairs and used to
 build both homographies. The pose is then persisted per camera to
 \texttt{camera\_pose.json} so each session refines the prior, with a cold-start
-fallback chain (saved prior $\to$ vehicle-bbox rough pose $\to$ GPS-grid). The
-trapezoid heuristic above serves only as the fallback when the residual exceeds
+fallback chain (saved prior $\to$ vehicle-bbox rough pose $\to$ GPS-grid).
+A complementary \texttt{vehicle\_calib.json} accumulates a per-camera linear
+pixel-to-distance model ($d = B{\cdot}y_{px} + C$, implied vanishing-point
+$y_v{=}-C/B$) fitted from observed vehicle bounding-box heights; it is restored
+on session start and updated online whenever sufficient samples accumulate,
+providing an additional distance scale that cross-checks the geometric homography.
+The trapezoid heuristic above serves only as the fallback when the residual exceeds
 the quality gate or lane detection fails.
 
 \begin{figure}[t]

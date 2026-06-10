@@ -87,7 +87,7 @@ attempts on camera switch.
 | Basemaps | Carto Dark Matter / Positron, Esri World Imagery (satellite) |
 | Video playback | hls.js |
 | Charts | Recharts |
-| External data | ITS OpenAPI `cctvInfo` + `trafficInfo`; OSM Overpass; MOCT NodeLink shapefile → SQLite |
+| External data | ITS OpenAPI `cctvInfo` + `trafficInfo` (국도 `ITS_API_KEY` / 고속도로 `EX_API_KEY` 분리, `asyncio.gather` 병렬 조회); MOCT NodeLink shapefile → SQLite |
 
 ---
 
@@ -163,10 +163,15 @@ frames. Two-pass design:
 **ByteTrack patch.** boxmot 12.x sets `STrack.is_activated` only when `frame_id == 1`; with
 `DETECT_INTERVAL > 1` new tracks were never returned. `_patched_activate` forces `is_activated = True`.
 
-**`VideoStream`.** OpenCV `CAP_FFMPEG`. Deliberately does **not** set `CAP_PROP_BUFFERSIZE=1`: jumping
-to the newest frame creates large inter-frame motion that breaks BoT-SORT's camera-motion compensation
-(ECC). It exposes `pos_msec` (stream PTS) for an accurate speed time axis (§4.11). `reconnect()` waits
-3 s and reopens the same URL.
+**`VideoStream`.** OpenCV `CAP_FFMPEG`. Sets `CAP_PROP_BUFFERSIZE=1` to keep the read buffer minimal.
+`open_video_source` validates connectivity beyond `isOpened()`: `isOpened()` only confirms the m3u8
+manifest opened — if the HLS segment is 404 or token-expired, `read()` silently fails every frame.
+After opening, the function loops `read()` for up to 3 seconds; if no frame arrives it releases the
+capture and raises `RuntimeError("Stream opened but no frames decoded")`
+(`detector.py:open_video_source`). It exposes `pos_msec` (stream PTS) for an accurate speed time axis
+(§4.10). `reconnect()` runs `open_video_source` via `await asyncio.to_thread(open_video_source, url)`
+so the 3-second validation block does not stall the event loop
+(`detector.py:VideoStream.reconnect`).
 
 ### 4.2 `tracker.py` — In/Out counting
 
@@ -264,7 +269,7 @@ los_grade, in_count, out_count, class_counts`.
 
 **Speed pipeline (`_speed`, the most-tuned logic).** Per track:
 1. **Duplicate skip** — identical metre coordinates (non-detect frames) are not appended.
-2. **Physics jump guard** — before appending, compute `raw_max_mps = (MAX_REASONABLE_KPH/3.6) / max(speed_scale, 0.1)` (divides by speed_scale so the guard tightens as the learned scale grows), then two-tier check:
+2. **Physics jump guard** — `corr = depth_corr_fn(bbox_bottom_y, frame_h)` is evaluated first (1.0 if no scale model yet); then `raw_max_mps = (MAX_REASONABLE_KPH/3.6) / max(speed_scale · corr, 0.1)` (accounts for both accumulated scale and depth correction so the guard threshold is consistent with the final scaled speed), then two-tier check:
    - `step_m > raw_max_mps·dt·3.0` → **teleport reset**: window cleared entirely (ID-switch artifact; the
      regression slope would otherwise be corrupted by a position jump across IDs).
    - `step_m > raw_max_mps·dt·1.5` → sample dropped, window kept (transient detection noise; an earlier
@@ -279,8 +284,8 @@ los_grade, in_count, out_count, class_counts`.
    (> 5) and `scaled > ema·2.5 + 20`, ignore the sample. The EMA is **never seeded at 0** (a 0 seed
    makes spike-reject block all real speeds → stuck at 0). Stop decay: when stopped, decay ×0.6 and
    floor to 0 below `SPEED_MIN_KPH = 5`.
-5. **Depth correction + reliability flag** — a depth-varying factor `κ = depth_corr_fn(bbox_bottom_y, frame_h)` is applied: `scaled = raw * κ * speed_scale`. `depth_corr_fn` is `transform.speed_correction_at`, which wraps `_scale_correction_at` (linear fit of inverse apparent-width vs vertical pixel row; clamped [0.3, 3.0]; cached by rounded pixel row). Applied in velocity domain (not position domain) to avoid the frame-to-frame position-jump bug that disabled the previous position-domain attempt.
-   Concurrently, `v.speed_reliable` is set by GPS equirect distance from the camera snap point to the vehicle: `hypot((v.lat - cam_lat) * 110574, (v.lon - cam_lon) * 111320 * cos(cam_lat_rad))`. If > `SPEED_TRUST_MAX_DEPTH_M = 100 m`, `speed_reliable = False`. The speed is still computed and displayed but the vehicle is excluded from `avg_speed_kph`, the `_speed_samples` ITS calibration input, and `is_speeding` is forced False.
+5. **Depth correction + reliability flag** — `κ = corr` (computed at step 2's start) is applied: `scaled = raw * κ * speed_scale`. `depth_corr_fn` is wired from `main.py` at singleton init (`analytics.depth_corr_fn = _transformer.speed_correction_at`); `frame_h` is updated per-frame (`analytics.frame_h = fh`). The function wraps `_scale_correction_at` (linear fit of inverse apparent-width vs vertical pixel row; clamped [0.3, 3.0]; cached by rounded pixel row). Applied in velocity domain (not position domain) to avoid the frame-to-frame position-jump bug that disabled the previous position-domain attempt.
+   `v.speed_reliable` is also computed at step start (`analytics._speed()`): GPS equirect distance from the camera snap point — `hypot((v.lat - cam_lat) * 110574, (v.lon - cam_lon) * 111320 * cos(cam_lat_rad))` > `SPEED_TRUST_MAX_DEPTH_M = 100 m` → `speed_reliable = False`. The speed is still computed and displayed but the vehicle is excluded from `avg_speed_kph`, the `_speed_samples` ITS calibration input, and `is_speeding` is forced False. `FrameAnalytics.avg_speed_kph` is computed exclusively from `reliable_vehicles` (GPS ≤ 100 m from snap).
 6. **Scale + flag** — `speed_kph = round(raw · κ · speed_scale, 1)`; `is_speeding = speed_reliable and speed_kph > limit * 1.10` (10 % tolerance).
    `MAX_REASONABLE_KPH = 180` rejects only ID-swap/homography blow-ups (so legit highway speed passes
    and feeds the ITS calibration).
@@ -329,7 +334,7 @@ when `road_bearing_deg` is not set.
 - `refine_road_pts`: bins accumulated GPS traces along the bearing axis into `ROAD_PTS_REFINE_NBINS = 10`
   bins, averages each bin, and returns a refined road polyline plus a new `snap_along_m`. Requires
   ≥ `ROAD_PTS_REFINE_MIN_SAMPLES = 50` points. **Note**: as of Phase 2 this refinement is explicitly
-  disabled in `live_loop` (`new_road = None`) to preserve the OSM/NodeLink centreline shape.
+  disabled in `live_loop` (`new_road = None`) to preserve the NodeLink centreline shape.
 
 **Bearing auto-refinement (`refine_bearing`).** Accumulates per-frame vehicle flow vectors (x_m, y_m
 deltas) using double-angle statistics (`_flow_sin2`, `_flow_cos2`) to estimate the road axis free of
@@ -371,13 +376,7 @@ Queries the MOCT NodeLink SQLite DB (R*tree spatial index) built once by
 `get_road_snap` returns `snap_lat/lon, bearing_deg, road_name, lanes, max_spd, road_rank,
 road_width_m, is_oneway, cam_dist_m, road_pts, snap_along_m`.
 
-### 4.6 `osm.py` — OSM road width
-`get_road_width_m(lat, lon, radius_m=30)` queries Overpass for the nearest `highway=*` way. Width
-priority: explicit `width` tag → `lanes:forward × lane_w` → `lanes/2 × lane_w`. Lane width 3.5 m
-(motorway/trunk), 3.25 m (primary), else 3.0 m. 7 s timeout; on any failure returns `None` and the
-caller falls back to NodeLink lanes.
-
-### 4.7 `congestion.py` — camera-level clustering
+### 4.6 `congestion.py` — camera-level clustering
 Background cameras have only a vehicle *count* and a status, not per-vehicle GPS, so congestion is
 clustered at the **camera** level. `_cluster_points` is a greedy DBSCAN (haversine distance, `eps`
 = `CONGESTION_EPS_M` = 500 m, `min_samples` = 1, BFS connected components) over busy/congested
@@ -385,7 +384,7 @@ cameras. Polygon: Andrew monotone-chain convex hull for ≥ 3 cameras, else a 12
 (`_severity`): **severe** if ≥ 2 congested or total > 6·members; **medium** if any congested/busy;
 else **minor**.
 
-### 4.8 `history.py` — SQLite time-series
+### 4.7 `history.py` — SQLite time-series
 WAL-mode SQLite, single connection + lock (called via `asyncio.to_thread`). One `snapshots` table
 (`ts, cam_key, name, name_ko, lat, lon, source ['bg'|'live'], vehicle_count, class_counts JSON,
 status, avg_speed_kph`) with an `(cam_key, ts)` index. `record_many` batches one sampler tick.
@@ -393,7 +392,7 @@ status, avg_speed_kph`) with an `(cam_key, ts)` index. `record_many` batches one
 average speed. `peak` returns the max-count timestamp. `export_rows` feeds CSV. `prune` deletes rows
 older than `retention_cutoff(HISTORY_RETENTION_DAYS = 14)`.
 
-### 4.9 `roi_manager.py`, `config.py`, `utils.py`
+### 4.8 `roi_manager.py`, `config.py`, `utils.py`
 - `roi_manager` — ROI polygons stored as **normalized** [0,1] coordinates (resolution-independent),
   keyed by `camera_key = md5(url)[:12]`; `roi_to_pixels` converts for `sv.PolygonZone`.
   `save_roi()` wraps the entire read-modify-write under a module-level `_write_lock` (TOCTOU prevention).
@@ -415,7 +414,7 @@ older than `retention_cutoff(HISTORY_RETENTION_DAYS = 14)`.
   Runtime profile (`.runtime_profile.json`, with `family`) overrides capture/FPS/JPEG.
 - `utils.py` — `haversine_m` geodesic distance.
 
-### 4.10 `main.py` — server, endpoints, orchestration
+### 4.9 `main.py` — server, endpoints, orchestration
 
 **Concurrency primitives in `main.py`.**
 
@@ -433,7 +432,7 @@ older than `retention_cutoff(HISTORY_RETENTION_DAYS = 14)`.
 **REST endpoints.**
 | Method · path | Purpose |
 |---|---|
-| `GET /cctvs` | ITS CCTV list for the viewport bbox (5-min `TTLCache`); adds EN names + dedup numbering |
+| `GET /cctvs` | ITS CCTV list for the viewport bbox (5-min `TTLCache`); `_fetch_its_cctvs` issues parallel (`asyncio.gather`) queries for national roads (`ITS_API_KEY`, `type="its"`) and expressways (`EX_API_KEY`, `type="ex"`), merges results, adds EN names + dedup numbering |
 | `POST /switch-camera` | switch the live camera (see below) |
 | `GET /cctv-refresh` | fresh HLS URL after token expiry (browser) |
 | `GET /hls-proxy` | CORS proxy that rewrites m3u8 segment URLs and streams .ts |
@@ -458,8 +457,10 @@ Messages on `/ws`:
 | (default) | `FrameAnalytics` JSON per frame |
 
 **`switch_camera`.** Bumps `_cam_version` (so `/ws/detect` resets its tracker), resets analytics,
-restores the saved per-camera `speed_scale`, the vehicle scale model (`vehicle_calib.json`) **and the
-road-model pose prior** (`_load_camera_pose` → `load_pose_params`, which seeds the next solve), resets
+restores the saved per-camera `speed_scale` (`_load_speed_scale` returns `(scale, found)`;
+`found=True` sets `analytics.its_scale_restored=True` to keep α=0.01 for already-converged cameras),
+the vehicle scale model (`vehicle_calib.json`) **and the road-model pose prior** (`_load_camera_pose`
+→ `load_pose_params`, which seeds the next solve), resets
 the BoxMOT tracker, kicks an async ITS speed fetch, queries NodeLink (`get_road_info` +
 `get_road_snap`), sets `speed_limit_kph` and the effective bearing (priority **name_bearing ?? snap
 bearing ?? link bearing**), stores `_current_cam`, and queues the stream switch for `live_loop`.
@@ -476,7 +477,7 @@ approximation.
 `analytics.refine_bearing()`. If the refined bearing differs from the last broadcast by ≥
 `BEARING_BROADCAST_MIN_DEG = 1.5°`, an `auto_calibrated` message is sent with the new heading. Road-pts
 refinement (`refine_road_pts`) is intentionally **not applied** (Phase 2 decision: `new_road = None`) to
-preserve the OSM/NodeLink centreline shape over the bearing-binned polyline approximation.
+preserve the NodeLink centreline shape over the bearing-binned polyline approximation.
 
 **Camera-pose / scale persistence.** `camera_pose.json` and `vehicle_calib.json` are keyed by
 `camera_key`; the per-frame scale refit (`_live_process`) uses the adaptive `min_obs` and `_save_*`
@@ -509,7 +510,7 @@ Emits `background_status` only when (status, count) changes.
 **`history_sampler_loop`.** Every 30 s collects bg + live snapshots, batches the INSERT, recomputes
 clusters and broadcasts `congestion_clusters` only when the signature changes, and prunes hourly.
 
-### 4.11 Why the speed time axis matters
+### 4.10 Why the speed time axis matters
 Speed = distance / time. Pixel→metre distance is from the homography; **time must come from the frame
 content**, not the loop. HLS buffering/drops make naive `frame_id/fps` wrong. PTS-first
 (`_speed_timestamp_ms`) plus the OLS window plus EMA smoothing plus the ITS scale together form a
@@ -707,16 +708,3 @@ Usage: `python evaluate.py --source <video-or-HLS> --frames 300 [--lat --lon --b
   against the ITS segment speed; learned per-camera `speed_scale` snapshot
   (`eval_speed.csv`, `eval_summary.json`).
 - **Detection counts** — per-class totals as a pipeline sanity check (`eval_detections.csv`).
-
-
-
-
-
- 빠졌거나 어긋난 부분
-
-  1. "5회 시도가 연속 프레임이라 사실상 1회"라는 점과 실패 후 재시도가 없다는 점 — 문서엔 "schedules 5 auto-calibration attempts"라고만 돼 있어서, 제가 지적한 약점 1·2번(연속 프레임
-  시도, first-success-wins)은 문서만 봐서는 알 수 없습니다.
-  2. §4.6 osm.py 섹션 — 방금 삭제한 모듈인데 문서엔 그대로 살아있습니다. §3 기술스택 표의 "OSM Overpass"도 마찬가지.
-  3. §4.1 VideoStream 서술이 코드와 정반대 — 문서는 "Deliberately does not set CAP_PROP_BUFFERSIZE=1" (BoT-SORT ECC 보호 목적)이라고 하는데, 실제 open_video_source는
-  cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)을 설정합니다 (detector.py:527). 문서가 낡았거나 코드가 의도를 어긴 것 중 하나인데, 어느 쪽이 맞는지 확인이 필요합니다.
-  4. 오늘 변경분 미반영 — 첫 프레임 디코딩 검증(open_video_source), reconnect 스레드화, EX/ITS 키 분리, MJPEG 연결 누수 수정.

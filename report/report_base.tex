@@ -197,7 +197,7 @@ read-modify-write operations.
 
   % external data sources (above / below the centre, short non-crossing arrows)
   \node[ext, above=12mm of tf] (its) {ITS OpenAPI\\cctv + speed};
-  \node[ext, below=12mm of tf] (nl)  {NodeLink + OSM\\road + width};
+  \node[ext, below=12mm of tf] (nl)  {NodeLink\\road + width};
 
   \draw[arr] (canv) -- (det);
   \draw[arr] (live) -- (det);
@@ -210,7 +210,7 @@ read-modify-write operations.
 \end{tikzpicture}}
 \caption{System architecture. The browser path (\texttt{/ws/detect}) and the
 server path (\texttt{live\_loop}) share one detector; a counter prevents concurrent
-tracker calls. External data (ITS CCTV/speed, NodeLink, OSM) feeds localization and
+tracker calls. External data (ITS CCTV/speed, NodeLink) feeds localization and
 self-calibration.}
 \label{fig:arch}
 \end{figure*}
@@ -277,8 +277,7 @@ position perpendicularly onto the nearest road polyline, extract $\pm$150\,m of
 centreline, and---because each direction is stored as a separate one-way link---we
 locate the reverse carriageway and average the two snaps (when 2--40\,m apart) to
 recover the true road centre. The chosen road's speed limit, lane count, and width
-(\,lanes\,$\times$\,2\,$\times$\,lane-width\,) are attached to the camera; OSM
-Overpass provides a width refinement when available.
+(\,lanes\,$\times$\,2\,$\times$\,lane-width\,) are derived from NodeLink and attached to the camera.
 
 Given the centreline, the \emph{two-stage curved transform} maps a pixel
 $(u,v)$ to GPS along the road (Algorithm~\ref{alg:curved}).

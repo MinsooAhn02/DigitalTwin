@@ -198,7 +198,7 @@ read-modify-write operations.
 
   % external data sources (above / below the centre, short non-crossing arrows)
   \node[ext, above=12mm of tf] (its) {ITS OpenAPI\\cctv + speed};
-  \node[ext, below=12mm of tf] (nl)  {NodeLink + OSM\\road + width};
+  \node[ext, below=12mm of tf] (nl)  {NodeLink\\road + width};
 
   \draw[arr] (canv) -- (det);
   \draw[arr] (live) -- (det);
@@ -211,7 +211,7 @@ read-modify-write operations.
 \end{tikzpicture}}
 \caption{System architecture. The browser path (\texttt{/ws/detect}) and the
 server path (\texttt{live\_loop}) share one detector; a counter prevents concurrent
-tracker calls. External data (ITS CCTV/speed, NodeLink, OSM) feeds localization and
+tracker calls. External data (ITS CCTV/speed, NodeLink) feeds localization and
 self-calibration.}
 \label{fig:arch}
 \end{figure*}
@@ -278,8 +278,7 @@ position perpendicularly onto the nearest road polyline, extract $\pm$150\,m of
 centreline, and---because each direction is stored as a separate one-way link---we
 locate the reverse carriageway and average the two snaps (when 2--40\,m apart) to
 recover the true road centre. The chosen road's speed limit, lane count, and width
-(\,lanes\,$\times$\,2\,$\times$\,lane-width\,) are attached to the camera; OSM
-Overpass provides a width refinement when available.
+(\,lanes\,$\times$\,2\,$\times$\,lane-width\,) are derived from NodeLink and attached to the camera.
 
 Given the centreline, the \emph{two-stage curved transform} maps a pixel
 $(u,v)$ to GPS along the road (Algorithm~\ref{alg:curved}).
@@ -706,6 +705,10 @@ the split below reflects primary ownership.
   Algorithm~\ref{alg:speed} (physics jump guard, sliding-window OLS regression,
   EMA smoothing with spike rejection, PTS-derived time axis), addressing the
   specific challenges of CCTV-based measurement.
+  Added a per-vehicle \texttt{speed\_reliable} flag: vehicles whose GPS position
+  lies more than 100\,m from the camera snap point are excluded from the frame
+  average and ITS calibration samples (far-field pixel noise amplification), and
+  \texttt{is\_speeding} is suppressed for unreliable vehicles.
   \item \emph{Dwell counting --- bottleneck and parked-vehicle detection}:
   added dwell-frame counting and pixel-position memory to distinguish
   stopped-in-traffic from genuinely parked vehicles, surviving tracker ID
@@ -718,6 +721,12 @@ the split below reflects primary ownership.
   \texttt{\_json\_file\_lock}, \texttt{roi\_manager.\_write\_lock},
   \texttt{\_frame\_count\_lock}) with all GPU-inference lock acquisitions
   routed through \texttt{asyncio.to\_thread}.
+  Hardened HLS stream connection in \texttt{open\_video\_source}: after
+  \texttt{isOpened()} succeeds, the function loops \texttt{read()} for up to
+  3\,seconds to confirm a frame actually arrives---catching token-expired or
+  404-segment failures that previously caused silent infinite-retry loops.
+  \texttt{VideoStream.reconnect()} was moved to \texttt{asyncio.to\_thread} so
+  the 3-second blocking validation no longer stalls the event loop.
   \item \emph{Movement-vector direction classification}:
   replaced the LineZone-only direction scheme with a continuous movement-based
   classifier that projects each vehicle's inter-frame displacement onto the road
@@ -759,8 +768,7 @@ the split below reflects primary ownership.
   \item \emph{NodeLink road network integration}:
   identified the MOCT NodeLink dataset~\cite{moct_nodelink} as the geometric
   anchor and drove its full integration: road snapping, centreline extraction,
-  bidirectional carriageway fix, road-width derivation, and OSM
-  Overpass~\cite{osm} width refinement.
+  bidirectional carriageway fix, and road-width derivation from lane count.
   \item \emph{Two-stage curved pixel$\to$GPS transform}:
   the flat homography places vehicles incorrectly on curved roads. Added
   arc-length interpolation along the road centreline that keeps GPS positions

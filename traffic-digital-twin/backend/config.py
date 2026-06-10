@@ -32,7 +32,8 @@ def _read_runtime_profile() -> dict:
 RUNTIME_PROFILE = _read_runtime_profile()
 
 # ITS OpenAPI
-ITS_API_KEY: str = os.getenv("ITS_API_KEY", "YOUR_API_KEY_HERE")
+ITS_API_KEY: str = os.getenv("ITS_API_KEY", "YOUR_API_KEY_HERE")  # 국도
+EX_API_KEY:  str = os.getenv("EX_API_KEY",  "YOUR_API_KEY_HERE")  # 고속도로
 ITS_BASE_URL: str    = "https://openapi.its.go.kr:9443/cctvInfo"
 ITS_TRAFFIC_URL: str = "https://openapi.its.go.kr:9443/trafficInfo"
 

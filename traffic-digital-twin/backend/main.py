@@ -261,6 +261,7 @@ from config import (
     HISTORY_RETENTION_DAYS,
     HISTORY_SAMPLE_S,
     HLS_REFRESH_INTERVAL,
+    EX_API_KEY,
     ITS_API_KEY,
     ITS_BASE_URL,
     ITS_POLL_INTERVAL,
@@ -497,8 +498,9 @@ async def _fetch_its_cctvs(minX: float, maxX: float, minY: float, maxY: float) -
     """ITS API에서 국도(its)·고속도로(ex) CCTV를 모두 조회해 합친다.
     한쪽 피드가 비거나 실패해도 다른 쪽 결과는 그대로 반환된다."""
     async def _fetch(client: httpx.AsyncClient, road_type: str) -> list[dict]:
+        api_key = EX_API_KEY if road_type == "ex" else ITS_API_KEY
         params = {
-            "apiKey":   ITS_API_KEY,
+            "apiKey":   api_key,
             "type":     road_type,
             "cctvType": "1",
             "minX": str(minX), "maxX": str(maxX),

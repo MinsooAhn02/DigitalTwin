@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 import shutil
 import threading
+import time
 from typing import Any
 
 import cv2
@@ -523,11 +524,22 @@ def open_video_source(url: str) -> cv2.VideoCapture:
         "analyzeduration;500000|probesize;32768"
     )
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-    if cap.isOpened():
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        logger.info("Stream connected: %s", url)
-        return cap
-    raise RuntimeError(f"Failed to open stream: {url}")
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open stream: {url}")
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    # isOpened()는 매니페스트(m3u8) 열기만 보장 — 세그먼트가 토큰 만료/404면
+    # read()가 계속 실패해 화면이 안 뜬다. 첫 프레임 디코딩까지 확인해야 연결 성공.
+    deadline = time.monotonic() + 3.0
+    while True:
+        ok, _ = cap.read()
+        if ok:
+            logger.info("Stream connected: %s", url)
+            return cap
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+    cap.release()
+    raise RuntimeError(f"Stream opened but no frames decoded: {url}")
 
 
 # ── VehicleDetector ────────────────────────────────────────────────────────
@@ -792,7 +804,9 @@ class VideoStream:
             self._cap = None
         await asyncio.sleep(self.RECONNECT_DELAY)
         try:
-            self._cap = open_video_source(self._url)
+            # open_video_source는 첫 프레임 검증까지 수 초 블로킹 가능 —
+            # 이벤트 루프(라이브 파이프라인·MJPEG·WS)를 멈추지 않도록 스레드에서 실행
+            self._cap = await asyncio.to_thread(open_video_source, self._url)
             return True
         except RuntimeError as exc:
             logger.warning("Reconnect failed: %s", exc)

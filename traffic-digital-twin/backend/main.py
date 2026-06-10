@@ -955,7 +955,7 @@ async def get_cctvs(
             _cctv_cache[cache_key] = result
             return result
     except Exception as e:
-        logger.warning("CCTV 목록 조회 실패: %s", e)
+        logger.warning("CCTV 목록 조회 실패: %s: %s", type(e).__name__, e)
         return []
 
 

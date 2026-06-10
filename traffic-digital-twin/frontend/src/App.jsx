@@ -53,6 +53,7 @@ export default function App() {
   const [monitoredCams, setMonitoredCams] = useState(new Set());
   const [sidebarTab, setSidebarTab]       = useState("live");  // "live" | "monitor"
   const [cctvDrawerOpen, setCctvDrawerOpen] = useState(false);
+  const [feedStatus, setFeedStatus]       = useState(null);  // 국도/고속도로 피드 수신 상태
   const [cctvDrawerQuery, setCctvDrawerQuery] = useState("");
   const switchDebounceRef                 = useRef(null);
   const switchTimeoutRef                  = useRef(null);
@@ -181,7 +182,13 @@ export default function App() {
           if (cached.length > 0) setCctvList(cached);
         } catch (_) {}
       })
-      .finally(() => setCctvLoading(false));
+      .finally(() => {
+        setCctvLoading(false);
+        fetch(`${API_BASE}/cctv-feed-status`)
+          .then((r) => r.json())
+          .then(setFeedStatus)
+          .catch(() => {});
+      });
   }, []);
 
   useEffect(() => { fetchCctvs(INITIAL_VIEW); }, []);
@@ -312,6 +319,33 @@ export default function App() {
           <span style={{ width: 8, height: 8, borderRadius: "50%", background: isConnected ? "#34d399" : "#f87171", display: "inline-block" }} />
           {isConnected ? t("app.connected") : (error ?? t("app.reconnecting"))}
         </div>
+
+        {/* CCTV 피드 상태 칩 — 국도/고속도로 */}
+        {feedStatus && (
+          <div style={{
+            position: "absolute", top: 48, left: 12,
+            display: "flex", alignItems: "center", gap: 12,
+            background: "rgba(17,24,39,0.85)", padding: "5px 14px",
+            borderRadius: 999, fontSize: 12, backdropFilter: "blur(4px)",
+          }}>
+            {[["its", t("app.feedIts")], ["ex", t("app.feedEx")]].map(([key, label]) => {
+              const s = feedStatus[key];
+              const failed = !s || s.ok === false;
+              const color  = failed ? "#f87171" : s.count > 0 ? "#34d399" : "#fbbf24";
+              return (
+                <span
+                  key={key}
+                  title={failed ? t("app.feedFail") : t("app.feedCount", { n: s.count })}
+                  style={{ display: "flex", alignItems: "center", gap: 5, color: "#d1d5db", cursor: "default" }}
+                >
+                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, display: "inline-block" }} />
+                  {label}
+                  {!failed && <span style={{ color: "#9ca3af" }}>{s.count}</span>}
+                </span>
+              );
+            })}
+          </div>
+        )}
 
         {/* 선택된 CCTV 표시 */}
         {selectedCctv && (

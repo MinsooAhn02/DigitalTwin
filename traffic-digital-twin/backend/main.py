@@ -486,6 +486,47 @@ def _parse_its_items(resp_json: dict) -> list[dict]:
     return raw if isinstance(raw, list) else []
 
 
+# 마지막 ITS 조회의 피드별 수신 상태 (프론트엔드 상태 칩용)
+_its_feed_status: dict[str, dict] = {
+    "its": {"ok": None, "count": 0, "ts": 0.0},
+    "ex":  {"ok": None, "count": 0, "ts": 0.0},
+}
+
+
+async def _fetch_its_cctvs(minX: float, maxX: float, minY: float, maxY: float) -> list[dict]:
+    """ITS API에서 국도(its)·고속도로(ex) CCTV를 모두 조회해 합친다.
+    한쪽 피드가 비거나 실패해도 다른 쪽 결과는 그대로 반환된다."""
+    async def _fetch(client: httpx.AsyncClient, road_type: str) -> list[dict]:
+        params = {
+            "apiKey":   ITS_API_KEY,
+            "type":     road_type,
+            "cctvType": "1",
+            "minX": str(minX), "maxX": str(maxX),
+            "minY": str(minY), "maxY": str(maxY),
+            "getType":  "json",
+        }
+        resp = await client.get(ITS_BASE_URL, params=params)
+        resp.raise_for_status()
+        return _parse_its_items(resp.json())
+
+    items: list[dict] = []
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        results = await asyncio.gather(
+            _fetch(client, "its"), _fetch(client, "ex"),
+            return_exceptions=True,
+        )
+    now = time.time()
+    for road_type, res in zip(("its", "ex"), results):
+        if isinstance(res, BaseException):
+            _its_feed_status[road_type] = {"ok": False, "count": 0, "ts": now}
+            logger.warning("CCTV 조회 실패 (type=%s): %s: %s",
+                           road_type, type(res).__name__, res)
+        else:
+            _its_feed_status[road_type] = {"ok": True, "count": len(res), "ts": now}
+            items.extend(res)
+    return items
+
+
 def _build_vehicles(
     tracked: "sv.Detections",
     frame_wh: tuple[int, int] | None = None,
@@ -900,63 +941,59 @@ async def get_cctvs(
     if cache_key in _cctv_cache:
         return _cctv_cache[cache_key]
 
-    params = {
-        "apiKey":   ITS_API_KEY,
-        "type":     "its",
-        "cctvType": "1",
-        "minX": str(minX), "maxX": str(maxX),
-        "minY": str(minY), "maxY": str(maxY),
-        "getType":  "json",
-    }
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(ITS_BASE_URL, params=params)
-            resp.raise_for_status()
-            items = _parse_its_items(resp.json())
-            result = []
-            for item in items:
-                try:
-                    lat = float(item.get("coordy") or 0)
-                    lon = float(item.get("coordx") or 0)
-                    if not (lat and lon):
-                        continue
-                    url     = item.get("cctvurl", "")
-                    name_ko = item.get("cctvname", "")
-                    name    = _korname_to_en(name_ko)
-                    name_en = _en_only_name(name_ko)
-                    cam_key = roi_manager.camera_key(url) if url else None
-                    result.append({
-                        "id":      url or name,
-                        "name":    name,
-                        "name_ko": name_ko,
-                        "name_en": name_en,
-                        "cam_key": cam_key,
-                        "lat":     lat,
-                        "lon":     lon,
-                        "cctvurl": url,
-                        "heading": 0,    # ITS API 미제공 — calibration으로 업데이트
-                        "fov_deg": 70,
-                    })
-                except (ValueError, TypeError):
+        items = await _fetch_its_cctvs(minX, maxX, minY, maxY)
+        result = []
+        for item in items:
+            try:
+                lat = float(item.get("coordy") or 0)
+                lon = float(item.get("coordx") or 0)
+                if not (lat and lon):
                     continue
-            # 동일 name_en 중복 구분: 위도 순 정렬 후 (1)(2)... 부여
-            _name_buckets: dict[str, list] = {}
-            for item in result:
-                key = item["name_en"]
-                if key:
-                    _name_buckets.setdefault(key, []).append(item)
-            for _key, _items in _name_buckets.items():
-                if len(_items) > 1:
-                    _items.sort(key=lambda x: x.get("lat", 0))
-                    for _idx, _item in enumerate(_items, 1):
-                        _item["name_en"] = f"{_key} ({_idx})"
+                url     = item.get("cctvurl", "")
+                name_ko = item.get("cctvname", "")
+                name    = _korname_to_en(name_ko)
+                name_en = _en_only_name(name_ko)
+                cam_key = roi_manager.camera_key(url) if url else None
+                result.append({
+                    "id":      url or name,
+                    "name":    name,
+                    "name_ko": name_ko,
+                    "name_en": name_en,
+                    "cam_key": cam_key,
+                    "lat":     lat,
+                    "lon":     lon,
+                    "cctvurl": url,
+                    "heading": 0,    # ITS API 미제공 — calibration으로 업데이트
+                    "fov_deg": 70,
+                })
+            except (ValueError, TypeError):
+                continue
+        # 동일 name_en 중복 구분: 위도 순 정렬 후 (1)(2)... 부여
+        _name_buckets: dict[str, list] = {}
+        for item in result:
+            key = item["name_en"]
+            if key:
+                _name_buckets.setdefault(key, []).append(item)
+        for _key, _items in _name_buckets.items():
+            if len(_items) > 1:
+                _items.sort(key=lambda x: x.get("lat", 0))
+                for _idx, _item in enumerate(_items, 1):
+                    _item["name_en"] = f"{_key} ({_idx})"
 
-            logger.info("CCTV 조회 완료: %d개 (캐시 저장)", len(result))
-            _cctv_cache[cache_key] = result
-            return result
+        logger.info("CCTV 조회 완료: %d개 (캐시 저장)", len(result))
+        _cctv_cache[cache_key] = result
+        return result
     except Exception as e:
         logger.warning("CCTV 목록 조회 실패: %s: %s", type(e).__name__, e)
         return []
+
+
+# ── CCTV 피드 상태 ────────────────────────────────────────────────────
+@app.get("/cctv-feed-status")
+async def cctv_feed_status():
+    """국도(its)·고속도로(ex) CCTV 피드의 마지막 조회 결과."""
+    return _its_feed_status
 
 
 # ── 백그라운드 모니터링 엔드포인트 ────────────────────────────────────
@@ -1191,17 +1228,9 @@ async def cctv_refresh(
     """
     if not (lat and lon):
         return {"cctvurl": ""}
-    params = {
-        "apiKey": ITS_API_KEY, "type": "its", "cctvType": "1",
-        "minX": str(lon - 0.002), "maxX": str(lon + 0.002),
-        "minY": str(lat - 0.002), "maxY": str(lat + 0.002),
-        "getType": "json",
-    }
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(ITS_BASE_URL, params=params)
-            resp.raise_for_status()
-            items = _parse_its_items(resp.json())
+        items = await _fetch_its_cctvs(lon - 0.002, lon + 0.002,
+                                       lat - 0.002, lat + 0.002)
         for item in items:
             if not name or item.get("cctvname") == name:
                 return {"cctvurl": item.get("cctvurl", "")}
@@ -1767,18 +1796,10 @@ async def _refresh_hls_url_from_its(stream: "VideoStream", *, force: bool) -> No
     if cam is None or not cam.get("name"):
         return
     lat, lon, name = cam["lat"], cam["lon"], cam["name"]
-    params = {
-        "apiKey": ITS_API_KEY, "type": "its", "cctvType": "1",
-        "minX": str(lon - 0.002), "maxX": str(lon + 0.002),
-        "minY": str(lat - 0.002), "maxY": str(lat + 0.002),
-        "getType": "json",
-    }
     label = "긴급 갱신 (토큰 만료)" if force else "갱신"
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(ITS_BASE_URL, params=params)
-            resp.raise_for_status()
-            items = _parse_its_items(resp.json())
+        items = await _fetch_its_cctvs(lon - 0.002, lon + 0.002,
+                                       lat - 0.002, lat + 0.002)
         for item in items:
             if item.get("cctvname") == name:
                 new_url = item.get("cctvurl", "")

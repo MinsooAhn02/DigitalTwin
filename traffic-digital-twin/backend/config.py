@@ -135,6 +135,9 @@ SPEED_JITTER_THRESHOLD_M: float = 0.5
 MAX_REASONABLE_KPH: float = 180.0
 # 이 미만의 측정 속도는 정지차 지터 노이즈로 간주해 0 처리 (정지차가 2km/h로 뜨는 문제)
 SPEED_MIN_KPH: float = 5.0
+# 카메라 snap GPS에서 이 거리(m) 초과 차량의 속도는 통계(avg/ITS 보정)에서 제외.
+# bbox 1px 오차가 원거리에서 수 m로 증폭되므로 표시는 유지하되 샘플로는 쓰지 않는다.
+SPEED_TRUST_MAX_DEPTH_M: float = float(os.getenv("SPEED_TRUST_MAX_DEPTH_M", "100"))
 GC_GRACE_FRAMES: int = 30
 
 # 속도 출력 평활화 (0↔100 깜빡임 제거)

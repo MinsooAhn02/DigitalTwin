@@ -135,6 +135,20 @@ const btnStyle = {
   color: "#e2e8f0", cursor: "pointer",
 };
 
+// ── MJPEG img — 연결 누수 방지 래퍼 ──────────────────────────────────────
+// 브라우저는 <img>가 DOM에서 제거돼도 multipart(MJPEG) 연결을 끊지 않는다.
+// 카메라/탭 전환이 반복되면 좀비 연결이 origin당 동시 연결 한도(6개)를 소진해
+// 새 스트림 요청이 무기한 대기 → WS(지도 점)는 멀쩡한데 영상만 안 뜨는 원인.
+// 언마운트 시 src를 비워 연결을 명시적으로 중단하고, 오류 시 onRetry로 재연결한다.
+function MjpegImg({ src, alt, style, onLoad, onRetry }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const img = ref.current;
+    return () => { if (img) img.src = ""; };
+  }, [src]);
+  return <img ref={ref} src={src} alt={alt} style={style} onLoad={onLoad} onError={onRetry} />;
+}
+
 export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCancelGps, onCalibSaved, onCalibTabChange, switching, cameraStatus, cameraReadyInfo }) {
   const { t } = useLang();
   const videoRef  = useRef(null);
@@ -155,6 +169,17 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
   const [streamKey, setStreamKey]         = useState(0);
   const [mjpegLoading, setMjpegLoading]   = useState(false);
   const [yoloLoading, setYoloLoading]     = useState(false);
+
+  // MJPEG 연결 오류 시 1초 디바운스 후 streamKey를 올려 재연결 (무한 루프 방지)
+  const retryTimerRef = useRef(null);
+  const retryStream = () => {
+    if (retryTimerRef.current) return;
+    retryTimerRef.current = setTimeout(() => {
+      retryTimerRef.current = null;
+      setStreamKey((k) => k + 1);
+    }, 1000);
+  };
+  useEffect(() => () => clearTimeout(retryTimerRef.current), []);
 
   // camera_ready 도착 시 로딩 해제
   // cameraReadyInfo.camera_key와 현재 카메라의 cam_key가 일치할 때만 해제해
@@ -378,11 +403,12 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
         {/* live 탭: MJPEG 스트림 (HLS CORS 우회) */}
         {tab === "live" && (
           <>
-            <img
+            <MjpegImg
               key={streamKey}
               src={`${MJPEG_URL}?k=${streamKey}`}
               alt="live"
               onLoad={() => setMjpegLoading(false)}
+              onRetry={retryStream}
               style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#000" }}
             />
             <StreamOverlay
@@ -395,10 +421,11 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
 
         {/* cal / roi 탭: MJPEG 배경 + 투명 video (오버레이 dimension 기준용) */}
         {(tab === "cal" || tab === "roi") && (
-          <img
+          <MjpegImg
             key={streamKey}
             src={`${MJPEG_URL}?k=${streamKey}`}
             alt="cal-bg"
+            onRetry={retryStream}
             style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }}
           />
         )}
@@ -410,11 +437,12 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
 
         {tab === "yolo" && (
           <>
-            <img
+            <MjpegImg
               key={streamKey}
               src={`${MJPEG_YOLO_URL}?k=${streamKey}`}
               alt="YOLO"
               onLoad={() => setYoloLoading(false)}
+              onRetry={retryStream}
               style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#000" }}
             />
             <StreamOverlay

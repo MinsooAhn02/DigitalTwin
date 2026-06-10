@@ -257,7 +257,8 @@ sets `is_calibrated = False`.
 ### 4.4 `analytics.py` — metrics engine
 
 `VehicleState` (per vehicle): `track_id, class_name, bbox_xyxy, center_px, lat, lon, x_m, y_m,
-direction, speed_kph, is_speeding, dwell_frames, is_bottleneck, is_parked, lane_id` (`lane_id` defaults to -1; reserved for future lane assignment).
+direction, speed_kph, is_speeding, speed_reliable, dwell_frames, is_bottleneck, is_parked, lane_id`.
+`speed_reliable` (default `True`) is cleared when the vehicle's GPS distance from the camera snap point exceeds `SPEED_TRUST_MAX_DEPTH_M`. `lane_id` defaults to -1; reserved for future lane assignment.
 `FrameAnalytics` (per frame): `frame_id, timestamp_ms, vehicles[], vehicle_count, avg_speed_kph,
 los_grade, in_count, out_count, class_counts`.
 
@@ -278,15 +279,13 @@ los_grade, in_count, out_count, class_counts`.
    (> 5) and `scaled > ema·2.5 + 20`, ignore the sample. The EMA is **never seeded at 0** (a 0 seed
    makes spike-reject block all real speeds → stuck at 0). Stop decay: when stopped, decay ×0.6 and
    floor to 0 below `SPEED_MIN_KPH = 5`.
-5. **Scale + flag** — `speed_kph = round(raw · speed_scale, 1)`; `is_speeding = speed_kph > limit * 1.10` (10 % tolerance — accounts for measurement noise and the common 70→77 kph real-world tolerance on national routes).
+5. **Depth correction + reliability flag** — a depth-varying factor `κ = depth_corr_fn(bbox_bottom_y, frame_h)` is applied: `scaled = raw * κ * speed_scale`. `depth_corr_fn` is `transform.speed_correction_at`, which wraps `_scale_correction_at` (linear fit of inverse apparent-width vs vertical pixel row; clamped [0.3, 3.0]; cached by rounded pixel row). Applied in velocity domain (not position domain) to avoid the frame-to-frame position-jump bug that disabled the previous position-domain attempt.
+   Concurrently, `v.speed_reliable` is set by GPS equirect distance from the camera snap point to the vehicle: `hypot((v.lat - cam_lat) * 110574, (v.lon - cam_lon) * 111320 * cos(cam_lat_rad))`. If > `SPEED_TRUST_MAX_DEPTH_M = 100 m`, `speed_reliable = False`. The speed is still computed and displayed but the vehicle is excluded from `avg_speed_kph`, the `_speed_samples` ITS calibration input, and `is_speeding` is forced False.
+6. **Scale + flag** — `speed_kph = round(raw · κ · speed_scale, 1)`; `is_speeding = speed_reliable and speed_kph > limit * 1.10` (10 % tolerance).
    `MAX_REASONABLE_KPH = 180` rejects only ID-swap/homography blow-ups (so legit highway speed passes
    and feeds the ITS calibration).
 
-**Cross-vehicle outlier rejection (`_reject_speed_outliers`, used by `_avg_speed`).** Before averaging
-the per-vehicle speeds for a frame, samples with `|x − median| > SPEED_OUTLIER_MAD_K·1.4826·MAD`
-(K = 3) are dropped (needs ≥ 3 vehicles; otherwise kept). A single ID-swap/homography spike no longer
-pulls the frame average — which matters because that average also feeds the `speed_scale` statistics, so
-ITS-less roads get self-consistency checking without an external reference.
+**Cross-vehicle outlier rejection (`_reject_speed_outliers`, used by `_avg_speed`).** The frame average is computed only over `speed_reliable` vehicles (GPS distance ≤ 100 m from camera); within that set, samples with `|x − median| > SPEED_OUTLIER_MAD_K·1.4826·MAD` (K = 3) are dropped (needs ≥ 3 vehicles; otherwise kept). A single ID-swap/homography spike or far-field noise vehicle no longer pulls the frame average — which matters because that average also feeds the `speed_scale` statistics, so ITS-less roads get self-consistency checking without an external reference.
 
 `MAX_REASONABLE_KPH = 180` and `speed_limit_kph` come from the NodeLink `max_spd` on camera switch
 (else `SPEED_LIMIT_KPH = 120`).
@@ -307,16 +306,17 @@ regardless of track_id (survives ID cycling). Parked vehicles are excluded from 
 **LOS grade (`_los`).** `LOS_THRESHOLDS = {A≤3, B≤6, C≤9, D≤12, E≤15}`, else F, on the active
 (non-parked) vehicle count.
 
-**ITS self-calibration (`calibrate_from_its`).** Compares a 10-min rolling average of measured speed
-against the ITS segment speed:
+**ITS self-calibration (`calibrate_from_its`).** Compares a 10-min rolling average of measured speed (from `speed_reliable` vehicles only) against the ITS segment speed:
 - needs ≥ 50 samples in the 600 s window; skip if average < 3 kph.
 - **Volatility guard:** coefficient of variation > 0.4 ⇒ skip (traffic in transition).
 - `target = old_scale · ITS / our_avg`, **clamped to [0.3, 5.0]** (a clamp hit logs a warning —
   surfaces a badly-off homography instead of failing silently).
-- Fixed slow learning rate: `scale = old_scale * 0.99 + target * 0.01` (1 % new, 99 % old per update).
-  No convergence state is tracked; the rate is intentionally fixed to treat ITS as an imprecise soft
-  reference (ITS figures reflect ~1 km segment averages at 5-min intervals). The 10-min window is double
-  the ITS 5-min aggregation so the ITS window is always contained regardless of poll phase.
+- **Adaptive learning rate** with per-update ±10% step clamp:
+  - Camera whose `speed_scale` was **restored from `speed_scale.json`** (`its_scale_restored=True`): α fixed at 0.01 (preserve accumulated calibration).
+  - **New camera** (no saved factor): α = 0.15 on the 1st–2nd update, 0.05 on the 3rd–4th, then 0.01 — fast initial convergence, dampened steady-state.
+  - Step clamp: `new_scale = clamp(blended, old * 0.9, old * 1.1)` — a single corrupt ITS sample cannot shift the scale more than 10% in one step.
+  - `_its_calib_runs` counter increments per update, reset to 0 on `analytics.reset()` (camera switch).
+  The 10-min window is double the ITS 5-min aggregation so the ITS window is always contained regardless of poll phase.
 
 **Direction classification (`_assign_directions`, `_project_to_road_axis`).** Per vehicle, a signed
 along-axis delta (EMA over frames, deadzone `DIR_DEADZONE_M = 0.10 m`) determines direction:
@@ -400,7 +400,7 @@ older than `retention_cutoff(HISTORY_RETENTION_DAYS = 14)`.
 - `config.py` — all constants. Key groups:
   - YOLO: `YOLO_MODEL_FAMILY`, `YOLO_CONF=0.30`, `YOLO_IOU=0.45`, `YOLO_DETECT_INTERVAL`
   - Tracker: `TRACKER_TIER`, `BYTE_TRACK_FPS=30`, `BYTE_TRACK_BUFFER=30`
-  - Speed: `SPEED_WINDOW_S=0.7s` → `SPEED_WINDOW_FRAMES`, `SPEED_EMA_ALPHA=0.35`, `SPEED_SPIKE_FACTOR=2.5`, `SPEED_STOP_SPAN_S=1.0` (imported in analytics but stop-decay uses fixed 0.6 multiplier), `SPEED_MIN_KPH=5`, `MAX_REASONABLE_KPH=180`, `SPEED_JITTER_THRESHOLD_M=0.5`, `SPEED_OUTLIER_MAD_K=3.0`
+  - Speed: `SPEED_WINDOW_S=0.7s` → `SPEED_WINDOW_FRAMES`, `SPEED_EMA_ALPHA=0.35`, `SPEED_SPIKE_FACTOR=2.5`, `SPEED_STOP_SPAN_S=1.0` (imported in analytics but stop-decay uses fixed 0.6 multiplier), `SPEED_MIN_KPH=5`, `MAX_REASONABLE_KPH=180`, `SPEED_JITTER_THRESHOLD_M=0.5`, `SPEED_OUTLIER_MAD_K=3.0`, `SPEED_TRUST_MAX_DEPTH_M=100` (GPS distance cutoff; vehicles beyond this are `speed_reliable=False`)
   - Pose/scale: `POSE_RESIDUAL_MAX_PX=8.0`, `SCALE_MIN_OBS=12`, `SCALE_MIN_OBS_SPARSE=8`, `SCALE_SPARSE_AFTER_FRAMES=600`
   - Direction: `DIR_DEADZONE_M=0.10`, `DIR_EMA_ALPHA=0.4`
   - Bearing refinement: `BEARING_REFINE_MIN_SAMPLES=30`, `BEARING_REFINE_EMA_ALPHA=0.15`, `BEARING_REFINE_INTERVAL_FRAMES=30`, `BEARING_BROADCAST_MIN_DEG=1.5`
@@ -513,7 +513,11 @@ clusters and broadcasts `congestion_clusters` only when the signature changes, a
 Speed = distance / time. Pixel→metre distance is from the homography; **time must come from the frame
 content**, not the loop. HLS buffering/drops make naive `frame_id/fps` wrong. PTS-first
 (`_speed_timestamp_ms`) plus the OLS window plus EMA smoothing plus the ITS scale together form a
-four-layer defence against speed error (§7).
+four-layer defence against speed error (§7). Two further mechanisms reduce systematic bias: a
+depth-varying correction factor κ (`speed_correction_at`) compensates depth-dependent homography
+projection error in the velocity domain, and the far-field reliability cutoff
+(`SPEED_TRUST_MAX_DEPTH_M = 100 m`) prevents pixel-noise amplification at range from biasing the
+aggregate statistics or triggering false speeding alerts.
 
 ---
 
@@ -610,8 +614,10 @@ with a high-contrast variant for light/satellite maps.
 5. **Background monitoring** — `POST /background/add` → 8 s `detect()` task → `background_status` →
    icon colour; fed into congestion clustering and history.
 6. **Speed self-calibration** — every 5 min ITS segment speed → `calibrate_from_its` → `speed_scale`
-   updated (fixed rate: 99% old + 1% new) and saved per camera. No convergence state is tracked; the
-   scale accumulates across sessions as a running soft-reference correction.
+   updated using an adaptive α schedule (0.15 → 0.05 → 0.01 for new cameras; 0.01 fixed for restored)
+   with a ±10% per-update step clamp, then saved per camera. The scale accumulates across sessions as a
+   running soft-reference correction; `speed_reliable` vehicles (GPS ≤ 100 m from snap) feed the
+   calibration window exclusively.
 7. **Road-model pose calibration** — on switch, lane edges + VP + NodeLink width/bearing →
    `camera_pose.solve_pose` → homography; the solved pose is saved to `camera_pose.json` and seeds the
    next session's solve (per-camera refinement). Edges too weak → saved prior; no prior → rough
@@ -701,3 +707,16 @@ Usage: `python evaluate.py --source <video-or-HLS> --frames 300 [--lat --lon --b
   against the ITS segment speed; learned per-camera `speed_scale` snapshot
   (`eval_speed.csv`, `eval_summary.json`).
 - **Detection counts** — per-class totals as a pipeline sanity check (`eval_detections.csv`).
+
+
+
+
+
+ 빠졌거나 어긋난 부분
+
+  1. "5회 시도가 연속 프레임이라 사실상 1회"라는 점과 실패 후 재시도가 없다는 점 — 문서엔 "schedules 5 auto-calibration attempts"라고만 돼 있어서, 제가 지적한 약점 1·2번(연속 프레임
+  시도, first-success-wins)은 문서만 봐서는 알 수 없습니다.
+  2. §4.6 osm.py 섹션 — 방금 삭제한 모듈인데 문서엔 그대로 살아있습니다. §3 기술스택 표의 "OSM Overpass"도 마찬가지.
+  3. §4.1 VideoStream 서술이 코드와 정반대 — 문서는 "Deliberately does not set CAP_PROP_BUFFERSIZE=1" (BoT-SORT ECC 보호 목적)이라고 하는데, 실제 open_video_source는
+  cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)을 설정합니다 (detector.py:527). 문서가 낡았거나 코드가 의도를 어긴 것 중 하나인데, 어느 쪽이 맞는지 확인이 필요합니다.
+  4. 오늘 변경분 미반영 — 첫 프레임 디코딩 검증(open_video_source), reconnect 스레드화, EX/ITS 키 분리, MJPEG 연결 누수 수정.

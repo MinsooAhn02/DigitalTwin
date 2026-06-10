@@ -77,6 +77,7 @@ class PerspectiveTransformer:
         self._scale_obs: deque[tuple[float, float]] = deque(maxlen=200)  # (v_px, scale_m/px)
         self._scale_model: tuple[float, float] | None = None             # (B, C): 1/scale = B*v + C
         self._scale_obs_since_fit: int = 0
+        self._speed_corr_cache: dict[int, float] = {}  # round(v_px) → corr factor
         self._frame_h: int = 0
         self._frame_w: int = 0
 
@@ -490,6 +491,7 @@ class PerspectiveTransformer:
             return False
         self._scale_model = (B, C)
         self._scale_obs_since_fit = 0
+        self._speed_corr_cache.clear()
         logger.info("fit_scale_model 완료: B=%.5f C=%.3f vp_y=%.1fpx (obs=%d)",
                     B, C, vp_y, len(self._scale_obs))
         return True
@@ -518,6 +520,7 @@ class PerspectiveTransformer:
             self._scale_model = (B, C)
             self._frame_h = int(params.get("frame_h", self._frame_h))
             self._frame_w = int(params.get("frame_w", self._frame_w))
+            self._speed_corr_cache.clear()
             logger.info("load_scale_params: B=%.5f C=%.3f (frame %dx%d)",
                         B, C, self._frame_w, self._frame_h)
         except (KeyError, TypeError, ValueError) as exc:
@@ -537,8 +540,30 @@ class PerspectiveTransformer:
         """
         self._scale_obs.clear()
         self._scale_obs_since_fit = 0
+        self._speed_corr_cache.clear()
         if clear_model:
             self._scale_model = None
+
+    def speed_correction_at(self, v_px: float, frame_h: int = 0) -> float:
+        """픽셀 y=v_px에서 속도 보정 계수 반환.
+
+        _scale_correction_at의 velocity-domain 공개 래퍼. 좌표가 아닌 속도값에 곱한다.
+        frame_h가 0이 아니고 피팅 당시 해상도(_frame_h)와 다르면 좌표를 환산해 적용.
+        모델 미확보 시 1.0 반환.
+        """
+        if self._scale_model is None:
+            return 1.0
+        # 해상도 불일치 환산 (ws/detect 경로가 다른 해상도로 보낼 수 있음)
+        actual_v = v_px
+        if frame_h > 0 and self._frame_h > 0 and frame_h != self._frame_h:
+            actual_v = v_px * self._frame_h / frame_h
+        key = round(actual_v)
+        cached = self._speed_corr_cache.get(key)
+        if cached is not None:
+            return cached
+        result = self._scale_correction_at(actual_v)
+        self._speed_corr_cache[key] = result
+        return result
 
     # ── Road-model 카메라 포즈 영속화 / 적용 ───────────────────────────
 
@@ -654,6 +679,7 @@ class PerspectiveTransformer:
         H_m, _ = cv2.findHomography(src_pts, dst_meter)
         if H_m is not None:
             self._H_meter = H_m
+        self._speed_corr_cache.clear()
         self._bearing_rad = 0.0
         self._is_calibrated = False
 

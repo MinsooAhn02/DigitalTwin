@@ -116,10 +116,8 @@ standpoint, are:
   \item \textbf{Per-camera scale correction.} Because absolute distance scale is
   unknowable from an uncalibrated camera, the system maintains a per-camera
   \texttt{speed\_scale} that decouples geometric projection from absolute speed
-  accuracy. An ITS-referenced online update loop ($\alpha{=}0.99$, every 5\,min)
-  accumulates the factor across sessions; the current deployment has collected
-  factors for 37 cameras (range 0.34--2.25), though convergence requires extended
-  multi-session operation at this adaptation rate (see Section~\ref{sec:discuss}).
+  accuracy. An ITS-referenced online update loop with adaptive $\alpha$ (0.15 initially, decaying to 0.01) accumulates the factor across sessions; the current deployment has collected
+  factors for 37 cameras (range 0.34--2.25), though multi-session operation is required for full convergence (see Section~\ref{sec:discuss}).
   \item \textbf{A complete, resilient pipeline.} Automatic lane-based calibration,
   manual 4-point calibration, dual-path inference (browser canvas and server-side
   HLS) over a shared detector, multi-camera background monitoring, congestion
@@ -363,14 +361,14 @@ constants in Table~\ref{tab:const}.
 \caption{Per-track speed estimation (\texttt{analytics.\_speed})}
 \label{alg:speed}
 \begin{algorithmic}[1]
-\Require window $W$, prior EMA $v_e$, $\sigma \gets \texttt{speed\_scale}$
+\Require window $W$, prior EMA $v_e$, $\sigma \gets \texttt{speed\_scale}$, $\kappa \gets \texttt{depth\_corr}(y_\text{bbox})$
 \State \textbf{if} duplicate position \textbf{then} skip \Comment{dedup}
 \State \textbf{if} $\textit{step} > (V_{\max}/3.6\sigma)\,dt\cdot 3.0$ \textbf{then} clear $W$ \Comment{teleport reset}
 \State \textbf{else if} $\textit{step} > (V_{\max}/3.6\sigma)\,dt\cdot 1.5$ \textbf{then} drop sample, keep $W$ \Comment{jump guard}
 \State \textbf{if} $dt > 2$\,s \textbf{then} clear $W$ \Comment{track gap}
 \State fit $\hat{v}$ by OLS on $W$ ($0.7$\,s); \textbf{if} $\mathrm{disp}(W){<}0.5$\,m \textbf{then} $\hat{v}\gets 0$ \Comment{OLS}
-\State $v_e \gets (1{-}\alpha)v_e + \alpha\hat{v}\sigma$, $\alpha{=}0.35$; reject spike; decay on stop \Comment{EMA}
-\State \textbf{output} $v_e$;\quad $\textit{is\_speeding} \gets v_e > 1.10\cdot\textit{limit}$ \Comment{output}
+\State $v_e \gets (1{-}\alpha)v_e + \alpha\hat{v}\kappa\sigma$, $\alpha{=}0.35$; reject spike; decay on stop \Comment{EMA}
+\State \textbf{output} $v_e$;\quad $\textit{is\_speeding} \gets \textit{reliable} \land v_e > 1.10\cdot\textit{limit}$ \Comment{output}
 \end{algorithmic}
 \end{algorithm}
 
@@ -400,6 +398,10 @@ Cluster $\varepsilon$ & 500\,m (haversine) \\
 \end{tabular}
 \end{table}
 
+Two additional reliability mechanisms reduce systematic bias in the speed estimate.
+First, a depth-varying correction factor $\kappa$ is computed from a per-camera vehicle apparent-size model (a linear fit of inverse apparent bbox width versus vertical pixel position), compensating for the depth-dependent projection error of the homography without introducing frame-to-frame position discontinuities.
+Second, vehicles whose GPS position lies more than 100\,m from the camera snap point (\texttt{SPEED\_TRUST\_MAX\_DEPTH\_M}) are flagged \texttt{speed\_reliable=False}: their speed is still displayed, but excluded from the frame average, the ITS calibration input, and speeding alerts, preventing far-field pixel noise from biasing aggregate statistics.
+
 \subsection{Per-Camera Scale Correction}
 The absolute distance scale of an uncalibrated camera is unknowable from geometry
 alone, so a residual scale error persists after geometric calibration. The system
@@ -413,14 +415,11 @@ slowly:
 \textit{target} = \textit{scale}\cdot \frac{v_\text{ITS}}{\bar v_\text{ours}},\quad
 \textit{scale} \gets \alpha\,\textit{scale} + (1{-}\alpha)\,\textit{target},
 \end{equation}
-with $\alpha{=}0.99$, clamped to $[0.3,5.0]$, using a 10-minute rolling window
-of continuous, per-frame speed observations, requiring at least 50 frames with
-valid vehicle detections to trigger the correction, and a coefficient-of-variation
-guard ($\le$0.4) to skip volatile traffic. The factor persists per camera and accumulates across sessions without
-resetting the geometric calibration. The slow rate means convergence requires extended
-operation; in the current deployment the factor captures geometric projection bias
-and serves as a running estimate rather than a converged ITS-validated correction
-(Section~\ref{sec:discuss}).
+with an adaptive $\alpha$ schedule and a per-update $\pm10\,\%$ step clamp in addition to the absolute $[0.3,5.0]$ bounds.
+For cameras without a previously saved factor (first session), $\alpha$ decreases from $0.15$ (updates 1--2) through $0.05$ (updates 3--4) to $0.01$ thereafter, enabling fast initial convergence while damping later oscillation.
+For cameras whose factor was restored from \texttt{speed\_scale.json}, $\alpha$ is fixed at $0.01$ to preserve the accumulated calibration.
+The calibration uses a 10-minute rolling window of continuous, per-frame speed observations, requiring at least 50 frames with valid vehicle detections to trigger the correction, and a coefficient-of-variation guard ($\le$0.4) to skip volatile traffic.
+The factor persists per camera and accumulates across sessions without resetting the geometric calibration (Section~\ref{sec:discuss}).
 
 \subsection{Aggregation, Congestion, and History}
 Direction is primarily determined by projecting each vehicle's inter-frame
@@ -618,15 +617,8 @@ polygon and vehicle GPS; the CCTV-name road-hint reduces but does not eliminate 
 Finally, congestion is clustered at the camera level because background cameras
 expose only counts, not per-vehicle speeds.
 
-The ITS-based self-calibration loop uses a slow adaptation rate ($\alpha{=}0.99$,
-updated every 5\,min) to treat the ITS segment speed as an imprecise soft reference,
-since ITS figures reflect 1-km road-segment averages that may not align with the
-camera's exact observation zone or direction. As a result, the per-camera
-\texttt{speed\_scale} requires extended multi-session operation to converge; none of
-the 37 accumulated cameras had converged at time of evaluation. The scale factors
-therefore capture the geometric projection bias present at each camera, rather than
-a fully ITS-validated correction, and should be interpreted as a running estimate
-rather than a definitive calibration.
+The ITS-based self-calibration loop uses an adaptive learning rate (0.15 on the first two updates, decaying to 0.01 after convergence, every 5\,min) to treat the ITS segment speed as an imprecise soft reference, since ITS figures reflect 1-km road-segment averages that may not align with the camera's exact observation zone or direction.
+The adaptive schedule accelerates initial convergence for new cameras while preserving accumulated corrections for returning ones, but multi-session operation is still required for the factor to fully stabilize; none of the 37 accumulated cameras had converged at time of evaluation. The scale factors therefore capture the geometric projection bias present at each camera and should be interpreted as a running estimate rather than a definitive calibration.
 
 Because the system derives all geographic positions from map geometry rather than
 on-vehicle GPS receivers, localization accuracy is bounded by the quality of the
@@ -759,9 +751,10 @@ the split below reflects primary ownership.
   \item \emph{Per-camera scale correction loop}:
   designed and implemented an online ITS-referenced update loop that compares the
   measured rolling average against the official ITS segment speed and accumulates
-  a per-camera \texttt{speed\_scale}, with a CV guard to skip volatile traffic
-  and slow EMA adaptation ($\alpha{=}0.99$) to handle ITS measurement
-  uncertainty. The factor persists across sessions and converges to an
+  a per-camera \texttt{speed\_scale}, with a CV guard to skip volatile traffic,
+  an adaptive $\alpha$ schedule (0.15 initially $\to$ 0.01 steady-state) for fast
+  initial convergence, and a $\pm10\,\%$ per-update clamp to guard against corrupt
+  ITS samples. The factor persists across sessions and accumulates toward an
   ITS-validated correction over extended operation.
   \item \emph{NodeLink road network integration}:
   identified the MOCT NodeLink dataset~\cite{moct_nodelink} as the geometric

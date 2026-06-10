@@ -24,9 +24,7 @@ main.py — FastAPI WebSocket 브로드캐스트 서버
       4. snap 좌표를 transformer GPS 기준점 및 FOV polygon 원점으로 사용
 
     live_loop 카메라 전환 시:
-      5. OSM Overpass API로 도로폭 쿼리 (osm.py):
-           width 태그 → lanes:forward × 차선폭 → lanes/2 × 차선폭 순 우선순위
-           실패 시 nodelink lanes × 차선폭으로 폴백
+      5. nodelink lanes × 차선폭으로 도로폭 계산
       6. 소실점(VP) 기반 자동 캘리브레이션 (auto_calibrate_from_frame):
            - name_bearing 확정 시 (fix_direction=True): VP flip 스킵
            - 미확정 시: VP가 우측 편향이면 bearing 180° 반전
@@ -231,15 +229,17 @@ def _apply_fov_ema(new_info: dict) -> dict:
     return {**new_info, **_accepted_fov}
 
 
-def _load_speed_scale(cam_key: str) -> float:
-    """카메라별 저장된 속도 보정 계수 로드. 없으면 1.0."""
+def _load_speed_scale(cam_key: str) -> tuple[float, bool]:
+    """카메라별 저장된 속도 보정 계수 로드. 반환: (scale, found). 없으면 (1.0, False)."""
     try:
         if SPEED_SCALE_PATH.exists():
             data = json.loads(SPEED_SCALE_PATH.read_text(encoding="utf-8"))
-            return float(data.get(cam_key, {}).get("speed_scale", 1.0))
+            entry = data.get(cam_key)
+            if entry:
+                return float(entry.get("speed_scale", 1.0)), True
     except Exception as exc:
         logger.debug("speed_scale 로드 실패 (기본 1.0 사용): %s", exc)
-    return 1.0
+    return 1.0, False
 
 
 def _save_speed_scale(cam_key: str, scale: float) -> None:
@@ -286,6 +286,8 @@ logger = logging.getLogger(__name__)
 
 analytics    = TrafficAnalytics()
 _transformer = PerspectiveTransformer()
+# ① 깊이별 속도 보정 함수 배선 (싱글톤이므로 1회만 설정)
+analytics.depth_corr_fn = _transformer.speed_correction_at
 # 실행 중 자동 측정 수집기 — make dev로 실행 후 카메라를 보면 자동으로 누적되고
 # history_sampler_loop(30s)가 backend/eval_*.csv + eval_summary.json 으로 flush.
 # GET /eval/report 로 즉시 스냅샷, POST /eval/reset 로 초기화.
@@ -1099,8 +1101,10 @@ async def switch_camera(body: CameraSwitch):
     _scale_switch_frame = _frame_count   # 적응형 min_obs 기준 리셋
     analytics.reset()
     cam_key = roi_manager.camera_key(body.cctvurl)
-    analytics.speed_scale = _load_speed_scale(cam_key)
-    logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
+    _scale, _found = _load_speed_scale(cam_key)
+    analytics.speed_scale = _scale
+    analytics.its_scale_restored = _found
+    logger.info("속도 보정 계수 복원: %.4f found=%s (camera=%s)", _scale, _found, cam_key)
 
     # Vehicle apparent-size scale model 복원
     _transformer.reset_scale_obs(clear_model=True)
@@ -1352,6 +1356,7 @@ async def ws_detect(ws: WebSocket):
             # GPS 변환 + VehicleState 생성
             vehicles = _build_vehicles(tracked, frame_wh=(fw, fh))
             fid += 1
+            analytics.frame_h = fh  # ① 깊이별 보정용 현재 프레임 높이
             # 브라우저 캔버스 프레임은 실시간 도착 → 벽시계를 속도 시간축으로 사용
             # (합성 fid/FPS 는 처리 지연 시 dt 과소계산 → 속도 0 버그 원인)
             result = analytics.update(fid, time.monotonic() * 1000, vehicles, in_cnt, out_cnt, in_ids, out_ids)
@@ -1844,7 +1849,7 @@ async def live_loop(detector, stream) -> None:
     _switch_retry_at: float = 0.0           # 재시도 허용 시각 (monotonic)
     _SWITCH_MAX_RETRY = 2
     _SWITCH_RETRY_DELAY = 2.0               # 재시도 간격 (초). FFmpeg timeout 10s 기준 총 ~24s
-    global _stream_fps
+    global _stream_fps, _latest_frame_jpeg
 
     logger.info("Live 루프 대기 중 — 지도에서 CCTV를 클릭하여 스트림을 시작하세요")
 
@@ -1909,8 +1914,10 @@ async def live_loop(detector, stream) -> None:
 
                 # 저장된 speed_scale 복원
                 cam_key = roi_manager.camera_key(cam_url)
-                analytics.speed_scale = _load_speed_scale(cam_key)
-                logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
+                _scale, _found = _load_speed_scale(cam_key)
+                analytics.speed_scale = _scale
+                analytics.its_scale_restored = _found
+                logger.info("속도 보정 계수 복원: %.4f found=%s (camera=%s)", _scale, _found, cam_key)
 
                 # Vehicle apparent-size scale model 복원 (live_loop 경로)
                 _transformer.reset_scale_obs(clear_model=True)
@@ -2018,6 +2025,8 @@ async def live_loop(detector, stream) -> None:
 
         frame_id, frame = stream.read_frame()
         if frame is None:
+            # 복구 중엔 이전 카메라 프레임이 굳어 보이지 않도록 placeholder로 교체
+            _latest_frame_jpeg = _placeholder_jpeg
             ok = await stream.reconnect()
             if ok:
                 _reconnect_fails = 0
@@ -2031,7 +2040,6 @@ async def live_loop(detector, stream) -> None:
 
         # MJPEG 스트림 버퍼는 뷰어 활성 여부와 무관하게 항상 업데이트.
         # 미시청 상태에서도 /video-stream 접속 시 즉시 영상이 나오도록 함.
-        global _latest_frame_jpeg
         _mjpeg_ok, _mjpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
         if _mjpeg_ok:
             _latest_frame_jpeg = _mjpeg_buf.tobytes()
@@ -2227,6 +2235,7 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
                                        _drift * 100, _saved_vc["vp_y"], _new_vp)
                 _save_vehicle_calib(_ck, new_p)
 
+    analytics.frame_h = h  # ① 깊이별 보정용 현재 프레임 높이
     _t0 = time.perf_counter()
     result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt, in_ids, out_ids)
     _analytics_ms = (time.perf_counter() - _t0) * 1000.0

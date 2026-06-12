@@ -144,6 +144,7 @@ function MjpegImg({ src, alt, style, onLoad, onRetry }) {
   const ref = useRef(null);
   useEffect(() => {
     const img = ref.current;
+    if (img) img.src = src;
     return () => { if (img) img.src = ""; };
   }, [src]);
   return <img ref={ref} src={src} alt={alt} style={style} onLoad={onLoad} onError={onRetry} />;

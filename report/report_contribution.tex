@@ -412,7 +412,7 @@ reported direction may not match the camera's field of view---so the loop adapts
 slowly:
 \begin{equation}
 \textit{target} = \textit{scale}\cdot \frac{v_\text{ITS}}{\bar v_\text{ours}},\quad
-\textit{scale} \gets \alpha\,\textit{scale} + (1{-}\alpha)\,\textit{target},
+\textit{scale} \gets (1{-}\alpha)\,\textit{scale} + \alpha\,\textit{target},
 \end{equation}
 with an adaptive $\alpha$ schedule and a per-update $\pm10\,\%$ step clamp in addition to the absolute $[0.3,5.0]$ bounds.
 For cameras without a previously saved factor (first session), $\alpha$ decreases from $0.15$ (updates 1--2) through $0.05$ (updates 3--4) to $0.01$ thereafter, enabling fast initial convergence while damping later oscillation.
@@ -447,11 +447,14 @@ severity-shaded region.}
 
 \subsection{Visualization}
 The deck.gl map layers congestion polygons, vehicle trails, the FOV polygon,
-status-coloured camera icons, and vehicle markers. The FOV polygon uses one of four
-strategies in priority order: (1)~the ROI GPS ring broadcast from the backend;
-(2)~the manually clicked calibration ring; (3)~a straight-sided rectangle derived
-from near/far distance and road width (\texttt{computeCalibPolygon}); or,
-when uncalibrated, (4)~a default trapezoid.
+status-coloured camera icons, and vehicle markers. The FOV polygon uses one of three
+strategies in priority order: (1)~the manual calibration ring (\texttt{calibGpsRing}),
+the exact four GPS corners entered by the user; (2)~a curved polygon computed by
+walking the road centreline and laterally offsetting by half the road width
+(\texttt{computeRoadCorridorPolygon}), so the footprint follows real road curvature
+rather than a flat projection; or (3)~a straight-sided rectangle derived from
+near/far distance and road width (\texttt{computeCalibPolygon}), falling back to a
+default 70° trapezoid (\texttt{computeFovPolygon}) when uncalibrated.
 
 The sidebar's vehicle list provides \emph{direction-filter tabs} (All / Inbound /
 Outbound) that filter the displayed rows by the movement-vector-based direction; the

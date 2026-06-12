@@ -4,8 +4,6 @@
 \providecommand\HyField@AuxAddToCoFields[2]{}
 \citation{yolo26}
 \citation{yolov8}
-\citation{yolo26}
-\citation{yolov8}
 \citation{tensorrt}
 \citation{boxmot}
 \citation{bytetrack}
@@ -31,8 +29,8 @@
 \newlabel{sec:impl}{{IV}{2}{Implementation}{section.4}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-A}}Detection and Tracking}{2}{subsection.4.1}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-B}}Map-Anchored Localization}{2}{subsection.4.2}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces System architecture. The browser path (\texttt  {/ws/detect}) and the server path (\texttt  {live\textunderscore \allowbreak  loop}) share one detector; a counter prevents concurrent tracker calls. External data (ITS CCTV/speed, NodeLink, OSM) feeds localization and self-calibration.}}{3}{figure.1}\protected@file@percent }
-\newlabel{fig:arch}{{1}{3}{System architecture. The browser path (\texttt {/ws/detect}) and the server path (\texttt {live\_loop}) share one detector; a counter prevents concurrent tracker calls. External data (ITS CCTV/speed, NodeLink, OSM) feeds localization and self-calibration}{figure.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces System architecture. The browser path (\texttt  {/ws/detect}) and the server path (\texttt  {live\textunderscore \allowbreak  loop}) share one detector; a counter prevents concurrent tracker calls. External data (ITS CCTV/speed, NodeLink) feeds localization and self-calibration.}}{3}{figure.1}\protected@file@percent }
+\newlabel{fig:arch}{{1}{3}{System architecture. The browser path (\texttt {/ws/detect}) and the server path (\texttt {live\_loop}) share one detector; a counter prevents concurrent tracker calls. External data (ITS CCTV/speed, NodeLink) feeds localization and self-calibration}{figure.1}{}}
 \@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Map view: public CCTV cameras as status-coloured icons on the vector map; the selected camera shows its field-of-view polygon and the located vehicles.}}{3}{figure.2}\protected@file@percent }
 \newlabel{fig:map}{{2}{3}{Map view: public CCTV cameras as status-coloured icons on the vector map; the selected camera shows its field-of-view polygon and the located vehicles}{figure.2}{}}
 \@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Detection and tracking on a live CCTV frame: bounding boxes, vehicle class, and stabilized track IDs.}}{3}{figure.3}\protected@file@percent }
@@ -40,37 +38,44 @@
 \@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces Two-stage curved pixel$\to $GPS transform}}{3}{algorithm.1}\protected@file@percent }
 \newlabel{alg:curved}{{1}{3}{Map-Anchored Localization}{algorithm.1}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-C}}Speed Estimation}{3}{subsection.4.3}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Automatic calibration: detected lane edges and the estimated vanishing point yield the ground homography and the field-of-view footprint.}}{4}{figure.4}\protected@file@percent }
-\newlabel{fig:calib}{{4}{4}{Automatic calibration: detected lane edges and the estimated vanishing point yield the ground homography and the field-of-view footprint}{figure.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Map view showing the estimated field-of-view footprint after automatic calibration: the cyan corridor follows the road centreline extracted from the NodeLink dataset.}}{4}{figure.4}\protected@file@percent }
+\newlabel{fig:calib}{{4}{4}{Map view showing the estimated field-of-view footprint after automatic calibration: the cyan corridor follows the road centreline extracted from the NodeLink dataset}{figure.4}{}}
 \@writefile{loa}{\contentsline {algorithm}{\numberline {2}{\ignorespaces Per-track speed estimation (\texttt  {analytics.\textunderscore \allowbreak  speed})}}{4}{algorithm.2}\protected@file@percent }
 \newlabel{alg:speed}{{2}{4}{Speed Estimation}{algorithm.2}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-D}}Per-Camera Scale Correction}{4}{subsection.4.4}\protected@file@percent }
 \@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Key speed/analytics constants (\texttt  {config.py}).}}{4}{table.1}\protected@file@percent }
 \newlabel{tab:const}{{I}{4}{Key speed/analytics constants (\texttt {config.py})}{table.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-D}}Per-Camera Scale Correction}{4}{subsection.4.4}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-E}}Aggregation, Congestion, and History}{4}{subsection.4.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-F}}Visualization}{4}{subsection.4.6}\protected@file@percent }
 \@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Camera-level congestion: monitored cameras are recoloured (normal/busy/congested) and adjacent congested cameras are grouped into a severity-shaded region.}}{5}{figure.5}\protected@file@percent }
 \newlabel{fig:congestion}{{5}{5}{Camera-level congestion: monitored cameras are recoloured (normal/busy/congested) and adjacent congested cameras are grouped into a severity-shaded region}{figure.5}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {V}Evaluation}{5}{section.5}\protected@file@percent }
-\newlabel{sec:eval}{{V}{5}{Evaluation}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-F}}Visualization}{5}{subsection.4.6}\protected@file@percent }
 \@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Inference backend comparison (OC-SORT tracker fixed, 1{,}000 frames, RTX\,4070 Laptop). Track stage includes YOLO\,+\,BoxMOT end-to-end.}}{5}{table.2}\protected@file@percent }
 \newlabel{tab:latency}{{II}{5}{Inference backend comparison (OC-SORT tracker fixed, 1{,}000 frames, RTX\,4070 Laptop). Track stage includes YOLO\,+\,BoxMOT end-to-end}{table.2}{}}
 \@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Tracker comparison (TensorRT FP16 backend fixed, 1{,}000 frames). BoT-SORT overhead is from OSNet appearance ReID; ByteTrack shows more ID creation events due to the absence of re-identification.}}{5}{table.3}\protected@file@percent }
 \newlabel{tab:tracker}{{III}{5}{Tracker comparison (TensorRT FP16 backend fixed, 1{,}000 frames). BoT-SORT overhead is from OSNet appearance ReID; ByteTrack shows more ID creation events due to the absence of re-identification}{table.3}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {VI}Discussion and Limitations}{5}{section.6}\protected@file@percent }
-\newlabel{sec:discuss}{{VI}{5}{Discussion and Limitations}{section.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {V}Evaluation}{5}{section.5}\protected@file@percent }
+\newlabel{sec:eval}{{V}{5}{Evaluation}{section.5}{}}
 \citation{its_openapi}
-\bibstyle{IEEEtran}
-\bibdata{refs}
-\bibcite{yolo26}{1}
-\bibcite{yolov8}{2}
 \@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Tracking stability, speed distribution, and detection breakdown (TensorRT\,+\,OC-SORT run, 1{,}000 frames, nighttime).}}{6}{table.4}\protected@file@percent }
 \newlabel{tab:track}{{IV}{6}{Tracking stability, speed distribution, and detection breakdown (TensorRT\,+\,OC-SORT run, 1{,}000 frames, nighttime)}{table.4}{}}
 \@writefile{lot}{\contentsline {table}{\numberline {V}{\ignorespaces Distribution of learned \texttt  {speed\textunderscore \allowbreak  scale} factors across 37 cameras (\texttt  {speed\textunderscore \allowbreak  scale.json}). Values below~1.0 indicate geometric underestimation of displacement (common when the camera axis is oblique to the road); values above~1.0 indicate overestimation. All factors are unconverged at this snapshot.}}{6}{table.5}\protected@file@percent }
 \newlabel{tab:scale}{{V}{6}{Distribution of learned \texttt {speed\_scale} factors across 37 cameras (\texttt {speed\_scale.json}). Values below~1.0 indicate geometric underestimation of displacement (common when the camera axis is oblique to the road); values above~1.0 indicate overestimation. All factors are unconverged at this snapshot}{table.5}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {VII}Conclusion}{6}{section.7}\protected@file@percent }
-\newlabel{sec:concl}{{VII}{6}{Conclusion}{section.7}{}}
-\@writefile{toc}{\contentsline {section}{References}{6}{section*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {VI}Discussion and Limitations}{6}{section.6}\protected@file@percent }
+\newlabel{sec:discuss}{{VI}{6}{Discussion and Limitations}{section.6}{}}
+\citation{boxmot}
+\citation{bytetrack}
+\citation{ocsort}
+\citation{botsort}
+\citation{tensorrt}
+\citation{yolov8}
+\citation{yolo26}
+\@writefile{toc}{\contentsline {section}{\numberline {VII}Conclusion}{7}{section.7}\protected@file@percent }
+\newlabel{sec:concl}{{VII}{7}{Conclusion}{section.7}{}}
+\citation{moct_nodelink}
+\bibstyle{IEEEtran}
+\bibdata{refs}
+\bibcite{yolo26}{1}
+\bibcite{yolov8}{2}
 \bibcite{tensorrt}{3}
 \bibcite{boxmot}{4}
 \bibcite{bytetrack}{5}
@@ -82,19 +87,10 @@
 \bibcite{moct_nodelink}{11}
 \bibcite{its_openapi}{12}
 \bibcite{dbscan}{13}
+\@writefile{toc}{\contentsline {section}{References}{8}{section*.5}\protected@file@percent }
 \bibcite{andrew1979}{14}
 \bibcite{los_hcm}{15}
 \bibcite{deckgl}{16}
 \bibcite{maplibre}{17}
 \bibcite{fastapi}{18}
-\bibcite{osm}{19}
-\citation{boxmot}
-\citation{bytetrack}
-\citation{ocsort}
-\citation{botsort}
-\citation{tensorrt}
-\citation{yolov8}
-\citation{yolo26}
-\citation{moct_nodelink}
-\citation{osm}
-\gdef \@abspage@last{8}
+\gdef \@abspage@last{9}

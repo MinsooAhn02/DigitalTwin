@@ -1,6 +1,7 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (MiKTeX 26.5) (preloaded format=pdflatex 2026.6.6)  8 JUN 2026 23:06
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (MiKTeX 26.5) (preloaded format=pdflatex 2026.6.6)  12 JUN 2026 16:09
 entering extended mode
  restricted \write18 enabled.
+ file:line:error style messages enabled.
  %&-line parsing enabled.
 **./report_base.tex
 (report_base.tex
@@ -880,12 +881,6 @@ Package microtype Info: No adjustment of character kerning.
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/microtype\mt-ptm.cfg
 File: mt-ptm.cfg 2006/04/20 v1.7 microtype config. file: Times (RS)
 )
-LaTeX Font Info:    Trying to load font information for OT1+pcr on input line 7
-6.
-
-(C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/psnfss\ot1pcr.fd
-File: ot1pcr.fd 2001/06/04 font definitions for OT1/pcr.
-)
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/microtype\mt-cmr.cfg
 File: mt-cmr.cfg 2013/05/19 v2.2 microtype config. file: Computer Modern Roman 
 (RS)
@@ -908,65 +903,73 @@ File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 (C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/microtype\mt-msb.cfg
 File: mt-msb.cfg 2005/06/01 v1.0 microtype config. file: AMS symbols (b) (RS)
 )
+LaTeX Font Info:    Trying to load font information for OT1+pcr on input line 1
+17.
+
+(C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/psnfss\ot1pcr.fd
+File: ot1pcr.fd 2001/06/04 font definitions for OT1/pcr.
+)
 [1{C:/Users/dksal/AppData/Local/MiKTeX/fonts/map/pdftex/pdftex.map}{C:/Users/dk
 sal/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/base/8r.enc}
 
 
 ]
-<img/cctv_map.png, id=107, 1443.89438pt x 679.78969pt>
+<img/cctv_map.png, id=104, 1443.89438pt x 679.78969pt>
 File: img/cctv_map.png Graphic file (type png)
 <use img/cctv_map.png>
-Package pdftex.def Info: img/cctv_map.png  used on input line 245.
+Package pdftex.def Info: img/cctv_map.png  used on input line 243.
 (pdftex.def)             Requested size: 252.0pt x 118.63304pt.
-<img/yolo_detect.png, id=110, 536.75531pt x 355.3275pt>
+<img/yolo_detect.png, id=107, 536.75531pt x 355.3275pt>
 File: img/yolo_detect.png Graphic file (type png)
 <use img/yolo_detect.png>
-Package pdftex.def Info: img/yolo_detect.png  used on input line 270.
+Package pdftex.def Info: img/yolo_detect.png  used on input line 268.
 (pdftex.def)             Requested size: 252.0pt x 166.8196pt.
 Package hyperref Info: bookmark level for unknown algorithm defaults to 0 on in
-put line 297.
+put line 294.
  [2]
-<img/auto_calib.png, id=140, 536.75531pt x 437.38406pt>
+<img/auto_calib.png, id=138, 536.75531pt x 437.38406pt>
 File: img/auto_calib.png Graphic file (type png)
 <use img/auto_calib.png>
-Package pdftex.def Info: img/auto_calib.png  used on input line 341.
+Package pdftex.def Info: img/auto_calib.png  used on input line 338.
 (pdftex.def)             Requested size: 252.0pt x 205.34361pt.
- [3 <./img/cctv_map.png> <./img/yolo_detect.png>]
-<img/congestion_map.png, id=154, 454.69875pt x 454.69875pt>
+ [3 <./img/cctv_map.png> <./img/yolo_detect.png>] [4 <./img/auto_calib.png>]
+<img/congestion_map.png, id=164, 454.69875pt x 454.69875pt>
 File: img/congestion_map.png Graphic file (type png)
 <use img/congestion_map.png>
-Package pdftex.def Info: img/congestion_map.png  used on input line 442.
+Package pdftex.def Info: img/congestion_map.png  used on input line 440.
 (pdftex.def)             Requested size: 252.0pt x 252.0pt.
- [4 <./img/auto_calib.png>]
-Underfull \hbox (badness 1484) in paragraph at lines 467--474
+LaTeX Font Info:    Trying to load font information for TS1+ptm on input line 4
+56.
+
+(C:\Users\dksal\AppData\Local\Programs\MiKTeX\tex/latex/psnfss\ts1ptm.fd
+File: ts1ptm.fd 2001/06/04 font definitions for TS1/ptm.
+)
+Underfull \hbox (badness 1448) in paragraph at lines 448--457
+\OT1/ptm/m/n/10 (+20) ve-hi-cle mark-ers. The FOV poly-gon uses one of three
+ []
+
+
+Underfull \hbox (badness 1484) in paragraph at lines 468--475
 \OT1/ptm/m/n/10 (+20) ing, speed, and de-tec-tion statis-tics and flushes \OT1/
 pcr/m/n/10 eval_
  []
 
 
-Underfull \hbox (badness 2165) in paragraph at lines 467--474
+Underfull \hbox (badness 2165) in paragraph at lines 468--475
 \OT1/ptm/m/n/10 (+20) de-mand via \OT1/pcr/m/n/10 GET /eval/report\OT1/ptm/m/n/
 10 (+20) ); an of-fline har-ness
  []
 
-
-Underfull \hbox (badness 5147) in paragraph at lines 467--474
-\OT1/ptm/m/n/10 (+20) (\OT1/pcr/m/n/10 backend/evaluate.py\OT1/ptm/m/n/10 (+20)
- ) re-pro-duces the same met-
- []
-
-
-Underfull \hbox (badness 5563) in paragraph at lines 467--474
-\OT1/ptm/m/n/10 (+20) The sys-tem auto-selects the in-fer-ence back-end (Ten-
- []
-
 [5 <./img/congestion_map.png>]
-Overfull \hbox (0.90376pt too wide) in paragraph at lines 639--651
+Underfull \vbox (badness 10000) has occurred while \output is active []
+
+
+Overfull \hbox (0.90376pt too wide) in paragraph at lines 636--648
 \OT1/ptm/m/n/10 (-20) low il-lu-mi-na-tion, rain, lens con-tam-i-na-tion, and h
 ard-ware faults---
  []
 
-(report_base.bbl [6])
+[6] (report_base.bbl)
 
 ** Conference Paper **
 Before submitting the final camera ready copy, remember to:
@@ -978,22 +981,20 @@ Before submitting the final camera ready copy, remember to:
  uses only Type 1 fonts and that every step in the generation
  process uses the appropriate paper size.
 
-[7
-
-] (report_base.aux)
+[7] (report_base.aux)
  ***********
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-04-28>
  ***********
 Package rerunfilecheck Info: File `report_base.out' has not changed.
-(rerunfilecheck)             Checksum: 2F646495257E2A9D843723E685DB2ED9;2052.
+(rerunfilecheck)             Checksum: 34618F7A14AA3708B77713E0E2CD1136;2052.
  ) 
 Here is how much of TeX's memory you used:
- 25459 strings out of 467683
- 476965 string characters out of 5414722
- 926645 words of memory out of 5000000
- 53727 multiletter control sequences out of 15000+600000
- 689052 words of font info for 344 fonts, out of 8000000 for 9000
+ 25484 strings out of 467683
+ 477362 string characters out of 5414722
+ 926684 words of memory out of 5000000
+ 53747 multiletter control sequences out of 15000+600000
+ 688797 words of font info for 343 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
  84i,12n,94p,1010b,810s stack positions out of 10000i,1000n,20000p,200000b,200000s
 <C:/Users/dksal/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsfonts/cm/
@@ -1018,9 +1019,9 @@ KTeX/fonts/type1/urw/times/utmb8a.pfb><C:/Users/dksal/AppData/Local/Programs/Mi
 KTeX/fonts/type1/urw/times/utmbi8a.pfb><C:/Users/dksal/AppData/Local/Programs/M
 iKTeX/fonts/type1/urw/times/utmr8a.pfb><C:/Users/dksal/AppData/Local/Programs/M
 iKTeX/fonts/type1/urw/times/utmri8a.pfb>
-Output written on report_base.pdf (7 pages, 2158736 bytes).
+Output written on report_base.pdf (7 pages, 2162671 bytes).
 PDF statistics:
- 304 PDF objects out of 1000 (max. 8388607)
- 53 named destinations out of 1000 (max. 500000)
- 70801 words of extra memory for PDF output out of 74296 (max. 10000000)
+ 307 PDF objects out of 1000 (max. 8388607)
+ 54 named destinations out of 1000 (max. 500000)
+ 72337 words of extra memory for PDF output out of 74296 (max. 10000000)
 

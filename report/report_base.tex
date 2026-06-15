@@ -74,11 +74,12 @@ node-link road network rather than a flat plane; (ii) a five-stage speed estimat
 combining a physics-based outlier guard, least-squares regression over a sliding
 window, and per-track exponential smoothing; and (iii) a per-camera
 scale factor that absorbs the residual geometric scale error and
-is updated online via an ITS-referenced calibration loop. The system additionally
-provides multi-camera background monitoring, camera-level congestion clustering,
-and a SQLite time-series history with charting. We describe the architecture and
-the key algorithms, and report latency, throughput, tracking-stability, and speed
-metrics produced by a measurement harness over live streams.
+is updated online via an ITS-referenced calibration loop. To give operators a persistent, city-scale view of road conditions beyond any
+single active camera, the system additionally supports multi-camera background
+monitoring, camera-level congestion clustering, and a SQLite time-series history
+with charting. We describe the architecture and the key algorithms, and report
+latency, throughput, tracking-stability, and speed metrics produced by a
+measurement harness over live streams.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -133,11 +134,13 @@ Section~\ref{sec:concl} concludes.
 \section{Related Work}\label{sec:related}
 %=============================================================================
 \textbf{Object detection and tracking.} Modern traffic vision builds on real-time
-detectors; we use YOLO26~\cite{yolo26} as the default detector---an NMS-free
-end-to-end architecture that produces more consistent per-frame bounding-box
-positions than NMS-based models such as YOLOv8~\cite{yolov8}, reducing the
-ground-contact jitter that propagates into speed estimates. It also simplifies the
-TensorRT FP16 engine graph (no NMS layer)~\cite{tensorrt}, lowering inference
+detectors. NMS-based architectures such as YOLOv8~\cite{yolov8} suppress redundant
+boxes through non-maximum suppression, but the threshold-sensitivity of NMS causes
+bounding-box positions to jitter between frames; this per-frame noise propagates
+directly into downstream speed estimates. To eliminate the source of positional
+instability, we adopt YOLO26~\cite{yolo26}, an NMS-free end-to-end detector that
+produces more consistent bounding-box positions and simplifies the TensorRT FP16
+engine graph by removing the NMS layer~\cite{tensorrt}, lowering both inference
 latency and its variance; YOLOv8 is retained as a legacy fallback. For tracking we use the BoxMOT
 framework~\cite{boxmot}, which exposes ByteTrack~\cite{bytetrack},
 BoT-SORT~\cite{botsort}, and OC-SORT~\cite{ocsort}; appearance re-identification
@@ -147,14 +150,19 @@ occlusion, which we mitigate with a lightweight position-based ID stabilizer.
 \textbf{Camera-to-ground mapping.} Mapping image points to a ground plane is a
 homography problem~\cite{hartley2004}, typically solved from four correspondences
 with OpenCV~\cite{opencv}. For \emph{uncalibrated} cameras, vanishing-point and
-lane-geometry cues are commonly used to recover pose. Our work combines a
-4-point manual mode, a vanishing-point/lane auto-calibration, and---novel in this
-context---a road-centreline-following transform driven by an external road-network
-dataset~\cite{moct_nodelink}.
+lane-geometry cues are commonly used to recover pose, but these techniques assume
+the ground plane is locally flat---an assumption that introduces lateral
+displacement errors of several metres on curved roads. To follow actual road
+geometry, our work introduces a road-centreline-following transform driven by a
+national road-network dataset~\cite{moct_nodelink}, alongside a 4-point manual
+mode and a vanishing-point/lane auto-calibration path.
 
 \textbf{ITS dashboards and data.} National ITS portals~\cite{its_openapi} publish
-CCTV streams and aggregated segment speeds, but typically as separate views. We
-\emph{fuse} the segment speed back into the pipeline as a calibration signal.
+CCTV streams and aggregated segment speeds, but typically as separate views; the
+aggregated speed is never fed back to correct the vision-derived estimate, leaving
+any geometric scale error unchecked. We bridge this gap by \emph{fusing} the
+segment speed into the pipeline as an online calibration signal for per-camera
+scale correction.
 Congestion grouping uses density-based clustering~\cite{dbscan} and convex
 hulls~\cite{andrew1979}; service levels follow the Highway Capacity
 Manual~\cite{los_hcm}. The visualization uses deck.gl~\cite{deckgl} over
@@ -215,28 +223,38 @@ self-calibration.}
 \label{fig:arch}
 \end{figure*}
 
-\textbf{Browser path (\texttt{/ws/detect}).} The frontend plays the HLS stream
-through a CORS proxy, captures canvas frames (JPEG, $\le$640\,px, $\approx$33\,ms
-interval, at most two in flight), and sends them to the backend, which runs
-detection, tracking, localization, and analytics, then returns an annotated frame
-and broadcasts the analytics JSON to all clients.
+Because running a separate detector per connection would multiply GPU memory use
+and violate the shared-tracker invariant, both paths feed a single shared detector;
+the connection counter ensures only one path drives the multi-object tracker at a
+time. The two paths are designed for complementary operating conditions.
 
-\textbf{Server path (\texttt{live\_loop}).} The backend can also read the HLS
-stream directly with OpenCV/FFmpeg and run the same pipeline. It is gated twice: it
-skips tracking while a browser detection client is active (to protect the shared
-tracker), and it skips all GPU work when no one is watching (the frontend reports
-tab visibility). Before opening any HLS URL the detector pre-resolves HTTP\,302
-redirects (\texttt{\_resolve\_hls\_url}), so FFmpeg receives a direct endpoint and
-does not silently fail on delivery-layer redirect chains.
+\textbf{Browser path (\texttt{/ws/detect}).} When an operator opens a camera view,
+the frontend plays the HLS stream through a CORS proxy, captures canvas frames
+(JPEG, $\le$640\,px, $\approx$33\,ms interval, at most two in flight), and sends
+them to the backend, which runs detection, tracking, localization, and analytics,
+then returns an annotated frame and broadcasts the analytics JSON to all clients.
 
-\textbf{Background services.} Periodic loops refresh expiring HLS tokens (30\,min),
-poll the ITS segment speed for self-calibration (5\,min), and snapshot all monitored
-cameras into a SQLite history while recomputing congestion clusters (30\,s).
-To prevent the FOV polygon from flickering during auto-calibration, a slow EMA
-filter stabilizes near/far distance and road-width estimates, holding the initial
-accepted value fixed until sufficient samples accumulate. ROI edits trigger an
-immediate GPS ring recomputation and broadcast to keep the map view synchronized.
-The resulting map view is shown in Fig.~\ref{fig:map}.
+\textbf{Server path (\texttt{live\_loop}).} Without an active browser client, the
+backend reads HLS directly with OpenCV/FFmpeg and runs the same pipeline. It is
+gated twice: it skips tracking while a browser detection client is active (to
+protect the shared tracker), and it skips all GPU work when no one is watching (the
+frontend reports tab visibility). Before opening any HLS URL the detector
+pre-resolves HTTP\,302 redirects (\texttt{\_resolve\_hls\_url}), so FFmpeg
+receives a direct endpoint and does not silently fail on delivery-layer redirect
+chains.
+
+Beyond the two inference paths, sustained operation requires housekeeping that
+neither path handles directly: HLS access tokens expire on a 30-minute cycle, the
+ITS speed reference drifts unless polled, and the congestion map must be
+periodically refreshed. \textbf{Background services.} Periodic loops therefore
+refresh expiring HLS tokens (30\,min), poll the ITS segment speed for
+self-calibration (5\,min), and snapshot all monitored cameras into a SQLite history
+while recomputing congestion clusters (30\,s). To prevent the FOV polygon from
+flickering during auto-calibration, a slow EMA filter stabilizes near/far distance
+and road-width estimates, holding the initial accepted value fixed until sufficient
+samples accumulate. ROI edits trigger an immediate GPS ring recomputation and
+broadcast to keep the map view synchronized. The resulting map view is shown in
+Fig.~\ref{fig:map}.
 
 \begin{figure}[t]
 \centering
@@ -256,9 +274,13 @@ Runtime, then PyTorch---and exports \texttt{.pt}$\to$\texttt{.engine} on first r
 when a GPU is present. A tracker \emph{tier} is chosen by GPU memory: ByteTrack
 (CPU-only, no CUDA), OC-SORT (low VRAM $\ge$3.5\,GB, occlusion-robust, no ReID),
 or BoT-SORT/DeepOC-SORT with OSNet appearance ReID on larger GPUs
-($\ge$6\,GB and $\ge$10\,GB respectively). For the non-ReID tiers we add two robustness
-layers: \texttt{\_dedup\_tracks} merges duplicate boxes (IoU\,$>$\,0.3 or centre
-distance\,$<$\,40\,px, keeping the older ID), and an \texttt{IDStabilizer}
+($\ge$6\,GB and $\ge$10\,GB respectively). Without appearance ReID, two failure modes degrade practical tracking quality:
+detectors occasionally fire more than once on the same vehicle, inflating vehicle
+counts, and track identities reset after brief occlusions rather than recovering
+the original ID, causing discontinuous trails on the map. To suppress both effects,
+the non-ReID tiers include two lightweight robustness layers.
+\texttt{\_dedup\_tracks} merges duplicate boxes (IoU\,$>$\,0.3 or centre
+distance\,$<$\,40\,px, keeping the older ID), while an \texttt{IDStabilizer}
 re-binds a vehicle's previous ID after a brief miss using nearest-centre matching
 ($\le$80\,px) with a two-pass scheme and stale-mapping purge so display IDs stay
 stable and compact. Fig.~\ref{fig:yolo} shows the detection and tracking overlay.
@@ -279,16 +301,19 @@ locate the reverse carriageway and average the two snaps (when 2--40\,m apart) t
 recover the true road centre. The chosen road's speed limit, lane count, and width
 (\,lanes\,$\times$\,2\,$\times$\,lane-width\,) are derived from NodeLink and attached to the camera.
 
-Given the centreline, the \emph{two-stage curved transform} maps a pixel
-$(u,v)$ to GPS along the road (Algorithm~\ref{alg:curved}).
-The metric homography $H_m$ is derived from the same four image--GPS
-correspondences as the GPS homography, but maps pixel coordinates to local
-ENU metres rather than geographic coordinates.
-Stage one maps the pixel to local metres via $H_m$; stage two decomposes the displacement
-from the snap point into along-road and lateral components, advances that arc length
-along the centreline, interpolates the on-road position, and re-applies the lateral
-offset perpendicular to the \emph{local} road bearing. This follows real road
-curvature, unlike a single flat homography.
+A single flat homography maps pixels to a plane tangent to the camera's snap
+point; on curved roads, this plane diverges from the true centreline and displaces
+vehicle markers laterally by several metres. To follow the actual road geometry, we
+instead introduce the \emph{two-stage curved transform}
+(Algorithm~\ref{alg:curved}). The metric homography $H_m$ is derived from the same
+four image--GPS correspondences as the GPS homography, but maps pixel coordinates
+to local ENU metres rather than geographic coordinates, providing a metric workspace
+in which arc-length displacement can be computed accurately. Stage one maps the
+pixel to local metres via $H_m$; stage two decomposes the displacement from the
+snap point into along-road and lateral components, advances that arc length along
+the centreline, interpolates the on-road position, and re-applies the lateral
+offset perpendicular to the \emph{local} road bearing---tracking real road
+curvature rather than a fixed tangent plane.
 
 \begin{algorithm}[t]
 \caption{Two-stage curved pixel$\to$GPS transform}
@@ -349,10 +374,16 @@ outbound vehicles perpendicular to the local road bearing, placing each directio
 its correct side of the road centreline for Korean right-hand traffic.
 
 \subsection{Speed Estimation}
-Speed is distance over time, and both terms are error-prone: homography distance is
-noisy at the far field, and HLS buffering makes naive frame timing wrong. We use a
-monotonic clock derived from stream presentation timestamps (falling back to
-wall-clock), and the five-stage estimator of Algorithm~\ref{alg:speed} with the
+Speed is distance over time, and both terms are error-prone in this setting.
+Homography-derived positions carry growing noise toward the far field, where small
+pixel displacements correspond to large ground-plane uncertainties. HLS streams
+compound the problem: segments are buffered and retransmitted with variable
+delivery latency, so consecutive frame-arrival times reflect network scheduling
+rather than true capture cadence, making wall-clock timing unreliable. Rather than
+treat these two error sources independently, we address them jointly: a monotonic
+clock derived from stream presentation timestamps (falling back to wall-clock)
+decouples timing from delivery jitter, while the five-stage estimator of
+Algorithm~\ref{alg:speed} filters the resulting distance-over-time signal using the
 constants in Table~\ref{tab:const}.
 
 \begin{algorithm}[t]
@@ -420,10 +451,15 @@ The calibration uses a 10-minute rolling window of continuous, per-frame speed o
 The factor persists per camera and accumulates across sessions without resetting the geometric calibration (Section~\ref{sec:discuss}).
 
 \subsection{Aggregation, Congestion, and History}
-Direction is primarily determined by projecting each vehicle's inter-frame
-displacement onto the road bearing axis with an EMA deadzone filter; a horizontal
-LineZone crossing serves as a fallback when road bearing is unavailable, and also
-provides In/Out counts. Dwell
+Assigning inbound versus outbound direction from a single frame's pixel
+displacement is unreliable when a vehicle moves slowly, stops briefly, or travels
+nearly perpendicular to the camera view---the displacement vector is then too short
+or misaligned to determine sign robustly. To accumulate directional evidence across
+frames, each vehicle's inter-frame displacement is projected onto the road bearing
+axis and smoothed with an EMA deadzone filter that commits a direction only when
+the smoothed component exceeds an ambiguity threshold. When road bearing is
+unavailable, a horizontal LineZone crossing serves as a fallback and also provides
+In/Out counts. Dwell
 counting flags bottlenecks and parked vehicles (the latter remembered by pixel
 position so they survive ID changes), and a Level-of-Service grade is assigned from
 the active vehicle count. Background monitoring polls additional cameras every

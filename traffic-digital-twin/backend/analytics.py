@@ -198,6 +198,8 @@ class TrafficAnalytics:
         # ① 깊이별 속도 보정 함수 (transform.speed_correction_at 배선)
         self.depth_corr_fn: Callable[[float, int], float] | None = None
         self.frame_h: int = 0
+        # corr 계산용 bbox-bottom y EMA (탐지 노이즈가 corr 급변으로 전달되는 것 차단)
+        self._corr_y_ema: dict[int, float] = {}
         # ③ ITS 보정 적응형 수렴
         self._its_calib_runs: int = 0
         self.its_scale_restored: bool = False
@@ -261,6 +263,10 @@ class TrafficAnalytics:
 
         current_ts = timestamp_ms / 1000.0
 
+        # Phase 1: GPS jitter 제거를 먼저 적용 — direction/speed 계산이 smooth GPS를 사용하도록
+        # (이전에는 _assign_directions 이후에 호출되어 raw GPS로 방향을 분류했음)
+        self._smooth_positions(vehicles)
+
         for v in vehicles:
             # Task 4: 주차 latch — 이미 느린 차에만 적용(이동 중인 차가 주차 지점 통과해도 0 되지 않도록)
             if (self._is_near_parked(v.center_px)
@@ -270,11 +276,10 @@ class TrafficAnalytics:
             self._speed(v, current_ts)
             self._dwell_update(v)
 
-        # Task 1: GPS 투영 + 이동 기반 방향 분류 → 차선 offset → 위치 평활
+        # Task 1: GPS 투영 + 이동 기반 방향 분류 → 차선 offset
         along_map = self._project_to_road_axis(vehicles)
         self._assign_directions(vehicles, along_map)
         self._apply_lane_offset(vehicles)   # Phase 5: In/Out 방향별 좌우 분리
-        self._smooth_positions(vehicles)    # Phase 1: jitter 제거 (lateral 보존)
 
         # Road-shape learning: GPS trace 누적
         self._accumulate_gps_trace(vehicles)
@@ -385,7 +390,12 @@ class TrafficAnalytics:
             v.speed_reliable = _depth_m <= SPEED_TRUST_MAX_DEPTH_M
 
         # ① 깊이별 속도 보정 계수 (scale 모델 미확보 시 1.0)
-        corr = self.depth_corr_fn(v.bbox_xyxy[3], self.frame_h) if self.depth_corr_fn else 1.0
+        # bbox bottom y를 EMA 스무딩 후 corr 계산 — 탐지 노이즈가 corr 급변으로 전달되는 것 차단
+        raw_y = v.bbox_xyxy[3]
+        smooth_y = self._corr_y_ema.get(tid, raw_y)
+        smooth_y = smooth_y * 0.7 + raw_y * 0.3
+        self._corr_y_ema[tid] = smooth_y
+        corr = self.depth_corr_fn(smooth_y, self.frame_h) if self.depth_corr_fn else 1.0
 
         win = self._pos_window.setdefault(tid, deque(maxlen=SPEED_WINDOW_FRAMES))
         prev_ema = self._speed_ema.get(tid)
@@ -438,7 +448,8 @@ class TrafficAnalytics:
 
         moving = disp_m >= SPEED_JITTER_THRESHOLD_M
         raw = self._estimate_speed_kph(win) if moving else 0.0
-        scaled = raw * corr * self.speed_scale  # ① corr 적용
+        total_scale = min(corr * self.speed_scale, 3.0)  # corr×speed_scale 총 증폭 상한 3x
+        scaled = raw * total_scale  # ① corr 적용
 
         if moving and SPEED_MIN_KPH <= scaled <= MAX_REASONABLE_KPH:
             # 스파이크 거부는 EMA가 '확정'(>5)된 경우에만 — 시드 단계는 그대로 수용.
@@ -502,12 +513,50 @@ class TrafficAnalytics:
 
         bearing 방향으로 이동(along 증가) = Out(outbound).
         bearing 반대(along 감소) = In(inbound, approaching camera).
-        road_bearing_deg 미설정 시 LineZone fallback 사용.
+        road_bearing_deg 미설정 시: cam GPS가 있으면 거리 변화량으로 추정, 없으면 LineZone fallback.
         """
         if self.road_bearing_deg is None:
-            for v in vehicles:
-                if v.track_id in self._vehicle_direction:
-                    v.direction = self._vehicle_direction[v.track_id]
+            if self.cam_lat is not None and self.cam_lon is not None:
+                # bearing 없이도 카메라로부터의 GPS 거리 변화로 In/Out 추정
+                # 멀어짐(d_dist > 0) = Out, 가까워짐(d_dist < 0) = In
+                R_lat = 110574.0
+                R_lon = 111320.0 * math.cos(math.radians(self.cam_lat))
+                for v in vehicles:
+                    if v.is_parked:
+                        continue
+                    tid = v.track_id
+                    dist = math.hypot(
+                        (v.lat - self.cam_lat) * R_lat,
+                        (v.lon - self.cam_lon) * R_lon,
+                    )
+                    prev_dist = self._along_prev.get(tid)
+                    self._along_prev[tid] = dist
+
+                    if prev_dist is None:
+                        v.direction = self._vehicle_direction.get(tid, "Unknown")
+                        continue
+
+                    d_dist = dist - prev_dist
+                    prev_ema = self._dir_ema.get(tid)
+                    new_ema = d_dist if prev_ema is None else (
+                        prev_ema * (1 - DIR_EMA_ALPHA) + d_dist * DIR_EMA_ALPHA
+                    )
+                    self._dir_ema[tid] = new_ema
+
+                    if new_ema > DIR_DEADZONE_M:
+                        dir_now = "Out"
+                    elif new_ema < -DIR_DEADZONE_M:
+                        dir_now = "In"
+                    else:
+                        dir_now = self._vehicle_direction.get(tid, "Unknown")
+
+                    self._vehicle_direction[tid] = dir_now
+                    v.direction = dir_now
+            else:
+                # cam GPS 없음 → LineZone 교차 이력만 사용
+                for v in vehicles:
+                    if v.track_id in self._vehicle_direction:
+                        v.direction = self._vehicle_direction[v.track_id]
             return
 
         for v in vehicles:
@@ -866,6 +915,7 @@ class TrafficAnalytics:
                 self._along_prev.pop(tid, None)
                 self._dir_ema.pop(tid, None)
                 self._pos_ema.pop(tid, None)
+                self._corr_y_ema.pop(tid, None)
         # 재등장한 track의 grace counter 초기화
         for tid in active:
             self._lost_frames.pop(tid, None)

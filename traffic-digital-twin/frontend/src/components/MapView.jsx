@@ -240,6 +240,22 @@ export default function MapView({
   const { t, lang } = useLang();
   const mapRef = useRef(null);
   const [fontReady, setFontReady] = useState(false);
+
+  // severe 클러스터가 해제될 때 초록색으로 잠깐 표시 후 사라짐
+  const [resolvingClusters, setResolvingClusters] = useState([]);
+  const prevClustersRef = useRef([]);
+  const resolvingTimerRef = useRef(null);
+  useEffect(() => {
+    const prev = prevClustersRef.current;
+    const resolved = prev.filter(
+      (p) => p.severity === "severe" && !congestionClusters.find((c) => c.id === p.id)
+    );
+    prevClustersRef.current = congestionClusters;
+    if (resolved.length === 0) return;
+    clearTimeout(resolvingTimerRef.current);
+    setResolvingClusters(resolved);
+    resolvingTimerRef.current = setTimeout(() => setResolvingClusters([]), 1500);
+  }, [congestionClusters]);
   useEffect(() => {
     document.fonts.load('bold 12px "Malgun Gothic"').then(() => setFontReady(true));
   }, []);
@@ -472,8 +488,25 @@ export default function MapView({
     });
   }, [congestionClusters]);
 
+  // severe 해제 시 초록색 플래시 레이어 (1.5초 후 사라짐)
+  const resolvingLayer = useMemo(() => {
+    if (resolvingClusters.length === 0) return null;
+    return new PolygonLayer({
+      id:                 "congestion-resolving",
+      data:               resolvingClusters,
+      getPolygon:         (d) => d.polygon,
+      getFillColor:       [34, 197, 94, 60],
+      getLineColor:       [22, 163, 74, 200],
+      lineWidthMinPixels: 2,
+      stroked:            true,
+      filled:             true,
+      pickable:           false,
+    });
+  }, [resolvingClusters]);
+
   const layers = useMemo(() => [
     congestionLayer,
+    resolvingLayer,
     ...(showVehicles ? extraLayers : []),
     roadCenterlineLayer,
     fovLayer,
@@ -484,7 +517,7 @@ export default function MapView({
     snapNodeLayer,
     snapNodeLabelLayer,
   ].filter(Boolean), [
-    congestionLayer, showVehicles, extraLayers, roadCenterlineLayer, fovLayer,
+    congestionLayer, resolvingLayer, showVehicles, extraLayers, roadCenterlineLayer, fovLayer,
     cctvHitLayer, cctvIconLayer, cctvLabelLayer,
     scatterLayer, textLayer, snapNodeLayer, snapNodeLabelLayer,
   ]);

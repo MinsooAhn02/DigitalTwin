@@ -559,6 +559,16 @@ def _build_vehicles(
     if not valid:
         return []
 
+    # track_id 중복 제거 — 트래커가 같은 ID를 두 개 내보낼 때(ghost track 등) 첫 번째 유지
+    seen_tids: set[int] = set()
+    deduped: list[tuple] = []
+    for item in valid:
+        tid = item[2]
+        if tid not in seen_tids:
+            seen_tids.add(tid)
+            deduped.append(item)
+    valid = deduped
+
     # 2단계: 배치 homography — cv2.perspectiveTransform 1회 호출
     pts = [(v[5], v[6]) for v in valid]
     gps_coords   = _transformer.batch_pixel_to_gps(pts)

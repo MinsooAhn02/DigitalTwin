@@ -511,7 +511,7 @@ class PerspectiveTransformer:
         h_scale = abs(x1m - x0m)
         if h_scale < 1e-6:
             return 1.0
-        return min(max(fitted_scale / h_scale, 0.3), 3.0)
+        return min(max(fitted_scale / h_scale, 0.6), 1.8)
 
     def load_scale_params(self, params: dict) -> None:
         """vehicle_calib.json 엔트리에서 scale model 복원."""

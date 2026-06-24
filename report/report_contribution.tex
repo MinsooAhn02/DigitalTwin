@@ -20,6 +20,7 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{url}
 \usepackage[final]{microtype}
+\usepackage{makecell}
 
 % Long monospaced identifiers (e.g. transform.py:\_pixel\_to\_gps\_curved) cannot
 % break in the narrow IEEE columns and cause large inter-word gaps. Allow a break
@@ -151,9 +152,14 @@ occlusion, which we mitigate with a lightweight position-based ID stabilizer.
 \textbf{Camera-to-ground mapping.} Mapping image points to a ground plane is a
 homography problem~\cite{hartley2004}, typically solved from four correspondences
 with OpenCV~\cite{opencv}. For \emph{uncalibrated} cameras, vanishing-point and
-lane-geometry cues are commonly used to recover pose, but these techniques assume
+lane-geometry cues are commonly used to recover pose~\cite{dubska2014}, but these techniques assume
 the ground plane is locally flat---an assumption that introduces lateral
-displacement errors of several metres on curved roads. To follow actual road
+displacement errors of several metres on curved roads.
+Dubska et al.~\cite{dubska2014} achieve fully automatic calibration of roadside
+cameras from lane markings and vanishing points, but their model is restricted to
+a flat road plane; our pose solver extends this by additionally recovering camera
+height and pitch, and a second curved-centreline stage corrects residual lateral
+displacement on bends. To follow actual road
 geometry, our work introduces a road-centreline-following transform driven by a
 national road-network dataset~\cite{moct_nodelink}, alongside a 4-point manual
 mode and a vanishing-point/lane auto-calibration path.
@@ -168,6 +174,37 @@ Congestion grouping uses density-based clustering~\cite{dbscan} and convex
 hulls~\cite{andrew1979}; service levels follow the Highway Capacity
 Manual~\cite{los_hcm}. The visualization uses deck.gl~\cite{deckgl} over
 MapLibre~\cite{maplibre}, served by FastAPI~\cite{fastapi}.
+
+Table~\ref{tab:sota} summarises how this work compares with representative
+traffic-monitoring approaches across the dimensions most relevant to uncalibrated
+public-infrastructure deployment.
+
+\begin{table*}[t]
+\caption{Comparison with representative traffic-monitoring approaches.
+\checkmark~=~fully supported; $\times$~=~not supported; $\triangle$~=~partially supported; ---~=~not applicable.}
+\label{tab:sota}
+\centering
+\scriptsize
+\begin{tabular}{@{}lcccccccc@{}}
+\toprule
+\textbf{Method} &
+\makecell{\textbf{No road}\\\textbf{HW}} &
+\makecell{\textbf{No vehicle}\\\textbf{GPS}} &
+\makecell{\textbf{Auto-}\\\textbf{calib}} &
+\makecell{\textbf{Curved}\\\textbf{road}} &
+\makecell{\textbf{Speed}\\\textbf{est.}} &
+\makecell{\textbf{Real-}\\\textbf{time}} &
+\makecell{\textbf{Multi-}\\\textbf{cam}} &
+\makecell{\textbf{Open-}\\\textbf{source}} \\
+\midrule
+Loop / Radar sensors       & $\times$ & \checkmark & ---        & ---        & \checkmark & \checkmark & $\triangle$ & $\times$   \\
+On-vehicle GPS             & \checkmark & $\times$ & ---        & \checkmark & \checkmark & \checkmark & \checkmark  & $\triangle$ \\
+YOLO + flat homography     & \checkmark & \checkmark & $\times$ & $\times$   & $\triangle$ & \checkmark & $\times$   & \checkmark \\
+Dubska et al.~\cite{dubska2014} & \checkmark & \checkmark & \checkmark & $\times$ & \checkmark & \checkmark & $\times$ & $\times$ \\
+\textbf{This work}         & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
 %=============================================================================
 \section{System Design and Architecture}\label{sec:design}

@@ -17,6 +17,7 @@ import numpy as np
 import cv2
 from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIGHT_M, CAMERA_BEARING_DEG
 from config import POSE_RESIDUAL_MAX_PX, SCALE_MIN_OBS, FAR_CAP_M
+import math
 import camera_pose
 
 CALIBRATION_PATH = Path(__file__).parent / "calibration_data.json"
@@ -290,13 +291,21 @@ class PerspectiveTransformer:
             return True, info
         return None, info
 
-    def _pixel_to_gps_curved(self, u: float, v: float) -> tuple[float, float] | None:
-        """2단계 곡선 GPS 변환.
 
-        Stage 1: pixel → (x_m, y_m) via H_meter  (ENU from TL corner)
-        Stage 2: (x_m, y_m) → road-axis (d_along, d_lateral) → road_pts 보간 → GPS
+    
+    def _pixel_to_gps_curved(self, u: float, v: float):
+        """2단계 곡선 GPS 변환 (중심선 수직투영 방식).
 
-        반환 None 시 H_gps fallback 사용.
+        Stage 1: pixel → (x_m, y_m) via H_meter  (snap 기준 ENU 미터)
+        Stage 2: ENU 점을 도로 중심선에 *수직투영* → (arc, lateral) →
+                _road_interp(arc) + 로컬 도로 방위로 lateral 재적용 → GPS.
+
+        기존의 snap 고정 bearing 기반 along/lateral 분해를 제거한다. 직선 접선 분해는
+        곡선에서 호장을 과소평가하고 도로 굴곡을 가짜 횡변위로 흡수해, 곡선 구간에서
+        마커를 도로 밖으로 밀어냈다(합성 검증: R=80m에서 최대 ~36m). 수직투영은 굴곡을
+        따라가므로 가짜 횡변위가 제거되고 호장이 정확해진다.
+
+        반환 None 시 호출부가 H_gps fallback을 사용.
         """
         if (self._road_pts is None or self._road_cum_dist is None
                 or self._snap_along_m is None
@@ -305,35 +314,84 @@ class PerspectiveTransformer:
 
         x_m, y_m = self._transform_point(self._H_meter, u, v)
 
-        # snap 기준 ENU 변위
-        dx = x_m - self._snap_meter_x   # east from snap (m)
-        dy = y_m - self._snap_meter_y   # north from snap (m)
+        # snap 기준 ENU 변위 → (lat, lon)
+        dx = x_m - self._snap_meter_x
+        dy = y_m - self._snap_meter_y
+        enu_lat, enu_lon = self._enu_from_snap_to_latlon(dx, dy)
 
-        sin_b = math.sin(self._curve_bearing_rad)
-        cos_b = math.cos(self._curve_bearing_rad)
+        # 도로 중심선에 수직투영 → arc(호장), lateral(부호있는 횡거리)
+        arc, lateral = self._project_latlon_to_centreline(enu_lat, enu_lon)
 
-        # 도로 축 변환
-        d_along = dx * sin_b + dy * cos_b
-        d_lateral = dx * cos_b - dy * sin_b
-        d_along = max(0.0, d_along)
-
-        # road_pts 위에서 d_along 위치 보간
-        target_arc = self._snap_along_m + self._curve_dir_sign * d_along
-        center_lat, center_lon = self._road_interp(target_arc)
-
-        # 해당 위치의 로컬 도로 방위로 횡방향 오프셋 적용
-        b_local = math.radians(self._road_bearing_at(target_arc))
+        # arc 위치 중심선 GPS + 로컬 도로 방위로 lateral 재적용
+        center_lat, center_lon = self._road_interp(arc)
+        b_local = math.radians(self._road_bearing_at(arc))
         R_lat = 110574.0
         R_lon = 111320.0 * math.cos(math.radians(center_lat))
-        # 오른쪽 수직 방향 (ENU): forward=(sin_b, cos_b) → right=(cos_b, -sin_b)
-        lateral_ft = self._curve_dir_sign * d_lateral
-        east_off  =  math.cos(b_local) * lateral_ft
-        north_off = -math.sin(b_local) * lateral_ft
+        # 오른쪽 수직(ENU): forward=(sin b, cos b) → right=(cos b, -sin b)
+        east_off  =  math.cos(b_local) * lateral
+        north_off = -math.sin(b_local) * lateral
 
         return (
             center_lat + north_off / R_lat,
             center_lon + east_off  / R_lon,
         )
+
+    
+    def _enu_from_snap_to_latlon(self, dx_m: float, dy_m: float) -> tuple[float, float]:
+        """snap 기준 east/north(m) 오프셋을 (lat, lon)으로 변환.
+
+        transform.py의 다른 부분과 동일한 equirectangular 상수 사용.
+        snap = self._gps_center_{lat,lon}.
+        """
+        R_lat = 110574.0
+        R_lon = 111320.0 * math.cos(math.radians(self._gps_center_lat))
+        return (
+            self._gps_center_lat + dy_m / R_lat,
+            self._gps_center_lon + dx_m / R_lon,
+        )
+
+    def _project_latlon_to_centreline(self, lat: float, lon: float) -> tuple[float, float]:
+        """(lat, lon)을 중심선 polyline에 수직투영.
+
+        반환 (arc_m, signed_lateral_m):
+        arc_m         road_pts[0]에서 수직발까지의 누적거리 (_road_cum_dist와 동일 metric,
+                        따라서 _road_interp / _road_bearing_at에 그대로 사용 가능).
+        signed_lateral 중심선 기준 오른쪽-양수 부호있는 횡거리(m).
+
+        nodelink._snap_to_polyline과 동일한 segment-clamp 투영이되, 누적 호장과
+        부호있는 lateral을 함께 반환한다.
+        """
+        pts = self._road_pts
+        cum = self._road_cum_dist
+        R_lat = 110574.0
+        R_lon = 111320.0 * math.cos(math.radians(lat))
+
+        best_d2 = float("inf")
+        best_arc = 0.0
+        best_lat_off = 0.0
+
+        for i in range(len(pts) - 1):
+            f_lat, f_lon = pts[i]
+            t_lat, t_lon = pts[i + 1]
+            bx = (t_lon - f_lon) * R_lon
+            by = (t_lat - f_lat) * R_lat
+            px = (lon - f_lon) * R_lon
+            py = (lat - f_lat) * R_lat
+            seg_sq = bx * bx + by * by
+            if seg_sq < 1e-9:
+                continue
+            u = (px * bx + py * by) / seg_sq
+            u = max(0.0, min(1.0, u))
+            sx, sy = u * bx, u * by
+            d2 = (px - sx) ** 2 + (py - sy) ** 2
+            if d2 < best_d2:
+                best_d2 = d2
+                seg_len = math.sqrt(seg_sq)
+                best_arc = cum[i] + u * seg_len
+                cross = bx * py - by * px        # 양수=왼쪽, 음수=오른쪽 (ENU 기준)
+                best_lat_off = math.copysign(math.sqrt(d2), -cross)  # 오른쪽 양수
+
+        return best_arc, best_lat_off
 
     # ── 좌표 변환 공개 API ───────────────────────────────────────────────
 

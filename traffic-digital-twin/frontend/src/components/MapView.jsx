@@ -376,6 +376,9 @@ export default function MapView({
       ring = fovRoiGpsRing.map(([lat, lon]) => [lon, lat]); // deck.gl: [lon, lat]
     } else if (selectedCctv.calibGpsRing) {
       ring = selectedCctv.calibGpsRing;
+    } else if (fovRoadPts && fovRoadPts.length >= 2 && fovNearM != null && fovFarM != null && fovRoadWidthM != null) {
+      // 도로 중심선을 따라가는 곡선 polygon — 커브 구간에서 실제 도로 형태 반영
+      ring = computeRoadCorridorPolygon(fovRoadPts, fovSnapAlongM, heading, fovNearM, fovFarM, fovRoadWidthM / 2);
     } else if (fovNearM != null && fovFarM != null && fovRoadWidthM != null) {
       // H_gps와 동일한 직선 사각형 — 차량 GPS 위치와 일치함
       ring = computeCalibPolygon(originLat, originLon, heading, fovNearM, fovFarM, fovRoadWidthM / 2);
@@ -392,7 +395,7 @@ export default function MapView({
       stroked:        true,
       filled:         true,
     });
-  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM, fovHeadingDeg, fovSnapLat, fovSnapLon, fovRoiGpsRing]);
+  }, [selectedCctv, fovNearM, fovFarM, fovRoadWidthM, fovHeadingDeg, fovSnapLat, fovSnapLon, fovRoiGpsRing, fovRoadPts, fovSnapAlongM]);
 
   // 도로 중심선 — 실제 도로 곡선을 별도 선으로 표시 (FOV polygon과 분리)
   const roadCenterlineLayer = useMemo(() => {

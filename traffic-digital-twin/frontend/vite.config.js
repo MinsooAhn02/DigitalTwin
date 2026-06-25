@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+
     proxy: {
       // /ws 요청을 백엔드로 프록시 (CORS 없이 WS 연결)
       "/ws": {

@@ -17,6 +17,7 @@ import numpy as np
 import cv2
 from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIGHT_M, CAMERA_BEARING_DEG
 from config import POSE_RESIDUAL_MAX_PX, SCALE_MIN_OBS, FAR_CAP_M
+import math
 import camera_pose
 
 CALIBRATION_PATH = Path(__file__).parent / "calibration_data.json"
@@ -77,6 +78,7 @@ class PerspectiveTransformer:
         self._scale_obs: deque[tuple[float, float]] = deque(maxlen=200)  # (v_px, scale_m/px)
         self._scale_model: tuple[float, float] | None = None             # (B, C): 1/scale = B*v + C
         self._scale_obs_since_fit: int = 0
+        self._speed_corr_cache: dict[int, float] = {}  # round(v_px) → corr factor
         self._frame_h: int = 0
         self._frame_w: int = 0
 
@@ -289,50 +291,81 @@ class PerspectiveTransformer:
             return True, info
         return None, info
 
-    def _pixel_to_gps_curved(self, u: float, v: float) -> tuple[float, float] | None:
-        """2단계 곡선 GPS 변환.
 
-        Stage 1: pixel → (x_m, y_m) via H_meter  (ENU from TL corner)
-        Stage 2: (x_m, y_m) → road-axis (d_along, d_lateral) → road_pts 보간 → GPS
-
-        반환 None 시 H_gps fallback 사용.
-        """
+    
+    def _pixel_to_gps_curved(self, u: float, v: float):
+        """2단계 곡선 GPS 변환 (수직투영 방식 v2 — snap 방향 가드 포함)."""
         if (self._road_pts is None or self._road_cum_dist is None
                 or self._snap_along_m is None
                 or self._snap_meter_x is None or self._snap_meter_y is None):
             return None
 
         x_m, y_m = self._transform_point(self._H_meter, u, v)
+        dx = x_m - self._snap_meter_x
+        dy = y_m - self._snap_meter_y
+        enu_lat, enu_lon = self._enu_from_snap_to_latlon(dx, dy)
 
-        # snap 기준 ENU 변위
-        dx = x_m - self._snap_meter_x   # east from snap (m)
-        dy = y_m - self._snap_meter_y   # north from snap (m)
+        arc, lateral = self._project_latlon_to_centreline(enu_lat, enu_lon)
+        # H_meter 캘리브레이션 오차는 snap에서 멀수록 선형 누적됨.
+        # 도로 반폭(±6m) 초과 lateral은 오차로 판단하여 클램프.
+        lateral = max(-6.0, min(6.0, lateral))
 
-        sin_b = math.sin(self._curve_bearing_rad)
-        cos_b = math.cos(self._curve_bearing_rad)
-
-        # 도로 축 변환
-        d_along = dx * sin_b + dy * cos_b
-        d_lateral = dx * cos_b - dy * sin_b
-        d_along = max(0.0, d_along)
-
-        # road_pts 위에서 d_along 위치 보간
-        target_arc = self._snap_along_m + self._curve_dir_sign * d_along
-        center_lat, center_lon = self._road_interp(target_arc)
-
-        # 해당 위치의 로컬 도로 방위로 횡방향 오프셋 적용
-        b_local = math.radians(self._road_bearing_at(target_arc))
+        center_lat, center_lon = self._road_interp(arc)
+        b_local = math.radians(self._road_bearing_at(arc))
         R_lat = 110574.0
         R_lon = 111320.0 * math.cos(math.radians(center_lat))
-        # 오른쪽 수직 방향 (ENU): forward=(sin_b, cos_b) → right=(cos_b, -sin_b)
-        lateral_ft = self._curve_dir_sign * d_lateral
-        east_off  =  math.cos(b_local) * lateral_ft
-        north_off = -math.sin(b_local) * lateral_ft
+        east_off  =  math.cos(b_local) * lateral
+        north_off = -math.sin(b_local) * lateral
 
         return (
             center_lat + north_off / R_lat,
             center_lon + east_off  / R_lon,
         )
+
+    def _enu_from_snap_to_latlon(self, dx_m: float, dy_m: float) -> tuple:
+        """snap 기준 east/north(m) → (lat, lon)."""
+        R_lat = 110574.0
+        R_lon = 111320.0 * math.cos(math.radians(self._gps_center_lat))
+        return (
+            self._gps_center_lat + dy_m / R_lat,
+            self._gps_center_lon + dx_m / R_lon,
+        )
+
+    def _project_latlon_to_centreline(self, lat: float, lon: float) -> tuple:
+        """(lat, lon)을 중심선 polyline에 수직투영.
+
+        반환 (arc_m, signed_lateral_m) — arc는 road_pts[0]에서의 누적거리, lateral은 오른쪽 양수.
+        """
+        pts = self._road_pts
+        cum = self._road_cum_dist
+        R_lat = 110574.0
+        R_lon = 111320.0 * math.cos(math.radians(lat))
+
+        best_d2 = float("inf")
+        best_arc = 0.0
+        best_lat_off = 0.0
+
+        for i in range(len(pts) - 1):
+            f_lat, f_lon = pts[i]
+            t_lat, t_lon = pts[i + 1]
+            bx = (t_lon - f_lon) * R_lon
+            by = (t_lat - f_lat) * R_lat
+            px = (lon - f_lon) * R_lon
+            py = (lat - f_lat) * R_lat
+            seg_sq = bx * bx + by * by
+            if seg_sq < 1e-9:
+                continue
+            u = (px * bx + py * by) / seg_sq
+            u = max(0.0, min(1.0, u))
+            sx, sy = u * bx, u * by
+            d2 = (px - sx) ** 2 + (py - sy) ** 2
+            if d2 < best_d2:
+                best_d2 = d2
+                best_arc = cum[i] + u * math.sqrt(seg_sq)
+                cross = bx * py - by * px  # 양수=왼쪽(ENU 기준)
+                best_lat_off = math.copysign(math.sqrt(d2), -cross)  # 오른쪽 양수
+
+        return best_arc, best_lat_off
 
     # ── 좌표 변환 공개 API ───────────────────────────────────────────────
 
@@ -490,6 +523,7 @@ class PerspectiveTransformer:
             return False
         self._scale_model = (B, C)
         self._scale_obs_since_fit = 0
+        self._speed_corr_cache.clear()
         logger.info("fit_scale_model 완료: B=%.5f C=%.3f vp_y=%.1fpx (obs=%d)",
                     B, C, vp_y, len(self._scale_obs))
         return True
@@ -509,7 +543,7 @@ class PerspectiveTransformer:
         h_scale = abs(x1m - x0m)
         if h_scale < 1e-6:
             return 1.0
-        return min(max(fitted_scale / h_scale, 0.3), 3.0)
+        return min(max(fitted_scale / h_scale, 0.6), 1.8)
 
     def load_scale_params(self, params: dict) -> None:
         """vehicle_calib.json 엔트리에서 scale model 복원."""
@@ -518,6 +552,7 @@ class PerspectiveTransformer:
             self._scale_model = (B, C)
             self._frame_h = int(params.get("frame_h", self._frame_h))
             self._frame_w = int(params.get("frame_w", self._frame_w))
+            self._speed_corr_cache.clear()
             logger.info("load_scale_params: B=%.5f C=%.3f (frame %dx%d)",
                         B, C, self._frame_w, self._frame_h)
         except (KeyError, TypeError, ValueError) as exc:
@@ -537,8 +572,30 @@ class PerspectiveTransformer:
         """
         self._scale_obs.clear()
         self._scale_obs_since_fit = 0
+        self._speed_corr_cache.clear()
         if clear_model:
             self._scale_model = None
+
+    def speed_correction_at(self, v_px: float, frame_h: int = 0) -> float:
+        """픽셀 y=v_px에서 속도 보정 계수 반환.
+
+        _scale_correction_at의 velocity-domain 공개 래퍼. 좌표가 아닌 속도값에 곱한다.
+        frame_h가 0이 아니고 피팅 당시 해상도(_frame_h)와 다르면 좌표를 환산해 적용.
+        모델 미확보 시 1.0 반환.
+        """
+        if self._scale_model is None:
+            return 1.0
+        # 해상도 불일치 환산 (ws/detect 경로가 다른 해상도로 보낼 수 있음)
+        actual_v = v_px
+        if frame_h > 0 and self._frame_h > 0 and frame_h != self._frame_h:
+            actual_v = v_px * self._frame_h / frame_h
+        key = round(actual_v)
+        cached = self._speed_corr_cache.get(key)
+        if cached is not None:
+            return cached
+        result = self._scale_correction_at(actual_v)
+        self._speed_corr_cache[key] = result
+        return result
 
     # ── Road-model 카메라 포즈 영속화 / 적용 ───────────────────────────
 
@@ -654,6 +711,7 @@ class PerspectiveTransformer:
         H_m, _ = cv2.findHomography(src_pts, dst_meter)
         if H_m is not None:
             self._H_meter = H_m
+        self._speed_corr_cache.clear()
         self._bearing_rad = 0.0
         self._is_calibrated = False
 

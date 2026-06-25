@@ -9,17 +9,26 @@ const VehicleTable = React.memo(function VehicleTable({ vehicles = [], calibrate
   const [logOpen, setLogOpen] = useState(false);
   const [dirTab, setDirTab] = useState("all");
 
+  const uniqueVehicles = useMemo(() => {
+    const seen = new Set();
+    return vehicles.filter(v => {
+      if (seen.has(v.track_id)) return false;
+      seen.add(v.track_id);
+      return true;
+    });
+  }, [vehicles]);
+
   const tabCounts = useMemo(() => ({
-    all: vehicles.length,
-    in:  vehicles.filter(v => v.direction === "In").length,
-    out: vehicles.filter(v => v.direction === "Out").length,
-  }), [vehicles]);
+    all: uniqueVehicles.length,
+    in:  uniqueVehicles.filter(v => v.direction === "In").length,
+    out: uniqueVehicles.filter(v => v.direction === "Out").length,
+  }), [uniqueVehicles]);
 
   const filtered = useMemo(() => {
-    if (dirTab === "in")  return vehicles.filter(v => v.direction === "In");
-    if (dirTab === "out") return vehicles.filter(v => v.direction === "Out");
-    return vehicles;
-  }, [vehicles, dirTab]);
+    if (dirTab === "in")  return uniqueVehicles.filter(v => v.direction === "In");
+    if (dirTab === "out") return uniqueVehicles.filter(v => v.direction === "Out");
+    return uniqueVehicles;
+  }, [uniqueVehicles, dirTab]);
 
   const speeds = useMemo(() => filtered.map((v) => v.speed_kph).filter((s) => s > 0), [filtered]);
   const { minSpd, maxSpd, avgSpd } = useMemo(() => ({

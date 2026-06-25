@@ -86,6 +86,7 @@ def _speed_debug_enabled() -> bool:
     _spd_enabled_cache = (now, enabled)
     return enabled
 
+from typing import Callable
 from config import (
     SPEED_LIMIT_KPH,
     BOTTLENECK_DWELL_FRAMES,
@@ -100,6 +101,7 @@ from config import (
     SPEED_SPIKE_FACTOR,
     SPEED_MIN_KPH,
     SPEED_OUTLIER_MAD_K,
+    SPEED_TRUST_MAX_DEPTH_M,
     DIR_DEADZONE_M,
     DIR_EMA_ALPHA,
     BEARING_REFINE_MIN_SAMPLES,
@@ -123,13 +125,14 @@ class VehicleState:
     lon:           float
     x_m:           float = 0.0
     y_m:           float = 0.0
-    direction:     str   = "Unknown"   # "In" / "Out" / "Unknown"
-    speed_kph:     float = 0.0
-    is_speeding:   bool  = False
-    dwell_frames:  int   = 0
-    is_bottleneck: bool  = False
-    is_parked:     bool  = False
-    lane_id:       int   = -1
+    direction:      str   = "Unknown"   # "In" / "Out" / "Unknown"
+    speed_kph:      float = 0.0
+    speed_reliable: bool  = True   # False = 카메라에서 너무 멀어 속도 통계 신뢰 불가
+    is_speeding:    bool  = False
+    dwell_frames:   int   = 0
+    is_bottleneck:  bool  = False
+    is_parked:      bool  = False
+    lane_id:        int   = -1
 
 
 # ── 프레임 단위 집계 결과 ─────────────────────────────────────────────
@@ -192,6 +195,14 @@ class TrafficAnalytics:
         self._speed_samples: deque = deque(maxlen=6000)
         self._overspeed_count: int = 0         # over-limit 스킵 누적 (진단용)
         self._spd_log_last: dict[int, float] = {}   # 트랙별 진단 로그 스로틀 타임스탬프
+        # ① 깊이별 속도 보정 함수 (transform.speed_correction_at 배선)
+        self.depth_corr_fn: Callable[[float, int], float] | None = None
+        self.frame_h: int = 0
+        # corr 계산용 bbox-bottom y EMA (탐지 노이즈가 corr 급변으로 전달되는 것 차단)
+        self._corr_y_ema: dict[int, float] = {}
+        # ③ ITS 보정 적응형 수렴
+        self._its_calib_runs: int = 0
+        self.its_scale_restored: bool = False
 
     def reset(self) -> None:
         """카메라 전환 시 상태 초기화."""
@@ -212,7 +223,8 @@ class TrafficAnalytics:
             self._gps_trace.clear()
             self._speed_samples.clear()
             self._spd_log_last.clear()
-            # speed_scale은 reset하지 않음 — main.py에서 저장된 값을 복원함
+            self._its_calib_runs = 0
+            # speed_scale/its_scale_restored는 reset하지 않음 — main.py에서 복원함
 
     def update(
         self,
@@ -251,6 +263,10 @@ class TrafficAnalytics:
 
         current_ts = timestamp_ms / 1000.0
 
+        # Phase 1: GPS jitter 제거를 먼저 적용 — direction/speed 계산이 smooth GPS를 사용하도록
+        # (이전에는 _assign_directions 이후에 호출되어 raw GPS로 방향을 분류했음)
+        self._smooth_positions(vehicles)
+
         for v in vehicles:
             # Task 4: 주차 latch — 이미 느린 차에만 적용(이동 중인 차가 주차 지점 통과해도 0 되지 않도록)
             if (self._is_near_parked(v.center_px)
@@ -260,11 +276,10 @@ class TrafficAnalytics:
             self._speed(v, current_ts)
             self._dwell_update(v)
 
-        # Task 1: GPS 투영 + 이동 기반 방향 분류 → 차선 offset → 위치 평활
+        # Task 1: GPS 투영 + 이동 기반 방향 분류 → 차선 offset
         along_map = self._project_to_road_axis(vehicles)
         self._assign_directions(vehicles, along_map)
         self._apply_lane_offset(vehicles)   # Phase 5: In/Out 방향별 좌우 분리
-        self._smooth_positions(vehicles)    # Phase 1: jitter 제거 (lateral 보존)
 
         # Road-shape learning: GPS trace 누적
         self._accumulate_gps_trace(vehicles)
@@ -272,15 +287,16 @@ class TrafficAnalytics:
         # Task 3: 흐름 벡터 누적 (bearing 자동 보정용)
         self._accumulate_flow(vehicles)
 
-        # 통계·경보는 주차 차량 제외
+        # 통계·경보는 주차 차량 제외, avg_speed/ITS 샘플은 reliable 차량만
         active_vehicles = [v for v in vehicles if not v.is_parked]
+        reliable_vehicles = [v for v in active_vehicles if v.speed_reliable]
 
         result = FrameAnalytics(
             frame_id=frame_id,
             timestamp_ms=timestamp_ms,
             vehicles=[asdict(v) for v in vehicles],        # 지도 표시는 전체
             vehicle_count=len(active_vehicles),
-            avg_speed_kph=self._avg_speed(active_vehicles),
+            avg_speed_kph=self._avg_speed(reliable_vehicles),
             los_grade=self._los(len(active_vehicles)),
             in_count=in_count,
             out_count=out_count,
@@ -290,7 +306,7 @@ class TrafficAnalytics:
         for v in vehicles:
             self._prev[v.track_id] = (v.lat, v.lon, v.x_m, v.y_m, current_ts)
 
-        # ITS 보정용 속도 샘플 수집 (이동 차량만, 보정 계수 적용된 값)
+        # ITS 보정용 속도 샘플 — reliable 차량 평균만 누적
         if result.avg_speed_kph > 0:
             self._speed_samples.append((result.avg_speed_kph, time.monotonic()))
 
@@ -323,7 +339,7 @@ class TrafficAnalytics:
         return math.hypot(vx, vy) * 3.6
 
     def _spd_debug(self, tid, ts, dec, inst_dt, step_m, span, disp_m, raw, n,
-                   force: bool = False) -> None:
+                   force: bool = False, corr: float = 1.0) -> None:
         """SPEED_DEBUG 시 per-frame 진단을 speed_debug.log 에 1줄 기록.
 
         force=True(jump_clear/overlimit 등 중요 이벤트)는 스로틀을 무시한다.
@@ -337,12 +353,12 @@ class TrafficAnalytics:
         self._spd_log_last[tid] = ts
         def _f(x):
             return "-" if x is None else f"{x:.3f}"
-        scaled = None if raw is None else raw * self.speed_scale
+        scaled = None if raw is None else raw * corr * self.speed_scale
         _spd_log.debug(
             "tid=%d dec=%s n=%s instdt=%s step_m=%s span=%s disp_m=%s "
-            "raw=%s scale=%.3f scaled=%s",
+            "raw=%s corr=%.3f scale=%.3f scaled=%s",
             tid, dec, ("-" if n is None else n), _f(inst_dt), _f(step_m),
-            _f(span), _f(disp_m), _f(raw), self.speed_scale, _f(scaled),
+            _f(span), _f(disp_m), _f(raw), corr, self.speed_scale, _f(scaled),
         )
 
     def _speed(self, v: VehicleState, current_ts: float) -> None:
@@ -362,6 +378,25 @@ class TrafficAnalytics:
             self._spd_debug(tid, current_ts, "parked", None, None, None, None, None, None)
             return
 
+        # ② 원거리 신뢰도 판정 (snap GPS 기준 equirect 거리)
+        if (self.cam_lat is not None and self.cam_lon is not None
+                and v.lat and v.lon):
+            _R_lat = 110574.0
+            _R_lon = 111320.0 * math.cos(math.radians(self.cam_lat))
+            _depth_m = math.hypot(
+                (v.lat - self.cam_lat) * _R_lat,
+                (v.lon - self.cam_lon) * _R_lon,
+            )
+            v.speed_reliable = _depth_m <= SPEED_TRUST_MAX_DEPTH_M
+
+        # ① 깊이별 속도 보정 계수 (scale 모델 미확보 시 1.0)
+        # bbox bottom y를 EMA 스무딩 후 corr 계산 — 탐지 노이즈가 corr 급변으로 전달되는 것 차단
+        raw_y = v.bbox_xyxy[3]
+        smooth_y = self._corr_y_ema.get(tid, raw_y)
+        smooth_y = smooth_y * 0.7 + raw_y * 0.3
+        self._corr_y_ema[tid] = smooth_y
+        corr = self.depth_corr_fn(smooth_y, self.frame_h) if self.depth_corr_fn else 1.0
+
         win = self._pos_window.setdefault(tid, deque(maxlen=SPEED_WINDOW_FRAMES))
         prev_ema = self._speed_ema.get(tid)
 
@@ -376,7 +411,7 @@ class TrafficAnalytics:
                 win.clear()                      # 트랙 끊김/재등장 → 리셋
                 inst_dt = step_m = None
             elif inst_dt > 0:
-                raw_max_mps = (MAX_REASONABLE_KPH / 3.6) / max(self.speed_scale, 0.1)
+                raw_max_mps = (MAX_REASONABLE_KPH / 3.6) / max(self.speed_scale * corr, 0.1)
                 if step_m > raw_max_mps * inst_dt * 3.0:
                     # ID-switch-level teleport: clear window to prevent corrupted regression slope
                     win.clear()
@@ -413,7 +448,8 @@ class TrafficAnalytics:
 
         moving = disp_m >= SPEED_JITTER_THRESHOLD_M
         raw = self._estimate_speed_kph(win) if moving else 0.0
-        scaled = raw * self.speed_scale
+        total_scale = min(corr * self.speed_scale, 3.0)  # corr×speed_scale 총 증폭 상한 3x
+        scaled = raw * total_scale  # ① corr 적용
 
         if moving and SPEED_MIN_KPH <= scaled <= MAX_REASONABLE_KPH:
             # 스파이크 거부는 EMA가 '확정'(>5)된 경우에만 — 시드 단계는 그대로 수용.
@@ -438,8 +474,8 @@ class TrafficAnalytics:
             dec = "stop" if self._speed_ema[tid] == 0.0 else "decay"
 
         v.speed_kph = round(self._speed_ema.get(tid, 0.0), 1)
-        v.is_speeding = v.speed_kph > self.speed_limit_kph * 1.10
-        self._spd_debug(tid, current_ts, dec, inst_dt, step_m, span, disp_m, raw, len(win))
+        v.is_speeding = v.speed_reliable and v.speed_kph > self.speed_limit_kph * 1.10
+        self._spd_debug(tid, current_ts, dec, inst_dt, step_m, span, disp_m, raw, len(win), corr=corr)
 
     def _project_to_road_axis(self, vehicles: list[VehicleState]) -> dict[int, float]:
         """차량 GPS를 도로 bearing 축에 투영 → 횡방향 흔들림 제거.
@@ -477,12 +513,50 @@ class TrafficAnalytics:
 
         bearing 방향으로 이동(along 증가) = Out(outbound).
         bearing 반대(along 감소) = In(inbound, approaching camera).
-        road_bearing_deg 미설정 시 LineZone fallback 사용.
+        road_bearing_deg 미설정 시: cam GPS가 있으면 거리 변화량으로 추정, 없으면 LineZone fallback.
         """
         if self.road_bearing_deg is None:
-            for v in vehicles:
-                if v.track_id in self._vehicle_direction:
-                    v.direction = self._vehicle_direction[v.track_id]
+            if self.cam_lat is not None and self.cam_lon is not None:
+                # bearing 없이도 카메라로부터의 GPS 거리 변화로 In/Out 추정
+                # 멀어짐(d_dist > 0) = Out, 가까워짐(d_dist < 0) = In
+                R_lat = 110574.0
+                R_lon = 111320.0 * math.cos(math.radians(self.cam_lat))
+                for v in vehicles:
+                    if v.is_parked:
+                        continue
+                    tid = v.track_id
+                    dist = math.hypot(
+                        (v.lat - self.cam_lat) * R_lat,
+                        (v.lon - self.cam_lon) * R_lon,
+                    )
+                    prev_dist = self._along_prev.get(tid)
+                    self._along_prev[tid] = dist
+
+                    if prev_dist is None:
+                        v.direction = self._vehicle_direction.get(tid, "Unknown")
+                        continue
+
+                    d_dist = dist - prev_dist
+                    prev_ema = self._dir_ema.get(tid)
+                    new_ema = d_dist if prev_ema is None else (
+                        prev_ema * (1 - DIR_EMA_ALPHA) + d_dist * DIR_EMA_ALPHA
+                    )
+                    self._dir_ema[tid] = new_ema
+
+                    if new_ema > DIR_DEADZONE_M:
+                        dir_now = "Out"
+                    elif new_ema < -DIR_DEADZONE_M:
+                        dir_now = "In"
+                    else:
+                        dir_now = self._vehicle_direction.get(tid, "Unknown")
+
+                    self._vehicle_direction[tid] = dir_now
+                    v.direction = dir_now
+            else:
+                # cam GPS 없음 → LineZone 교차 이력만 사용
+                for v in vehicles:
+                    if v.track_id in self._vehicle_direction:
+                        v.direction = self._vehicle_direction[v.track_id]
             return
 
         for v in vehicles:
@@ -525,6 +599,10 @@ class TrafficAnalytics:
         한국 우측통행 기준: Out(순방향)=오른쪽, In(역방향)=왼쪽 (중심선 반대편).
         """
         if self.road_bearing_deg is None:
+            return
+        if self.road_pts:
+            # _pixel_to_gps_curved가 활성화된 경우 lateral이 이미 GPS에 포함됨.
+            # 추가 offset을 적용하면 이중 계산(+3.5m)으로 도로 밖으로 이탈함.
             return
         b = math.radians(self.road_bearing_deg)
         sin_b, cos_b = math.sin(b), math.cos(b)
@@ -813,8 +891,17 @@ class TrafficAnalytics:
                     raw_target, target, our_avg, its_speed_kph,
                 )
 
-            # ITS 데이터 신뢰도 낮아 매우 느린 보정만 허용 (1회 폴링 최대 ~0.5% 변화)
-            self.speed_scale = round(old_scale * 0.99 + target * 0.01, 4)
+            # ③ 적응형 alpha: 복원된 카메라는 느린 유지 보정, 신규 카메라는 빠른 초기 수렴
+            if self.its_scale_restored:
+                alpha = 0.01
+            else:
+                run = self._its_calib_runs
+                alpha = 0.15 if run < 2 else (0.05 if run < 4 else 0.01)
+            self._its_calib_runs += 1
+
+            # 단일 폴링 최대 변화 ±10% 클램프 (잘못된 ITS 샘플 방어)
+            blended = old_scale * (1 - alpha) + target * alpha
+            self.speed_scale = round(max(old_scale * 0.9, min(old_scale * 1.1, blended)), 4)
             return self.speed_scale
 
     def _gc(self, active: set[int]) -> None:
@@ -832,6 +919,7 @@ class TrafficAnalytics:
                 self._along_prev.pop(tid, None)
                 self._dir_ema.pop(tid, None)
                 self._pos_ema.pop(tid, None)
+                self._corr_y_ema.pop(tid, None)
         # 재등장한 track의 grace counter 초기화
         for tid in active:
             self._lost_frames.pop(tid, None)

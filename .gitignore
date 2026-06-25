@@ -51,3 +51,4 @@ Thumbs.db
 
 # 개발 플래닝 (로컬 전용)
 tasks/
+node-link-data/nodelink.bak

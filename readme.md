@@ -11,7 +11,7 @@ A real-time traffic monitoring system that detects and tracks vehicles from live
 | Item | Spec |
 |------|------|
 | OS | Windows 10/11 |
-| Python | 3.11+ |
+| Python | 3.13+ |
 | Node.js | 18+ |
 | GPU | NVIDIA (CUDA 12.4, TensorRT 10+) |
 | Make | GnuWin32 Make |
@@ -60,7 +60,6 @@ Open `http://localhost:5173` in your browser.
 | Command | Description |
 |---------|-------------|
 | `make dev` | Run backend + frontend together |
-| `make dev MODEL=s` | Run with yolov8s (lighter, lower-end GPUs) |
 | `make backend` | Run backend only |
 | `make frontend` | Run frontend only |
 | `make kill` | Force-release port 8000 |
@@ -69,12 +68,15 @@ Open `http://localhost:5173` in your browser.
 
 ## Recommended Settings by Hardware
 
-| Environment | Model | Speed | Command |
-|-------------|-------|-------|---------|
-| RTX 3070+ | YOLO26m + TensorRT | ~7ms | `make dev` |
-| RTX 3060 / 2070 | YOLO26m + TensorRT | ~10ms | `make dev` |
-| GTX 1080 or older | YOLOv8s + CUDA | ~30ms | `make dev MODEL=s` |
-| CPU only | Not supported | — | — |
+| Environment | Recommended Model | Speed | Notes |
+|-------------|-------------------|-------|-------|
+| RTX 3070+ (8 GB+ VRAM) | YOLO26x + TensorRT FP16 | ~27 fps | Best accuracy |
+| RTX 3060 / 2070 (6 GB VRAM) | YOLO26m + TensorRT FP16 | ~34 fps | High accuracy |
+| Mid-range GPU (4 GB VRAM) | YOLO26s + TensorRT FP16 | ~52 fps | Balanced |
+| Low-end / no VRAM | YOLO26n | ~60 fps GPU / ~9 fps CPU | Lightweight |
+| CPU only | Not supported for real-time | — | |
+
+Model and tracker tier are selected automatically at first run via a hardware-aware GUI picker.
 
 > `.engine` files must be converted on the GPU that will run them. Files built on a different GPU will not work.
 

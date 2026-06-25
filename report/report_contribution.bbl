@@ -107,8 +107,4 @@ A.~M. Andrew, ``Another efficient algorithm for convex hulls in two
 \bibitem{fastapi}
 S.~Ram{\'i}rez, ``{FastAPI},'' \url{https://fastapi.tiangolo.com}, 2018.
 
-\bibitem{osm}
-{OpenStreetMap Contributors}, ``{OpenStreetMap} and the {Overpass API},''
-  \url{https://www.openstreetmap.org}, 2023.
-
 \end{thebibliography}

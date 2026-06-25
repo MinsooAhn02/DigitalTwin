@@ -99,13 +99,58 @@ function RoiBar({ roiState, t }) {
   );
 }
 
+// ── 스트림 로딩/오류 오버레이 ──────────────────────────────────────────
+function StreamOverlay({ loading, cameraStatus, t }) {
+  if (cameraStatus?.type === "failed") {
+    return (
+      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.88)", color: "#f87171", fontSize: 13, gap: 8 }}>
+        <div style={{ fontSize: 28 }}>⚠</div>
+        <div>{t("cctv.stream.failed")}</div>
+        {cameraStatus.message ? <div style={{ fontSize: 11, color: "#64748b", maxWidth: 260, textAlign: "center" }}>{cameraStatus.message}</div> : null}
+      </div>
+    );
+  }
+  if (cameraStatus?.type === "retrying") {
+    return (
+      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.85)", color: "#fbbf24", fontSize: 13, gap: 8 }}>
+        <div style={{ fontSize: 28 }}>🔄</div>
+        <div>{t("cctv.stream.retrying")}</div>
+      </div>
+    );
+  }
+  if (loading) {
+    return (
+      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.85)", color: "#94a3b8", fontSize: 13, gap: 8 }}>
+        <div style={{ fontSize: 28 }}>⏳</div>
+        <div>{t("cctv.stream.loading")}</div>
+      </div>
+    );
+  }
+  return null;
+}
+
 const btnStyle = {
   fontSize: 11, padding: "3px 8px", borderRadius: 5,
   border: "1px solid #374151", background: "#1e293b",
   color: "#e2e8f0", cursor: "pointer",
 };
 
-export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCancelGps, onCalibSaved, onCalibTabChange }) {
+// ── MJPEG img — 연결 누수 방지 래퍼 ──────────────────────────────────────
+// 브라우저는 <img>가 DOM에서 제거돼도 multipart(MJPEG) 연결을 끊지 않는다.
+// 카메라/탭 전환이 반복되면 좀비 연결이 origin당 동시 연결 한도(6개)를 소진해
+// 새 스트림 요청이 무기한 대기 → WS(지도 점)는 멀쩡한데 영상만 안 뜨는 원인.
+// 언마운트 시 src를 비워 연결을 명시적으로 중단하고, 오류 시 onRetry로 재연결한다.
+function MjpegImg({ src, alt, style, onLoad, onRetry }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const img = ref.current;
+    if (img) img.src = src;
+    return () => { if (img) img.src = ""; };
+  }, [src]);
+  return <img ref={ref} src={src} alt={alt} style={style} onLoad={onLoad} onError={onRetry} />;
+}
+
+export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCancelGps, onCalibSaved, onCalibTabChange, switching, cameraStatus, cameraReadyInfo }) {
   const { t } = useLang();
   const videoRef  = useRef(null);
   const hlsRef    = useRef(null);
@@ -124,6 +169,37 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
   const [roiState, setRoiState]           = useState(null);
   const [streamKey, setStreamKey]         = useState(0);
   const [mjpegLoading, setMjpegLoading]   = useState(false);
+  const [yoloLoading, setYoloLoading]     = useState(false);
+
+  // MJPEG 연결 오류 시 1초 디바운스 후 streamKey를 올려 재연결 (무한 루프 방지)
+  const retryTimerRef = useRef(null);
+  const retryStream = () => {
+    if (retryTimerRef.current) return;
+    retryTimerRef.current = setTimeout(() => {
+      retryTimerRef.current = null;
+      setStreamKey((k) => k + 1);
+    }, 1000);
+  };
+  useEffect(() => () => clearTimeout(retryTimerRef.current), []);
+
+  // camera_ready 도착 시 로딩 해제
+  // cameraReadyInfo.camera_key와 현재 카메라의 cam_key가 일치할 때만 해제해
+  // 빠른 전환 시 이전 카메라의 camera_ready가 현재 로딩을 잘못 클리어하는 race condition 방지
+  useEffect(() => {
+    if (!cameraReadyInfo?.camera_key) return;
+    if (!cctv?.cam_key || cameraReadyInfo.camera_key === cctv.cam_key) {
+      setMjpegLoading(false);
+      setYoloLoading(false);
+    }
+  }, [cameraReadyInfo]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 에러 복구 fallback: cameraStatus null 전환 시에도 해제
+  useEffect(() => {
+    if (cameraStatus === null) {
+      setMjpegLoading(false);
+      setYoloLoading(false);
+    }
+  }, [cameraStatus]);
 
   useEffect(() => {
     fetch(`${API_BASE}/runtime-config`)
@@ -140,7 +216,9 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
     // 카메라 URL 변경 시 MJPEG img를 강제 재연결해 이전 카메라 화면이 굳는 현상 방지
     setStreamKey(k => k + 1);
     setMjpegLoading(true);
-    const t = setTimeout(() => setMjpegLoading(false), 4000);
+    setYoloLoading(true);
+    // 최대 8s fallback (camera_ready로 먼저 해제되므로 여기까지 오는 경우는 드묾)
+    const t = setTimeout(() => { setMjpegLoading(false); setYoloLoading(false); }, 8000);
     return () => clearTimeout(t);
   }, [cctv?.cctvurl]);  // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -326,27 +404,29 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
         {/* live 탭: MJPEG 스트림 (HLS CORS 우회) */}
         {tab === "live" && (
           <>
-            <img
+            <MjpegImg
               key={streamKey}
               src={`${MJPEG_URL}?k=${streamKey}`}
               alt="live"
               onLoad={() => setMjpegLoading(false)}
+              onRetry={retryStream}
               style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#000" }}
             />
-            {mjpegLoading && (
-              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.85)", color: "#94a3b8", fontSize: 13 }}>
-                <div style={{ fontSize: 28, marginBottom: 8 }}>⏳</div>{t("cctv.stream.loading")}
-              </div>
-            )}
+            <StreamOverlay
+              loading={mjpegLoading || switching}
+              cameraStatus={cameraStatus}
+              t={t}
+            />
           </>
         )}
 
         {/* cal / roi 탭: MJPEG 배경 + 투명 video (오버레이 dimension 기준용) */}
         {(tab === "cal" || tab === "roi") && (
-          <img
+          <MjpegImg
             key={streamKey}
             src={`${MJPEG_URL}?k=${streamKey}`}
             alt="cal-bg"
+            onRetry={retryStream}
             style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }}
           />
         )}
@@ -357,11 +437,21 @@ export default function CctvPlayer({ cctv, onClose, pendingGps, onNeedGps, onCan
         }} />
 
         {tab === "yolo" && (
-          <img
-            src={MJPEG_YOLO_URL}
-            alt="YOLO"
-            style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#000" }}
-          />
+          <>
+            <MjpegImg
+              key={streamKey}
+              src={`${MJPEG_YOLO_URL}?k=${streamKey}`}
+              alt="YOLO"
+              onLoad={() => setYoloLoading(false)}
+              onRetry={retryStream}
+              style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#000" }}
+            />
+            <StreamOverlay
+              loading={yoloLoading || switching}
+              cameraStatus={cameraStatus}
+              t={t}
+            />
+          </>
         )}
 
         {(tab === "cal" || tab === "roi") && hlsLoading && !hlsError && (

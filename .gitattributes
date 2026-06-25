@@ -1,0 +1,5 @@
+# Default: auto line ending detection
+* text=auto
+
+# Makefile must use LF (backslash continuation breaks with CRLF)
+Makefile text eol=lf

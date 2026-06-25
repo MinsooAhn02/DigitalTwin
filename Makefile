@@ -12,20 +12,10 @@ dev: kill nodelink
 	start "Frontend :5173" /d "%CD%\traffic-digital-twin\frontend" cmd /k npm run dev
 
 nodelink:
-	@if not exist "node-link-data\nodelink.sqlite" ( \
-		if exist "node-link-data\MOCT_NODE.shp" ( \
-			echo [노드링크] DB 생성 중 ^(최초 1회 ~2분^)... && \
-			call $(PYTHON_RUNNER) -m pip install pyshp pyproj -q && \
-			call $(PYTHON_RUNNER) scripts\build_nodelink_db.py \
-		) else ( \
-			echo [노드링크] shapefile 없음 - 도로 정보 기능 비활성화 \
-		) \
-	) else ( \
-		echo [노드링크] DB 확인 완료 \
-	)
+	@call scripts\check_nodelink.cmd
 
 kill:
-	-powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $$_.OwningProcess -Force -ErrorAction SilentlyContinue }"
+	-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000 " ^| findstr "LISTENING"') do taskkill /F /PID %%a
 
 backend:
 	call $(PYTHON_RUNNER) traffic-digital-twin\backend\model_setup.py

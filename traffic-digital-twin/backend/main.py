@@ -24,9 +24,7 @@ main.py — FastAPI WebSocket 브로드캐스트 서버
       4. snap 좌표를 transformer GPS 기준점 및 FOV polygon 원점으로 사용
 
     live_loop 카메라 전환 시:
-      5. OSM Overpass API로 도로폭 쿼리 (osm.py):
-           width 태그 → lanes:forward × 차선폭 → lanes/2 × 차선폭 순 우선순위
-           실패 시 nodelink lanes × 차선폭으로 폴백
+      5. nodelink lanes × 차선폭으로 도로폭 계산
       6. 소실점(VP) 기반 자동 캘리브레이션 (auto_calibrate_from_frame):
            - name_bearing 확정 시 (fix_direction=True): VP flip 스킵
            - 미확정 시: VP가 우측 편향이면 bearing 180° 반전
@@ -231,15 +229,17 @@ def _apply_fov_ema(new_info: dict) -> dict:
     return {**new_info, **_accepted_fov}
 
 
-def _load_speed_scale(cam_key: str) -> float:
-    """카메라별 저장된 속도 보정 계수 로드. 없으면 1.0."""
+def _load_speed_scale(cam_key: str) -> tuple[float, bool]:
+    """카메라별 저장된 속도 보정 계수 로드. 반환: (scale, found). 없으면 (1.0, False)."""
     try:
         if SPEED_SCALE_PATH.exists():
             data = json.loads(SPEED_SCALE_PATH.read_text(encoding="utf-8"))
-            return float(data.get(cam_key, {}).get("speed_scale", 1.0))
+            entry = data.get(cam_key)
+            if entry:
+                return float(entry.get("speed_scale", 1.0)), True
     except Exception as exc:
         logger.debug("speed_scale 로드 실패 (기본 1.0 사용): %s", exc)
-    return 1.0
+    return 1.0, False
 
 
 def _save_speed_scale(cam_key: str, scale: float) -> None:
@@ -261,6 +261,7 @@ from config import (
     HISTORY_RETENTION_DAYS,
     HISTORY_SAMPLE_S,
     HLS_REFRESH_INTERVAL,
+    EX_API_KEY,
     ITS_API_KEY,
     ITS_BASE_URL,
     ITS_POLL_INTERVAL,
@@ -285,6 +286,8 @@ logger = logging.getLogger(__name__)
 
 analytics    = TrafficAnalytics()
 _transformer = PerspectiveTransformer()
+# ① 깊이별 속도 보정 함수 배선 (싱글톤이므로 1회만 설정)
+analytics.depth_corr_fn = _transformer.speed_correction_at
 # 실행 중 자동 측정 수집기 — make dev로 실행 후 카메라를 보면 자동으로 누적되고
 # history_sampler_loop(30s)가 backend/eval_*.csv + eval_summary.json 으로 flush.
 # GET /eval/report 로 즉시 스냅샷, POST /eval/reset 로 초기화.
@@ -486,6 +489,48 @@ def _parse_its_items(resp_json: dict) -> list[dict]:
     return raw if isinstance(raw, list) else []
 
 
+# 마지막 ITS 조회의 피드별 수신 상태 (프론트엔드 상태 칩용)
+_its_feed_status: dict[str, dict] = {
+    "its": {"ok": None, "count": 0, "ts": 0.0},
+    "ex":  {"ok": None, "count": 0, "ts": 0.0},
+}
+
+
+async def _fetch_its_cctvs(minX: float, maxX: float, minY: float, maxY: float) -> list[dict]:
+    """ITS API에서 국도(its)·고속도로(ex) CCTV를 모두 조회해 합친다.
+    한쪽 피드가 비거나 실패해도 다른 쪽 결과는 그대로 반환된다."""
+    async def _fetch(client: httpx.AsyncClient, road_type: str) -> list[dict]:
+        api_key = EX_API_KEY if road_type == "ex" else ITS_API_KEY
+        params = {
+            "apiKey":   api_key,
+            "type":     road_type,
+            "cctvType": "1",
+            "minX": str(minX), "maxX": str(maxX),
+            "minY": str(minY), "maxY": str(maxY),
+            "getType":  "json",
+        }
+        resp = await client.get(ITS_BASE_URL, params=params)
+        resp.raise_for_status()
+        return _parse_its_items(resp.json())
+
+    items: list[dict] = []
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        results = await asyncio.gather(
+            _fetch(client, "its"), _fetch(client, "ex"),
+            return_exceptions=True,
+        )
+    now = time.time()
+    for road_type, res in zip(("its", "ex"), results):
+        if isinstance(res, BaseException):
+            _its_feed_status[road_type] = {"ok": False, "count": 0, "ts": now}
+            logger.warning("CCTV 조회 실패 (type=%s): %s: %s",
+                           road_type, type(res).__name__, res)
+        else:
+            _its_feed_status[road_type] = {"ok": True, "count": len(res), "ts": now}
+            items.extend(res)
+    return items
+
+
 def _build_vehicles(
     tracked: "sv.Detections",
     frame_wh: tuple[int, int] | None = None,
@@ -513,6 +558,16 @@ def _build_vehicles(
 
     if not valid:
         return []
+
+    # track_id 중복 제거 — 트래커가 같은 ID를 두 개 내보낼 때(ghost track 등) 첫 번째 유지
+    seen_tids: set[int] = set()
+    deduped: list[tuple] = []
+    for item in valid:
+        tid = item[2]
+        if tid not in seen_tids:
+            seen_tids.add(tid)
+            deduped.append(item)
+    valid = deduped
 
     # 2단계: 배치 homography — cv2.perspectiveTransform 1회 호출
     pts = [(v[5], v[6]) for v in valid]
@@ -900,63 +955,59 @@ async def get_cctvs(
     if cache_key in _cctv_cache:
         return _cctv_cache[cache_key]
 
-    params = {
-        "apiKey":   ITS_API_KEY,
-        "type":     "its",
-        "cctvType": "1",
-        "minX": str(minX), "maxX": str(maxX),
-        "minY": str(minY), "maxY": str(maxY),
-        "getType":  "json",
-    }
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(ITS_BASE_URL, params=params)
-            resp.raise_for_status()
-            items = _parse_its_items(resp.json())
-            result = []
-            for item in items:
-                try:
-                    lat = float(item.get("coordy") or 0)
-                    lon = float(item.get("coordx") or 0)
-                    if not (lat and lon):
-                        continue
-                    url     = item.get("cctvurl", "")
-                    name_ko = item.get("cctvname", "")
-                    name    = _korname_to_en(name_ko)
-                    name_en = _en_only_name(name_ko)
-                    cam_key = roi_manager.camera_key(url) if url else None
-                    result.append({
-                        "id":      url or name,
-                        "name":    name,
-                        "name_ko": name_ko,
-                        "name_en": name_en,
-                        "cam_key": cam_key,
-                        "lat":     lat,
-                        "lon":     lon,
-                        "cctvurl": url,
-                        "heading": 0,    # ITS API 미제공 — calibration으로 업데이트
-                        "fov_deg": 70,
-                    })
-                except (ValueError, TypeError):
+        items = await _fetch_its_cctvs(minX, maxX, minY, maxY)
+        result = []
+        for item in items:
+            try:
+                lat = float(item.get("coordy") or 0)
+                lon = float(item.get("coordx") or 0)
+                if not (lat and lon):
                     continue
-            # 동일 name_en 중복 구분: 위도 순 정렬 후 (1)(2)... 부여
-            _name_buckets: dict[str, list] = {}
-            for item in result:
-                key = item["name_en"]
-                if key:
-                    _name_buckets.setdefault(key, []).append(item)
-            for _key, _items in _name_buckets.items():
-                if len(_items) > 1:
-                    _items.sort(key=lambda x: x.get("lat", 0))
-                    for _idx, _item in enumerate(_items, 1):
-                        _item["name_en"] = f"{_key} ({_idx})"
+                url     = item.get("cctvurl", "")
+                name_ko = item.get("cctvname", "")
+                name    = _korname_to_en(name_ko)
+                name_en = _en_only_name(name_ko)
+                cam_key = roi_manager.camera_key(url) if url else None
+                result.append({
+                    "id":      url or name,
+                    "name":    name,
+                    "name_ko": name_ko,
+                    "name_en": name_en,
+                    "cam_key": cam_key,
+                    "lat":     lat,
+                    "lon":     lon,
+                    "cctvurl": url,
+                    "heading": 0,    # ITS API 미제공 — calibration으로 업데이트
+                    "fov_deg": 70,
+                })
+            except (ValueError, TypeError):
+                continue
+        # 동일 name_en 중복 구분: 위도 순 정렬 후 (1)(2)... 부여
+        _name_buckets: dict[str, list] = {}
+        for item in result:
+            key = item["name_en"]
+            if key:
+                _name_buckets.setdefault(key, []).append(item)
+        for _key, _items in _name_buckets.items():
+            if len(_items) > 1:
+                _items.sort(key=lambda x: x.get("lat", 0))
+                for _idx, _item in enumerate(_items, 1):
+                    _item["name_en"] = f"{_key} ({_idx})"
 
-            logger.info("CCTV 조회 완료: %d개 (캐시 저장)", len(result))
-            _cctv_cache[cache_key] = result
-            return result
+        logger.info("CCTV 조회 완료: %d개 (캐시 저장)", len(result))
+        _cctv_cache[cache_key] = result
+        return result
     except Exception as e:
-        logger.warning("CCTV 목록 조회 실패: %s", e)
+        logger.warning("CCTV 목록 조회 실패: %s: %s", type(e).__name__, e)
         return []
+
+
+# ── CCTV 피드 상태 ────────────────────────────────────────────────────
+@app.get("/cctv-feed-status")
+async def cctv_feed_status():
+    """국도(its)·고속도로(ex) CCTV 피드의 마지막 조회 결과."""
+    return _its_feed_status
 
 
 # ── 백그라운드 모니터링 엔드포인트 ────────────────────────────────────
@@ -1060,8 +1111,10 @@ async def switch_camera(body: CameraSwitch):
     _scale_switch_frame = _frame_count   # 적응형 min_obs 기준 리셋
     analytics.reset()
     cam_key = roi_manager.camera_key(body.cctvurl)
-    analytics.speed_scale = _load_speed_scale(cam_key)
-    logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
+    _scale, _found = _load_speed_scale(cam_key)
+    analytics.speed_scale = _scale
+    analytics.its_scale_restored = _found
+    logger.info("속도 보정 계수 복원: %.4f found=%s (camera=%s)", _scale, _found, cam_key)
 
     # Vehicle apparent-size scale model 복원
     _transformer.reset_scale_obs(clear_model=True)
@@ -1191,17 +1244,9 @@ async def cctv_refresh(
     """
     if not (lat and lon):
         return {"cctvurl": ""}
-    params = {
-        "apiKey": ITS_API_KEY, "type": "its", "cctvType": "1",
-        "minX": str(lon - 0.002), "maxX": str(lon + 0.002),
-        "minY": str(lat - 0.002), "maxY": str(lat + 0.002),
-        "getType": "json",
-    }
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(ITS_BASE_URL, params=params)
-            resp.raise_for_status()
-            items = _parse_its_items(resp.json())
+        items = await _fetch_its_cctvs(lon - 0.002, lon + 0.002,
+                                       lat - 0.002, lat + 0.002)
         for item in items:
             if not name or item.get("cctvname") == name:
                 return {"cctvurl": item.get("cctvurl", "")}
@@ -1321,6 +1366,7 @@ async def ws_detect(ws: WebSocket):
             # GPS 변환 + VehicleState 생성
             vehicles = _build_vehicles(tracked, frame_wh=(fw, fh))
             fid += 1
+            analytics.frame_h = fh  # ① 깊이별 보정용 현재 프레임 높이
             # 브라우저 캔버스 프레임은 실시간 도착 → 벽시계를 속도 시간축으로 사용
             # (합성 fid/FPS 는 처리 지연 시 dt 과소계산 → 속도 0 버그 원인)
             result = analytics.update(fid, time.monotonic() * 1000, vehicles, in_cnt, out_cnt, in_ids, out_ids)
@@ -1538,7 +1584,8 @@ async def video_stream_yolo():
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
         last_sent: bytes | None = None
         while True:
-            jpeg = _latest_annotated_jpeg
+            # annotated 프레임이 없으면(미시청 상태 등) raw 프레임으로 폴백
+            jpeg = _latest_annotated_jpeg or _latest_frame_jpeg
             sleep_s = 1.0 / max(_stream_fps, 1.0)
             if jpeg is None or jpeg is last_sent:
                 await asyncio.sleep(sleep_s)
@@ -1766,18 +1813,10 @@ async def _refresh_hls_url_from_its(stream: "VideoStream", *, force: bool) -> No
     if cam is None or not cam.get("name"):
         return
     lat, lon, name = cam["lat"], cam["lon"], cam["name"]
-    params = {
-        "apiKey": ITS_API_KEY, "type": "its", "cctvType": "1",
-        "minX": str(lon - 0.002), "maxX": str(lon + 0.002),
-        "minY": str(lat - 0.002), "maxY": str(lat + 0.002),
-        "getType": "json",
-    }
     label = "긴급 갱신 (토큰 만료)" if force else "갱신"
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(ITS_BASE_URL, params=params)
-            resp.raise_for_status()
-            items = _parse_its_items(resp.json())
+        items = await _fetch_its_cctvs(lon - 0.002, lon + 0.002,
+                                       lat - 0.002, lat + 0.002)
         for item in items:
             if item.get("cctvname") == name:
                 new_url = item.get("cctvurl", "")
@@ -1815,17 +1854,36 @@ async def live_loop(detector, stream) -> None:
     target_interval = 1.0 / FPS
     skip_budget    = 0
     _reconnect_fails = 0  # 연속 reconnect 실패 횟수
-    global _stream_fps
+    _switch_retry_cam: dict | None = None   # 전환 실패 시 재시도할 cam 정보
+    _switch_retry_count: int = 0
+    _switch_retry_at: float = 0.0           # 재시도 허용 시각 (monotonic)
+    _SWITCH_MAX_RETRY = 2
+    _SWITCH_RETRY_DELAY = 2.0               # 재시도 간격 (초). FFmpeg timeout 10s 기준 총 ~24s
+    global _stream_fps, _latest_frame_jpeg
 
     logger.info("Live 루프 대기 중 — 지도에서 CCTV를 클릭하여 스트림을 시작하세요")
 
     while True:
         # 카메라 전환 요청 처리 — 큐에 쌓인 항목 중 최신 것만 사용
+        now_mono = time.monotonic()
         if not _camera_queue.empty():
             cam = _camera_queue.get_nowait()
-            # 큐에 추가 항목이 있으면 가장 마지막 것만 사용 (중간 전환 스킵)
             while not _camera_queue.empty():
                 cam = _camera_queue.get_nowait()
+            # 새 요청이 오면 재시도 카운터 리셋
+            _switch_retry_cam = cam
+            _switch_retry_count = 0
+            _switch_retry_at = now_mono
+        elif (_switch_retry_cam is not None
+              and _switch_retry_count < _SWITCH_MAX_RETRY
+              and now_mono >= _switch_retry_at):
+            cam = _switch_retry_cam
+            logger.info("카메라 전환 재시도 (%d/%d): %s",
+                        _switch_retry_count + 1, _SWITCH_MAX_RETRY, cam.get("url", ""))
+        else:
+            cam = None
+
+        if cam is not None:
             try:
                 await asyncio.to_thread(stream.switch_to, cam["url"])
                 snap_lat = cam.get("snap_lat", cam["lat"])
@@ -1866,8 +1924,10 @@ async def live_loop(detector, stream) -> None:
 
                 # 저장된 speed_scale 복원
                 cam_key = roi_manager.camera_key(cam_url)
-                analytics.speed_scale = _load_speed_scale(cam_key)
-                logger.info("속도 보정 계수 복원: %.4f (camera=%s)", analytics.speed_scale, cam_key)
+                _scale, _found = _load_speed_scale(cam_key)
+                analytics.speed_scale = _scale
+                analytics.its_scale_restored = _found
+                logger.info("속도 보정 계수 복원: %.4f found=%s (camera=%s)", _scale, _found, cam_key)
 
                 # Vehicle apparent-size scale model 복원 (live_loop 경로)
                 _transformer.reset_scale_obs(clear_model=True)
@@ -1953,9 +2013,21 @@ async def live_loop(detector, stream) -> None:
                     **({"roi_gps_ring": _roi_ring} if _roi_ring else {}),
                 })
                 logger.info("카메라 전환 완료, camera_ready 신호 전송")
+                _switch_retry_cam = None   # 성공 → 재시도 대기 해제
+                _switch_retry_count = 0
             except RuntimeError as e:
-                logger.warning("카메라 전환 실패: %s", e)
-                await _broadcast({"type": "camera_error", "message": str(e)})
+                _switch_retry_count += 1
+                if _switch_retry_count < _SWITCH_MAX_RETRY:
+                    _switch_retry_at = time.monotonic() + _SWITCH_RETRY_DELAY
+                    logger.warning(
+                        "카메라 전환 실패 (%d/%d), %.0fs 후 재시도: %s",
+                        _switch_retry_count, _SWITCH_MAX_RETRY, _SWITCH_RETRY_DELAY, e,
+                    )
+                    await _broadcast({"type": "camera_error", "message": str(e), "retrying": True})
+                else:
+                    logger.warning("카메라 전환 최대 재시도 초과, 포기: %s", e)
+                    _switch_retry_cam = None
+                    await _broadcast({"type": "camera_error", "message": str(e), "retrying": False})
 
         if not stream.is_open:
             await asyncio.sleep(0.5)
@@ -1963,6 +2035,8 @@ async def live_loop(detector, stream) -> None:
 
         frame_id, frame = stream.read_frame()
         if frame is None:
+            # 복구 중엔 이전 카메라 프레임이 굳어 보이지 않도록 placeholder로 교체
+            _latest_frame_jpeg = _placeholder_jpeg
             ok = await stream.reconnect()
             if ok:
                 _reconnect_fails = 0
@@ -1974,8 +2048,13 @@ async def live_loop(detector, stream) -> None:
                     await _refresh_stream_url(stream)
             continue
 
-        # 라이브 미시청 시: 스트림만 keep-alive(위 read_frame 으로 수행됨),
-        # YOLO·자동캘리브·JPEG 인코딩·broadcast 모두 스킵해 GPU/CPU 낭비 차단.
+        # MJPEG 스트림 버퍼는 뷰어 활성 여부와 무관하게 항상 업데이트.
+        # 미시청 상태에서도 /video-stream 접속 시 즉시 영상이 나오도록 함.
+        _mjpeg_ok, _mjpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if _mjpeg_ok:
+            _latest_frame_jpeg = _mjpeg_buf.tobytes()
+
+        # 라이브 미시청 시: YOLO·자동캘리브·broadcast 스킵해 GPU/CPU 낭비 차단.
         # _clients 가 비면(브라우저 종료) visibilitychange 없이도 자동 정지.
         if not (_current_cam and _live_viewer_active and _clients):
             await asyncio.sleep(0.5)
@@ -2027,11 +2106,7 @@ async def live_loop(detector, stream) -> None:
                     logger.info("차선 감지 실패 — GPS 근사 캘리브레이션 유지 (road_width=%.1fm)",
                                 _auto_calib_road_width_m)
 
-        # MJPEG 스트림용 버퍼 업데이트 (모든 프레임, 탐지 여부 무관)
-        global _latest_frame_jpeg
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        if ok:
-            _latest_frame_jpeg = buf.tobytes()
+        # _latest_frame_jpeg 는 viewer-active 체크 전에 이미 업데이트됨
 
         if skip_budget > 0:
             skip_budget -= 1
@@ -2043,11 +2118,14 @@ async def live_loop(detector, stream) -> None:
             continue
 
         t0 = time.perf_counter()
-        payload = await asyncio.to_thread(
-            _live_process, frame_id, frame, detector, tracker, stream.pos_msec
-        )
-        if payload:
-            await _broadcast(payload)
+        try:
+            payload = await asyncio.to_thread(
+                _live_process, frame_id, frame, detector, tracker, stream.pos_msec
+            )
+            if payload:
+                await _broadcast(payload)
+        except Exception as exc:
+            logger.warning("live_process 오류 (루프 유지): %s", exc)
 
         # Task 3: bearing auto-refinement from observed vehicle flow
         # Phase 2: refine_road_pts 호출 결과를 road_pts에 반영하지 않음
@@ -2167,6 +2245,7 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
                                        _drift * 100, _saved_vc["vp_y"], _new_vp)
                 _save_vehicle_calib(_ck, new_p)
 
+    analytics.frame_h = h  # ① 깊이별 보정용 현재 프레임 높이
     _t0 = time.perf_counter()
     result = analytics.update(frame_id, timestamp_ms, vehicles, in_cnt, out_cnt, in_ids, out_ids)
     _analytics_ms = (time.perf_counter() - _t0) * 1000.0

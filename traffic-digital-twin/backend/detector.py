@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 import shutil
 import threading
+import time
 from typing import Any
 
 import cv2
@@ -32,6 +33,8 @@ import numpy as np
 import supervision as sv
 import torch
 from ultralytics import YOLO
+
+import os as _os
 
 from config import (
     TRACKER_TIER,
@@ -47,6 +50,9 @@ from config import (
     BYTE_TRACK_BUFFER,
     BYTE_TRACK_FPS,
 )
+
+# 측정용: "tensorrt" | "onnx" | "pytorch" 로 강제 선택. 비어있으면 자동(우선순위대로).
+YOLO_FORCE_BACKEND = _os.getenv("YOLO_FORCE_BACKEND", "").lower()
 from roi_manager import roi_to_pixels
 
 logger = logging.getLogger(__name__)
@@ -156,9 +162,10 @@ def resolve_model_selection() -> ModelSelection:
     """
     우선순위: TensorRT > ONNX Runtime > PyTorch
     각 포맷 파일이 없으면 자동 export 시도.
+    YOLO_FORCE_BACKEND 환경변수로 backend 강제 지정 가능 (측정용).
     """
-    trt_ok = _can_use_tensorrt()
-    onnx_ok = _can_use_onnx()
+    trt_ok  = _can_use_tensorrt() and YOLO_FORCE_BACKEND not in ("onnx", "pytorch")
+    onnx_ok = _can_use_onnx()     and YOLO_FORCE_BACKEND != "pytorch"
     pt_fallback: Path | None = None
 
     for stem in _candidate_stems():
@@ -488,18 +495,51 @@ class IDStabilizer:
 
 # ── Video source ───────────────────────────────────────────────────────────
 
+def _resolve_hls_url(url: str) -> str:
+    """ITS CCTV URL이 302 redirect면 실제 m3u8 URL을 반환.
+
+    FFmpeg는 redirect를 따라가지만 m3u8 내 상대경로 세그먼트를 원본 URL 기준으로
+    잘못 조합해 첫 .ts 세그먼트 로드에 실패한다. redirect를 미리 해결하면 이를 방지.
+    """
+    import httpx
+    try:
+        with httpx.Client(timeout=5.0, follow_redirects=False) as client:
+            resp = client.get(url, headers={"User-Agent": "Mozilla/5.0", "Referer": url})
+            if resp.status_code in (301, 302, 303, 307, 308):
+                location = resp.headers.get("location", "")
+                if location:
+                    logger.info("HLS redirect 해결: %s → %s", url, location)
+                    return location
+    except Exception as exc:
+        logger.debug("HLS redirect 확인 실패, 원본 URL 사용: %s", exc)
+    return url
+
+
 def open_video_source(url: str) -> cv2.VideoCapture:
+    # 302 redirect URL을 미리 resolve해 FFmpeg의 상대경로 세그먼트 오조합 방지
+    url = _resolve_hls_url(url)
     # FFmpeg 기본 analyzeduration=5s, probesize=5MB → HLS 스트림 열기 최대 5초 지연.
     # 짧은 값으로 덮어써 초기 지연을 ~0.5s 이하로 줄인다.
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
         "analyzeduration;500000|probesize;32768"
     )
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-    if cap.isOpened():
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        logger.info("Stream connected: %s", url)
-        return cap
-    raise RuntimeError(f"Failed to open stream: {url}")
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open stream: {url}")
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    # isOpened()는 매니페스트(m3u8) 열기만 보장 — 세그먼트가 토큰 만료/404면
+    # read()가 계속 실패해 화면이 안 뜬다. 첫 프레임 디코딩까지 확인해야 연결 성공.
+    deadline = time.monotonic() + 3.0
+    while True:
+        ok, _ = cap.read()
+        if ok:
+            logger.info("Stream connected: %s", url)
+            return cap
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+    cap.release()
+    raise RuntimeError(f"Stream opened but no frames decoded: {url}")
 
 
 # ── VehicleDetector ────────────────────────────────────────────────────────
@@ -683,8 +723,10 @@ class VehicleDetector:
             try:
                 self._tracker.reset()
                 logger.info("Tracker reset: %s", self._tracker_name)
-            except Exception as exc:
-                logger.warning("Tracker reset 실패: %s", exc)
+            except Exception:
+                # boxmot tracker는 reset() 미지원 → 재생성으로 완전 초기화
+                self._tracker = _build_tracker(self._tracker_tier, self._inference_device)
+                logger.info("Tracker recreated (reset unsupported): %s", self._tracker_name)
 
     @property
     def tracker_info(self) -> dict:
@@ -762,7 +804,9 @@ class VideoStream:
             self._cap = None
         await asyncio.sleep(self.RECONNECT_DELAY)
         try:
-            self._cap = open_video_source(self._url)
+            # open_video_source는 첫 프레임 검증까지 수 초 블로킹 가능 —
+            # 이벤트 루프(라이브 파이프라인·MJPEG·WS)를 멈추지 않도록 스레드에서 실행
+            self._cap = await asyncio.to_thread(open_video_source, self._url)
             return True
         except RuntimeError as exc:
             logger.warning("Reconnect failed: %s", exc)

@@ -35,7 +35,7 @@ function trailReducer(state, vehicles) {
 }
 
 export default function App() {
-  const { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo, backgroundStatus, congestionClusters } = useWebSocket();
+  const { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo, backgroundStatus, congestionClusters, cameraStatus } = useWebSocket();
   const { t, lang, setLang } = useLang();
   const [trailMap, dispatchTrail]         = useReducer(trailReducer, new Map());
   const [cctvList, setCctvList]           = useState([]);
@@ -52,6 +52,9 @@ export default function App() {
   const [mapMode, setMapMode]             = useState("dark");
   const [monitoredCams, setMonitoredCams] = useState(new Set());
   const [sidebarTab, setSidebarTab]       = useState("live");  // "live" | "monitor"
+  const [cctvDrawerOpen, setCctvDrawerOpen] = useState(false);
+  const [feedStatus, setFeedStatus]       = useState(null);  // 국도/고속도로 피드 수신 상태
+  const [cctvDrawerQuery, setCctvDrawerQuery] = useState("");
   const switchDebounceRef                 = useRef(null);
   const switchTimeoutRef                  = useRef(null);
 
@@ -153,9 +156,39 @@ export default function App() {
     setCctvLoading(true);
     fetch(`${API_BASE}/cctvs?minX=${minX}&maxX=${maxX}&minY=${minY}&maxY=${maxY}`)
       .then((r) => r.json())
-      .then(setCctvList)
-      .catch(() => {})
-      .finally(() => setCctvLoading(false));
+      .then((data) => {
+        if (data && data.length > 0) {
+          // 성공 시 캐시 저장 (기존 캐시와 병합, id 기준 중복 제거)
+          try {
+            const prev = JSON.parse(localStorage.getItem("cctvCache") || "[]");
+            const merged = [...prev];
+            for (const item of data) {
+              if (!merged.find(c => c.id === item.id)) merged.push(item);
+            }
+            localStorage.setItem("cctvCache", JSON.stringify(merged));
+          } catch (_) {}
+          setCctvList(data);
+        } else {
+          // API 실패(빈 배열) → 캐시에서 복원
+          try {
+            const cached = JSON.parse(localStorage.getItem("cctvCache") || "[]");
+            if (cached.length > 0) setCctvList(cached);
+          } catch (_) {}
+        }
+      })
+      .catch(() => {
+        try {
+          const cached = JSON.parse(localStorage.getItem("cctvCache") || "[]");
+          if (cached.length > 0) setCctvList(cached);
+        } catch (_) {}
+      })
+      .finally(() => {
+        setCctvLoading(false);
+        fetch(`${API_BASE}/cctv-feed-status`)
+          .then((r) => r.json())
+          .then(setFeedStatus)
+          .catch(() => {});
+      });
   }, []);
 
   useEffect(() => { fetchCctvs(INITIAL_VIEW); }, []);
@@ -287,6 +320,33 @@ export default function App() {
           {isConnected ? t("app.connected") : (error ?? t("app.reconnecting"))}
         </div>
 
+        {/* CCTV 피드 상태 칩 — 국도/고속도로 */}
+        {feedStatus && (
+          <div style={{
+            position: "absolute", top: 48, left: 12,
+            display: "flex", alignItems: "center", gap: 12,
+            background: "rgba(17,24,39,0.85)", padding: "5px 14px",
+            borderRadius: 999, fontSize: 12, backdropFilter: "blur(4px)",
+          }}>
+            {[["its", t("app.feedIts")], ["ex", t("app.feedEx")]].map(([key, label]) => {
+              const s = feedStatus[key];
+              const failed = !s || s.ok === false;
+              const color  = failed ? "#f87171" : s.count > 0 ? "#34d399" : "#fbbf24";
+              return (
+                <span
+                  key={key}
+                  title={failed ? t("app.feedFail") : t("app.feedCount", { n: s.count })}
+                  style={{ display: "flex", alignItems: "center", gap: 5, color: "#d1d5db", cursor: "default" }}
+                >
+                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, display: "inline-block" }} />
+                  {label}
+                  {!failed && <span style={{ color: "#9ca3af" }}>{s.count}</span>}
+                </span>
+              );
+            })}
+          </div>
+        )}
+
         {/* 선택된 CCTV 표시 */}
         {selectedCctv && (
           <div style={{
@@ -380,6 +440,89 @@ export default function App() {
 
         <Legend t={t} cctvCount={cctvList.length} />
 
+        {/* ── CCTV 드로어 ── */}
+        {/* 토글 탭 버튼 */}
+        <button
+          onClick={() => setCctvDrawerOpen(o => !o)}
+          style={{
+            position: "absolute", left: cctvDrawerOpen ? 280 : 0, top: "50%",
+            transform: "translateY(-50%)",
+            transition: "left 0.25s ease",
+            background: "rgba(17,24,39,0.92)", border: "1px solid #374151",
+            borderLeft: cctvDrawerOpen ? "1px solid #374151" : "none",
+            borderRadius: cctvDrawerOpen ? "0 8px 8px 0" : "0 8px 8px 0",
+            color: "#fbbf24", cursor: "pointer",
+            padding: "14px 6px", fontSize: 13, writingMode: "vertical-rl",
+            backdropFilter: "blur(4px)", zIndex: 20, letterSpacing: 1,
+          }}
+          title="CCTV 목록"
+        >
+          {cctvDrawerOpen ? "◀ 닫기" : "📷 CCTV"}
+        </button>
+
+        {/* 드로어 패널 */}
+        <div style={{
+          position: "absolute", left: 0, top: 0, bottom: 0,
+          width: 280,
+          transform: cctvDrawerOpen ? "translateX(0)" : "translateX(-100%)",
+          transition: "transform 0.25s ease",
+          background: "rgba(15,23,42,0.97)", borderRight: "1px solid #1f2937",
+          display: "flex", flexDirection: "column",
+          zIndex: 19, backdropFilter: "blur(8px)",
+        }}>
+          <div style={{ padding: "12px 12px 8px", borderBottom: "1px solid #1f2937", flexShrink: 0 }}>
+            <div style={{ color: "#fbbf24", fontWeight: 700, fontSize: 13, marginBottom: 8 }}>
+              📷 CCTV 목록 ({cctvList.length})
+            </div>
+            <input
+              value={cctvDrawerQuery}
+              onChange={e => setCctvDrawerQuery(e.target.value)}
+              placeholder="카메라 검색..."
+              style={{
+                width: "100%", boxSizing: "border-box",
+                background: "#1f2937", border: "1px solid #374151",
+                borderRadius: 6, color: "#f9fafb", fontSize: 12,
+                padding: "6px 10px", outline: "none",
+              }}
+            />
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: "6px 0" }}>
+            {cctvList
+              .filter(c => {
+                const q = cctvDrawerQuery.trim().toLowerCase();
+                if (!q) return true;
+                return (c.name_ko || c.name || "").toLowerCase().includes(q) ||
+                       (c.name_en || "").toLowerCase().includes(q);
+              })
+              .map(c => (
+                <button
+                  key={c.id}
+                  onClick={() => { handleCctvClick(c); setCctvDrawerOpen(false); }}
+                  style={{
+                    width: "100%", background: selectedCctv?.id === c.id ? "#1e3a5f" : "none",
+                    border: "none", borderBottom: "1px solid #1f2937",
+                    color: selectedCctv?.id === c.id ? "#93c5fd" : "#d1d5db",
+                    cursor: "pointer", padding: "8px 12px",
+                    textAlign: "left", fontSize: 12, lineHeight: 1.4,
+                  }}
+                >
+                  <div style={{ fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {c.name_ko || c.name}
+                  </div>
+                  {c.name_en && (
+                    <div style={{ color: "#6b7280", fontSize: 10 }}>{c.name_en}</div>
+                  )}
+                </button>
+              ))
+            }
+            {cctvList.length === 0 && (
+              <div style={{ color: "#4b5563", fontSize: 12, textAlign: "center", padding: "24px 12px" }}>
+                {cctvLoading ? "로딩 중…" : "지도를 이동하거나 새로고침하세요"}
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* 보정 모드 안내 배너 */}
         {calMode === "awaiting" && (
           <div style={{
@@ -407,6 +550,9 @@ export default function App() {
           onCancelGps={() => { setCalMode(null); setPendingGps(null); }}
           onCalibSaved={handleCalibSaved}
           onCalibTabChange={setCalibTabActive}
+          switching={switching}
+          cameraStatus={cameraStatus}
+          cameraReadyInfo={cameraReadyInfo}
         />
       </div>
 

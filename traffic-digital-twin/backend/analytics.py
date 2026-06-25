@@ -600,6 +600,10 @@ class TrafficAnalytics:
         """
         if self.road_bearing_deg is None:
             return
+        if self.road_pts:
+            # _pixel_to_gps_curved가 활성화된 경우 lateral이 이미 GPS에 포함됨.
+            # 추가 offset을 적용하면 이중 계산(+3.5m)으로 도로 밖으로 이탈함.
+            return
         b = math.radians(self.road_bearing_deg)
         sin_b, cos_b = math.sin(b), math.cos(b)
         R_lat = 110574.0

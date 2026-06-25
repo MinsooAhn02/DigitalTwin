@@ -299,8 +299,8 @@ def _road_corridor_pts(
     snap_lat: float,
     snap_lon: float,
     snap_seg_idx: int,
-    fwd_m: float = 150.0,
-    bwd_m: float = 150.0,
+    fwd_m: float = 250.0,
+    bwd_m: float = 250.0,
 ) -> tuple[list[list[float]], float]:
     """Extract road centerline points within fwd_m forward / bwd_m backward of snap.
 
@@ -359,7 +359,7 @@ def _road_corridor_pts(
     # Limit point density so the perpendicular-offset polygon in the frontend
     # doesn't self-intersect at curves. 10 points ≈ one per 30 m on a ±150 m corridor —
     # enough to show the road curve without adjacent offsets crossing each other.
-    if len(corridor) > 10:
+    if len(corridor) > 20:
         corridor = _subsample_pts(corridor, max_pts=10)
 
     return corridor, round(bwd_acc, 1)

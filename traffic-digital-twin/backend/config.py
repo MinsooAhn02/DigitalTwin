@@ -162,6 +162,10 @@ CAMERA_BEARING_DEG: float = 0.0
 # ── Phase 12: Road-model 포즈 캘리브 & 속도 outlier ──────────────────────────
 # solve_pose 채택 임계 — reprojection RMS(px)가 이 미만이어야 포즈 캘리브 채택.
 POSE_RESIDUAL_MAX_PX: float = float(os.getenv("POSE_RESIDUAL_MAX_PX", "8.0"))
+# Focal free 조건: 점선 주기(종방향) 관측이 충분할 때 focal을 5번째 최적화 변수로 해방.
+# MIN_OBS: 최소 관측 수 / MIN_ROW_FRAC: 관측이 프레임 높이의 이 비율 이상 span해야 함.
+FOCAL_FREE_MIN_OBS: int   = int(os.getenv("FOCAL_FREE_MIN_OBS",   "3"))
+FOCAL_FREE_MIN_ROW_FRAC: float = float(os.getenv("FOCAL_FREE_MIN_ROW_FRAC", "0.20"))
 # vehicle scale 모델 최소 관측수 — 이제 포즈의 *보조*라 낮춤(한계2 C).
 #   SCALE_MIN_OBS: 일반,  SCALE_MIN_OBS_SPARSE: 교통량 적을 때 자동 하향.
 SCALE_MIN_OBS: int = int(os.getenv("SCALE_MIN_OBS", "12"))

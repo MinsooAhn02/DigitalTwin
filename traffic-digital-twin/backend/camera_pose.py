@@ -54,6 +54,12 @@ except Exception:  # pragma: no cover - scipy는 설치 확인됨, 방어적 폴
 
 logger = logging.getLogger(__name__)
 
+try:
+    from config import FOCAL_FREE_MIN_OBS, FOCAL_FREE_MIN_ROW_FRAC
+except ImportError:  # 단독 실행 시
+    FOCAL_FREE_MIN_OBS = 3
+    FOCAL_FREE_MIN_ROW_FRAC = 0.20
+
 # 차종별 알려진 폭 (m) — rough 포즈 추정에 사용 (transform.VEHICLE_WIDTHS_M와 동일)
 VEHICLE_WIDTHS_M: dict[str, float] = {"car": 1.8, "truck": 2.5, "bus": 2.5}
 
@@ -211,6 +217,10 @@ def _residuals(
     vp: tuple[float, float] | None,
     half_w: float,
     frame_wh: tuple[int, int],
+    lane_w_obs: np.ndarray | None = None,   # (N,2) [row_y, lane_width_px]
+    lane_w_m: float | None = None,          # 차선 폭 (m)
+    dash_obs: np.ndarray | None = None,     # (M,2) [row_center, period_px]
+    mark_period_m: float = 8.0,             # 점선 주기 실세계 값 (m)
 ) -> np.ndarray:
     w, h = frame_wh
     s_grid = np.linspace(1.0, 400.0, 220)
@@ -240,6 +250,50 @@ def _residuals(
             wv = 0.5  # VP 가중치(단일 잡음 추정이라 낮춤)
             res.append(wv * (vp_pred[0] - vp[0]))
             res.append(wv * (vp_pred[1] - vp[1]))
+
+    # ── 차선폭 횡방향 앵커 (Step 4) ─────────────────────────────────────────
+    if lane_w_obs is not None and lane_w_m is not None and len(lane_w_obs) > 0:
+        cx = w / 2.0
+        half_lw = lane_w_m / 2.0
+        for row_y, meas_lw_px in lane_w_obs:
+            gnd = _backproject(theta, np.array([[cx, float(row_y)]]), frame_wh)
+            if np.isnan(gnd[0]).any():
+                res.append(miss_pen)
+                continue
+            s_depth = float(np.hypot(gnd[0, 0], gnd[0, 1]))
+            if s_depth < 0.5:
+                res.append(miss_pen)
+                continue
+            ptL = _road_to_world(theta, np.array([s_depth]), np.array([-half_lw]))
+            ptR = _road_to_world(theta, np.array([s_depth]), np.array([+half_lw]))
+            imgL = _project(theta, ptL, frame_wh)
+            imgR = _project(theta, ptR, frame_wh)
+            if np.isnan(imgL).any() or np.isnan(imgR).any():
+                res.append(miss_pen)
+                continue
+            pred_lw_px = abs(float(imgR[0, 0]) - float(imgL[0, 0]))
+            res.append(0.5 * (pred_lw_px - float(meas_lw_px)))  # 가중치 0.5
+
+    # ── 점선 주기 종방향 앵커 (Step 4 — focal 관측가능성의 핵심) ─────────────
+    # 원리: 같은 차선 위 두 점(period_px 떨어짐)을 역투영 → 실세계 거리 = mark_period_m
+    # 잔차를 픽셀 단위로 정규화: err_m / (mark_period_m / period_px)
+    if dash_obs is not None and len(dash_obs) > 0:
+        cx = w / 2.0
+        for row_center, period_px in dash_obs:
+            period_px = float(period_px)
+            row_a = float(row_center)
+            row_b = row_a - period_px          # 위쪽(더 먼) 점
+            if row_b < h * 0.05 or row_a > h * 0.98:
+                res.append(miss_pen)
+                continue
+            ga = _backproject(theta, np.array([[cx, row_a]]), frame_wh)
+            gb = _backproject(theta, np.array([[cx, row_b]]), frame_wh)
+            if np.isnan(ga).any() or np.isnan(gb).any():
+                res.append(miss_pen)
+                continue
+            dist_m = float(np.hypot(gb[0, 0] - ga[0, 0], gb[0, 1] - ga[0, 1]))
+            scale = period_px / max(mark_period_m, 0.01)
+            res.append((dist_m - mark_period_m) * scale)
 
     return np.asarray(res, dtype=np.float64)
 
@@ -274,43 +328,108 @@ def solve_pose(
     road_model: RoadModel,
     frame_wh: tuple[int, int],
     prior: Pose | None = None,
+    lane_w_obs: list[tuple[float, float]] | None = None,
+    lane_w_m: float | None = None,
+    dash_obs: list[tuple[float, float]] | None = None,
+    mark_period_m: float = 8.0,
 ) -> tuple[Pose | None, float]:
-    """엣지 관측 + VP + 도로폭으로 카메라 포즈를 최소제곱 추정.
+    """엣지 관측 + VP + 도로폭 + 선택적 차선폭/점선앵커로 카메라 포즈 최소제곱 추정.
 
-    초점거리는 단안 focal/pitch 모호성을 피하려 고정(FOCAL_RATIO·h, prior 있으면 그 값).
-    최적화 변수는 [H, pitch, yaw, x0] 4개.
+    dash_obs(점선 주기)가 FOCAL_FREE 조건을 충족하면 focal을 5번째 변수로 해방.
+    그 외: focal 고정(FOCAL_RATIO·h 또는 prior) — 기존 동작 유지.
 
-    left_pts / right_pts: [(y_row, x), ...] (auto_calibrate_from_frame 형식)
-    반환: (Pose 또는 None, residual_px RMS). 실패 시 (None, inf).
+    left_pts / right_pts: [(y_row, x), ...]
+    lane_w_obs: [(row_y, lane_width_px), ...]  — 횡방향 앵커
+    dash_obs: [(row_center, period_px), ...]    — 종방향 앵커 (focal 해방 조건)
+    반환: (Pose 또는 None, residual_px RMS).
     """
     if not _HAS_SCIPY:
         logger.warning("scipy 미설치 — solve_pose 비활성")
         return None, float("inf")
 
-    left_obs = np.asarray(left_pts, dtype=np.float64).reshape(-1, 2)
+    left_obs  = np.asarray(left_pts,  dtype=np.float64).reshape(-1, 2)
     right_obs = np.asarray(right_pts, dtype=np.float64).reshape(-1, 2)
     if len(left_obs) + len(right_obs) < 4:
         return None, float("inf")
 
     half_w = max(road_model.road_width_m, 2.0) / 2.0
     w, h = frame_wh
-    # 초점거리는 고정(prior 또는 명목 FoV). 단안 도로에서 횡방향 도로폭은
-    # 종방향(깊이) 스케일을 결정하지 못하므로(엣지가 단일 소실점만 제공) focal을
-    # 풀면 불안정. focal 고정 → 횡방향 정확, 종방향 잔여 스케일은 speed_scale(ITS)이 흡수.
-    f_fixed = prior.focal_px if prior is not None else FOCAL_RATIO * h
+    f_init = prior.focal_px if prior is not None else FOCAL_RATIO * h
 
+    # numpy 배열로 변환 (None → 빈 배열)
+    lw_arr   = (np.asarray(lane_w_obs, dtype=np.float64).reshape(-1, 2)
+                if lane_w_obs else np.empty((0, 2)))
+    dash_arr = (np.asarray(dash_obs,   dtype=np.float64).reshape(-1, 2)
+                if dash_obs else np.empty((0, 2)))
+
+    # ── Focal 해방 여부 판정 ──────────────────────────────────────────────────
+    # 조건: 점선 주기 관측이 FOCAL_FREE_MIN_OBS 이상이고
+    #       관측들이 프레임 높이의 FOCAL_FREE_MIN_ROW_FRAC 이상을 span할 때.
+    free_focal = False
+    if len(dash_arr) >= FOCAL_FREE_MIN_OBS:
+        row_span = float(dash_arr[:, 0].max() - dash_arr[:, 0].min()) / h
+        if row_span >= FOCAL_FREE_MIN_ROW_FRAC:
+            free_focal = True
+            logger.info("focal 해방 모드: dash_obs=%d row_span=%.2f", len(dash_arr), row_span)
+
+    def _make_resid_fn(focal_free: bool, f_fixed: float):
+        def _fn(x: np.ndarray) -> np.ndarray:
+            if focal_free:
+                # x = [H, pitch, yaw, focal, x0]
+                theta = x.copy()
+            else:
+                # x = [H, pitch, yaw, x0]
+                theta = np.array([x[0], x[1], x[2], f_fixed, x[3]])
+            return _residuals(
+                theta, left_obs, right_obs, vp, half_w, frame_wh,
+                lane_w_obs=lw_arr if len(lw_arr) else None,
+                lane_w_m=lane_w_m,
+                dash_obs=dash_arr if len(dash_arr) else None,
+                mark_period_m=mark_period_m,
+            )
+        return _fn
+
+    if free_focal:
+        # 5변수 최적화: [H, pitch, yaw, focal, x0]
+        x4 = _initial_opt(vp, f_init, frame_wh, left_obs, right_obs, prior)
+        x0_5 = np.array([x4[0], x4[1], x4[2], f_init, x4[3]])
+        lb5  = np.array([3.0,  math.radians(2.0),  math.radians(-45.0), 0.5*h, -4.0*half_w])
+        ub5  = np.array([40.0, math.radians(60.0), math.radians(45.0),  3.0*h,  4.0*half_w])
+        x0_5 = np.minimum(np.maximum(x0_5, lb5 + 1e-6), ub5 - 1e-6)
+        _fn  = _make_resid_fn(True, f_init)
+        try:
+            result = least_squares(
+                _fn, x0_5,
+                bounds=(lb5, ub5), method="trf", loss="soft_l1", f_scale=8.0,
+                max_nfev=300, x_scale=[5.0, 0.3, 0.3, float(h), float(half_w)],
+            )
+        except Exception as exc:
+            logger.warning("least_squares(free-focal) 실패: %s — 고정 focal로 재시도", exc)
+            free_focal = False
+
+        if free_focal:
+            resid = result.fun
+            rms   = float(np.sqrt(np.mean(resid ** 2))) if len(resid) else float("inf")
+            x     = result.x
+            pose  = Pose.from_theta(x)   # [H, pitch, yaw, focal, x0] 순서 일치
+            logger.info(
+                "solve_pose(free-focal): H=%.1fm pitch=%.1f° yaw=%.1f° "
+                "f=%.0fpx(recover) x0=%.1fm  residual=%.1fpx",
+                pose.H_m, pose.pitch_deg, pose.yaw_deg, pose.focal_px, pose.x0_m, rms,
+            )
+            return pose, rms
+
+    # 4변수 최적화: focal 고정
+    f_fixed = f_init
     x0 = _initial_opt(vp, f_fixed, frame_wh, left_obs, right_obs, prior)
-    lb = np.array([3.0,  math.radians(2.0),  math.radians(-45.0), -4.0 * half_w])
-    ub = np.array([40.0, math.radians(60.0), math.radians(45.0),  4.0 * half_w])
-    x0 = np.minimum(np.maximum(x0, lb + 1e-6), ub - 1e-6)
-
-    def _resid_opt(x: np.ndarray) -> np.ndarray:
-        theta = np.array([x[0], x[1], x[2], f_fixed, x[3]])
-        return _residuals(theta, left_obs, right_obs, vp, half_w, frame_wh)
+    lb  = np.array([3.0,  math.radians(2.0),  math.radians(-45.0), -4.0 * half_w])
+    ub  = np.array([40.0, math.radians(60.0), math.radians(45.0),   4.0 * half_w])
+    x0  = np.minimum(np.maximum(x0, lb + 1e-6), ub - 1e-6)
+    _fn = _make_resid_fn(False, f_fixed)
 
     try:
         result = least_squares(
-            _resid_opt, x0,
+            _fn, x0,
             bounds=(lb, ub), method="trf", loss="soft_l1", f_scale=8.0,
             max_nfev=200, x_scale=[5.0, 0.3, 0.3, float(half_w)],
         )
@@ -319,9 +438,9 @@ def solve_pose(
         return None, float("inf")
 
     resid = result.fun
-    rms = float(np.sqrt(np.mean(resid ** 2))) if len(resid) else float("inf")
-    x = result.x
-    pose = Pose.from_theta(np.array([x[0], x[1], x[2], f_fixed, x[3]]))
+    rms   = float(np.sqrt(np.mean(resid ** 2))) if len(resid) else float("inf")
+    x     = result.x
+    pose  = Pose.from_theta(np.array([x[0], x[1], x[2], f_fixed, x[3]]))
     logger.info(
         "solve_pose: H=%.1fm pitch=%.1f° yaw=%.1f° f=%.0fpx x0=%.1fm  residual=%.1fpx",
         pose.H_m, pose.pitch_deg, pose.yaw_deg, pose.focal_px, pose.x0_m, rms,
@@ -428,6 +547,10 @@ def rough_pose_from_vehicles(
 
 def _self_test() -> int:
     """알려진 포즈로 합성 관측 생성 → solve_pose가 복원하는지 검증."""
+    import camera_pose as _self
+    _self.FOCAL_FREE_MIN_OBS = 2        # 테스트: 2개 이상이면 free-focal
+    _self.FOCAL_FREE_MIN_ROW_FRAC = 0.10
+
     logging.basicConfig(level=logging.INFO)
     rng = np.random.default_rng(0)
     frame_wh = (1280, 720)
@@ -437,15 +560,20 @@ def _self_test() -> int:
 
     half_w = road.road_width_m / 2.0
     fails = 0
-    # 솔버는 focal=FOCAL_RATIO·h 를 가정. matched 트라이얼은 그 가정 하의 정확도를
-    # 검증(PASS 기준). 마지막 focal-mismatch 트라이얼은 정보용 — 종방향(speed) 스케일이
-    # FoV 가정에 민감함을 보여줌(이 잔여 오차는 실시스템에서 speed_scale/ITS가 흡수).
-    for trial, (true_pose, label) in enumerate([
-        (Pose(8.0,  14.0, 5.0,  FOCAL_RATIO * h, 0.5),  "matched-focal"),
-        (Pose(12.0, 22.0, -8.0, FOCAL_RATIO * h, -1.0), "matched-focal"),
-        (Pose(6.0,  9.0,  2.0,  FOCAL_RATIO * h, 0.0),  "matched-focal"),
-        (Pose(10.0, 18.0, -4.0, 1.0 * h,         0.8),  "focal-mismatch"),
-    ]):
+    # 트라이얼 구성:
+    # - matched-focal: focal = FOCAL_RATIO·h 가정 하에 정확도 검증 (PASS 기준)
+    # - focal-mismatch-no-anchor: focal 불일치, 앵커 없음 → 종방향 오차 정보용
+    # - focal-recovery: focal 불일치 + 점선 앵커 → free-focal로 복원 (PASS 기준)
+    mark_period_m_test = 8.0   # 일반도로 기준
+    trials = [
+        (Pose(8.0,  14.0, 5.0,  FOCAL_RATIO * h, 0.5),  "matched-focal",          False),
+        (Pose(12.0, 22.0, -8.0, FOCAL_RATIO * h, -1.0), "matched-focal",          False),
+        (Pose(6.0,  9.0,  2.0,  FOCAL_RATIO * h, 0.0),  "matched-focal",          False),
+        (Pose(10.0, 18.0, -4.0, 1.0 * h,         0.8),  "focal-mismatch-no-anch", False),
+        (Pose(10.0, 18.0, -4.0, 1.0 * h,         0.8),  "focal-recovery",         True),
+    ]
+
+    for trial, (true_pose, label, use_dash_anchor) in enumerate(trials):
         theta = true_pose.to_theta()
         s_grid = np.linspace(1.0, 400.0, 400)
         left_obs, right_obs = [], []
@@ -461,15 +589,38 @@ def _self_test() -> int:
         vp_true = _vanishing_point(theta, frame_wh)
         vp_noisy = (vp_true[0] + rng.normal(0, 2), vp_true[1] + rng.normal(0, 2))
 
-        pose, resid = solve_pose(left_obs, right_obs, vp_noisy, road, frame_wh)
+        # 점선 앵커 합성 (세 개의 행에서 각각 period_px 측정값 생성)
+        dash_obs_test = None
+        if use_dash_anchor:
+            dash_obs_test = []
+            for row_c_frac in (0.75, 0.60, 0.45):
+                row_c = h * row_c_frac
+                # 실세계 mark_period_m → 이미지 period_px 역산 (true pose 사용)
+                gnd_a = _backproject(theta, np.array([[w/2, row_c]]), frame_wh)
+                if np.isnan(gnd_a).any():
+                    continue
+                # row_c 보다 mark_period_m 앞쪽 지면점 → 이미지 row 계산
+                s_a = float(np.hypot(gnd_a[0,0], gnd_a[0,1]))
+                s_b = s_a + mark_period_m_test
+                pt_b = _road_to_world(theta, np.array([s_b]), np.array([0.0]))
+                img_b = _project(theta, pt_b, frame_wh)
+                if np.isnan(img_b).any():
+                    continue
+                period_px = row_c - float(img_b[0, 1])   # row_c > img_b.v (closer)
+                if period_px > 3:
+                    dash_obs_test.append((row_c + rng.normal(0, 0.5),
+                                         period_px + rng.normal(0, 0.5)))
+
+        pose, resid = solve_pose(
+            left_obs, right_obs, vp_noisy, road, frame_wh,
+            dash_obs=dash_obs_test, mark_period_m=mark_period_m_test,
+        )
         if pose is None:
             print(f"[trial {trial}] FAIL: no solution")
             fails += 1
             continue
 
-        # ── 미터 정확도 검증 (핵심 사용처: image→meters) ──
-        # 도로 위 알려진 종방향 20m 구간 두 점을 TRUE 포즈로 투영 →
-        # RECOVERED 포즈로 역투영 → 복원된 지면 거리가 20m와 얼마나 차이나는지.
+        # 종방향 미터 정확도 검증
         seg_errs = []
         for s_a, s_b in ((15.0, 35.0), (40.0, 70.0)):
             pa = _road_to_world(theta, np.array([s_a]), np.array([0.0]))
@@ -483,20 +634,27 @@ def _self_test() -> int:
             if np.isnan(ga).any() or np.isnan(gb).any():
                 continue
             true_d = s_b - s_a
-            est_d = float(np.hypot(*(gb - ga)))
+            est_d  = float(np.hypot(*(gb - ga)))
             seg_errs.append(abs(est_d - true_d) / true_d)
         metric_err = max(seg_errs) if seg_errs else 1.0
-
         dH = abs(pose.H_m - true_pose.H_m)
-        if label == "focal-mismatch":
-            # 정보용: PASS 기준에서 제외(종방향 스케일은 speed_scale 담당).
-            print(f"[trial {trial} {label:14s}] resid={resid:.2f}px  "
-                  f"longitudinal_err={metric_err*100:.1f}% (speed_scale가 흡수)  ΔH={dH:.2f}m  INFO")
+        df = abs(pose.focal_px - true_pose.focal_px) / true_pose.focal_px
+
+        if label == "focal-mismatch-no-anch":
+            print(f"[trial {trial} {label:24s}] resid={resid:.2f}px  "
+                  f"long_err={metric_err*100:.1f}% (앵커 없음 — 정보용)  ΔH={dH:.2f}m  INFO")
             continue
-        ok = resid < 3.0 and metric_err < 0.05   # 미터오차 < 5%
-        print(f"[trial {trial} {label:14s}] resid={resid:.2f}px  "
-              f"metric_err={metric_err*100:.1f}%  ΔH={dH:.2f}m  "
-              f"{'OK' if ok else 'FAIL'}")
+
+        if label == "focal-recovery":
+            ok = resid < 5.0 and metric_err < 0.08 and df < 0.10
+            print(f"[trial {trial} {label:24s}] resid={resid:.2f}px  "
+                  f"long_err={metric_err*100:.1f}%  Δf={df*100:.1f}%  ΔH={dH:.2f}m  "
+                  f"{'OK' if ok else 'FAIL'}")
+        else:
+            ok = resid < 3.0 and metric_err < 0.05
+            print(f"[trial {trial} {label:24s}] resid={resid:.2f}px  "
+                  f"metric_err={metric_err*100:.1f}%  ΔH={dH:.2f}m  "
+                  f"{'OK' if ok else 'FAIL'}")
         if not ok:
             fails += 1
 

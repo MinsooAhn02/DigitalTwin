@@ -934,9 +934,19 @@ class PerspectiveTransformer:
             snap_lat=self._gps_center_lat,
             snap_lon=self._gps_center_lon,
         )
+        # Step 4: lane marking 앵커를 solver에 공급
+        _lm_r = self._lane_marking_result
+        _rank  = self._lane_marking_road_rank
+        _lane_w_m_map = {"101": 3.5, "102": 3.5, "103": 3.5,
+                         "104": 3.25, "105": 3.25}
+        _lane_w_m = _lane_w_m_map.get(_rank, 3.0)
         pose, residual = camera_pose.solve_pose(
             left_pts, right_pts, (vp_x, vp_y), road_model, (w, h),
             prior=self._pose_prior,
+            lane_w_obs=_lm_r.lane_width_obs if _lm_r else None,
+            lane_w_m=_lane_w_m,
+            dash_obs=_lm_r.dash_period_obs if _lm_r else None,
+            mark_period_m=_lm_r.mark_period_m if _lm_r else 8.0,
         )
         if pose is not None and residual < POSE_RESIDUAL_MAX_PX:
             corners = camera_pose.pose_to_corners(pose, road_model, (w, h))

@@ -35,7 +35,7 @@ Create `traffic-digital-twin/backend/.env`:
 ITS_API_KEY=your_key_here
 ```
 
-> Get a key at https://openapi.its.go.kr → Sign up → Request cctvInfo API access
+> Get a key at https://www.its.go.kr/opendata/ → Sign up → Request cctvInfo API access
 
 ### 3. Run
 

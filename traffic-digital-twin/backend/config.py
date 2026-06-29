@@ -117,6 +117,10 @@ LOS_THRESHOLDS: dict[str, int] = {
 
 BOTTLENECK_DWELL_FRAMES: int = int(os.getenv("BOTTLENECK_DWELL_FRAMES", "150"))
 ITS_POLL_INTERVAL: int = int(os.getenv("ITS_POLL_INTERVAL", "300"))
+# ITS 구간속도로 speed_scale을 자동 보정할지 여부.
+# False(기본): ITS는 표시 전용 — speed_scale=1.0 고정, 호모그래피/캘리브 정확도로만 측정.
+# True: 기존 동작 유지 (ITS 신호가 scale을 갱신).
+ITS_DRIVES_SCALE: bool = os.getenv("ITS_DRIVES_SCALE", "false").lower() == "true"
 HLS_REFRESH_INTERVAL: int = int(os.getenv("HLS_REFRESH_INTERVAL", "1800"))
 
 # ── History 저장 & 정체 클러스터링 ([B]/[C]) ────────────────────────────

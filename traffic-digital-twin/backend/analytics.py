@@ -111,6 +111,7 @@ from config import (
     POS_EMA_ALPHA,
     POS_JUMP_RESET_M,
     LANE_OFFSET_M,
+    ITS_DRIVES_SCALE,
 )
 
 
@@ -905,7 +906,17 @@ class TrafficAnalytics:
 
             # 단일 폴링 최대 변화 ±10% 클램프 (잘못된 ITS 샘플 방어)
             blended = old_scale * (1 - alpha) + target * alpha
-            self.speed_scale = round(max(old_scale * 0.9, min(old_scale * 1.1, blended)), 4)
+            would_be = round(max(old_scale * 0.9, min(old_scale * 1.1, blended)), 4)
+
+            if not ITS_DRIVES_SCALE:
+                logger.debug(
+                    "ITS_DRIVES_SCALE=False: speed_scale 불변(%.4f), ITS 참고값=%.4f "
+                    "(our_avg=%.1f, ITS=%.1f)",
+                    old_scale, would_be, our_avg, its_speed_kph,
+                )
+                return None
+
+            self.speed_scale = would_be
             return self.speed_scale
 
     def _gc(self, active: set[int]) -> None:

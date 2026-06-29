@@ -529,6 +529,8 @@ async def _fetch_its_cctvs(minX: float, maxX: float, minY: float, maxY: float) -
                            road_type, type(res).__name__, res)
         else:
             _its_feed_status[road_type] = {"ok": True, "count": len(res), "ts": now}
+            for _item in res:
+                _item["_road_type"] = road_type
             items.extend(res)
     return items
 
@@ -838,22 +840,30 @@ async def history_sampler_loop() -> None:
 # ── 앱 생명주기 ───────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from detector import VehicleDetector, VideoStream
-    logger.info("YOLO 모델 (YOLO26 기본) + BoxMOT 트래커 로드 중…")
-    detector = await asyncio.to_thread(VehicleDetector)
-    stream   = VideoStream()
+    from detector import VideoStream
+    stream = VideoStream()
     app.state.stream   = stream
-    app.state.detector = detector
-    _metrics.set_context(
-        backend=detector.tracker_info.get("backend", ""),
-        tracker=detector.tracker_info.get("tracker", ""),
-    )
-    task         = asyncio.create_task(live_loop(detector, stream))
+    app.state.detector = None  # lazy: loaded in background so startup is instant
+
+    async def _init_detector() -> None:
+        from detector import VehicleDetector
+        logger.info("YOLO 모델 백그라운드 로드 시작 (YOLO26 기본 + BoxMOT)…")
+        det = await asyncio.to_thread(VehicleDetector)
+        app.state.detector = det
+        _metrics.set_context(
+            backend=det.tracker_info.get("backend", ""),
+            tracker=det.tracker_info.get("tracker", ""),
+        )
+        logger.info("YOLO 모델 로드 완료")
+
+    init_task    = asyncio.create_task(_init_detector())
+    task         = asyncio.create_task(live_loop(stream))
     refresh_task = asyncio.create_task(hls_refresh_loop(stream))
     its_task     = asyncio.create_task(_its_speed_poll_loop())
     hist_task    = asyncio.create_task(history_sampler_loop())
 
     yield
+    init_task.cancel()
     task.cancel()
     refresh_task.cancel()
     its_task.cancel()
@@ -966,36 +976,53 @@ async def get_cctvs(
                 lon = float(item.get("coordx") or 0)
                 if not (lat and lon):
                     continue
-                url     = item.get("cctvurl", "")
-                name_ko = item.get("cctvname", "")
+                url       = item.get("cctvurl", "")
+                road_type = item.get("_road_type", "its")
+                name_ko   = item.get("cctvname", "")
+                if not name_ko:
+                    name_ko = "고속도로 CCTV" if road_type == "ex" else "국도 CCTV"
                 name    = _korname_to_en(name_ko)
-                name_en = _en_only_name(name_ko)
+                _en_fallback = "Expressway CCTV" if road_type == "ex" else "National Rd CCTV"
+                name_en = _en_only_name(name_ko) or _en_fallback
                 cam_key = roi_manager.camera_key(url) if url else None
                 result.append({
-                    "id":      url or name,
-                    "name":    name,
-                    "name_ko": name_ko,
-                    "name_en": name_en,
-                    "cam_key": cam_key,
-                    "lat":     lat,
-                    "lon":     lon,
-                    "cctvurl": url,
-                    "heading": 0,    # ITS API 미제공 — calibration으로 업데이트
-                    "fov_deg": 70,
+                    "id":        url or name,
+                    "name":      name,
+                    "name_ko":   name_ko,
+                    "name_en":   name_en,
+                    "cam_key":   cam_key,
+                    "lat":       lat,
+                    "lon":       lon,
+                    "cctvurl":   url,
+                    "road_type": road_type,
+                    "heading":   0,
+                    "fov_deg":   70,
                 })
             except (ValueError, TypeError):
                 continue
-        # 동일 name_en 중복 구분: 위도 순 정렬 후 (1)(2)... 부여
-        _name_buckets: dict[str, list] = {}
-        for item in result:
-            key = item["name_en"]
-            if key:
-                _name_buckets.setdefault(key, []).append(item)
-        for _key, _items in _name_buckets.items():
-            if len(_items) > 1:
-                _items.sort(key=lambda x: x.get("lat", 0))
-                for _idx, _item in enumerate(_items, 1):
-                    _item["name_en"] = f"{_key} ({_idx})"
+        # cam_key 중복 제거 — 동일 스트림 URL이 두 번 반환된 경우 하나만 유지
+        _seen_keys: set[str] = set()
+        _deduped: list[dict] = []
+        for _item in result:
+            _ck = _item["cam_key"]
+            if _ck is None or _ck not in _seen_keys:
+                if _ck is not None:
+                    _seen_keys.add(_ck)
+                _deduped.append(_item)
+        result = _deduped
+
+        # 동일 name_en / name_ko 중복 구분: 위도 순 정렬 후 (1)(2)... 부여
+        for _field in ("name_en", "name_ko", "name"):
+            _name_buckets: dict[str, list] = {}
+            for item in result:
+                key = item[_field]
+                if key:
+                    _name_buckets.setdefault(key, []).append(item)
+            for _key, _items in _name_buckets.items():
+                if len(_items) > 1:
+                    _items.sort(key=lambda x: x.get("lat", 0))
+                    for _idx, _item in enumerate(_items, 1):
+                        _item[_field] = f"{_key} ({_idx})"
 
         logger.info("CCTV 조회 완료: %d개 (캐시 저장)", len(result))
         _cctv_cache[cache_key] = result
@@ -1849,7 +1876,7 @@ async def _refresh_stream_url(stream: "VideoStream") -> None:
     await _refresh_hls_url_from_its(stream, force=True)
 
 
-async def live_loop(detector, stream) -> None:
+async def live_loop(stream) -> None:
     from tracker import VehicleTracker
 
     tracker        = VehicleTracker()
@@ -2119,6 +2146,11 @@ async def live_loop(detector, stream) -> None:
         # ws/detect 활성 시 boxmot 트래커 공유 충돌 방지 — 프레임만 드레인
         if _detect_clients > 0:
             await asyncio.sleep(target_interval)
+            continue
+
+        detector = getattr(app.state, "detector", None)
+        if detector is None:
+            await asyncio.sleep(0.5)
             continue
 
         t0 = time.perf_counter()

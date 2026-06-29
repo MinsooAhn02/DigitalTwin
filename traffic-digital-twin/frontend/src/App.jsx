@@ -54,6 +54,9 @@ export default function App() {
   const [sidebarTab, setSidebarTab]       = useState("live");  // "live" | "monitor"
   const [cctvDrawerOpen, setCctvDrawerOpen] = useState(false);
   const [feedStatus, setFeedStatus]       = useState(null);  // 국도/고속도로 피드 수신 상태
+  const [showHighway, setShowHighway]     = useState(true);   // 고속도로 CCTV 표시 여부
+  const [showNational, setShowNational]   = useState(true);   // 국도 CCTV 표시 여부
+  const [clusterMenu, setClusterMenu]     = useState(null);   // { cameras, x, y }
   const [cctvDrawerQuery, setCctvDrawerQuery] = useState("");
   const switchDebounceRef                 = useRef(null);
   const switchTimeoutRef                  = useRef(null);
@@ -249,6 +252,18 @@ export default function App() {
   const monitoredCamsRef = useRef(monitoredCams);
   useEffect(() => { monitoredCamsRef.current = monitoredCams; }, [monitoredCams]);
 
+  const handleClusterClick = useCallback((cameras, x, y) => {
+    setClusterMenu({ cameras, x, y });
+  }, []);
+
+  // 클러스터 메뉴 외부 클릭 시 닫기
+  useEffect(() => {
+    if (!clusterMenu) return;
+    const close = () => setClusterMenu(null);
+    setTimeout(() => window.addEventListener("click", close), 0);
+    return () => window.removeEventListener("click", close);
+  }, [clusterMenu]);
+
   const handleToggleMonitor = useCallback((c) => {
     const camKey = c.cam_key;
     if (!camKey || !c.cctvurl) return;
@@ -272,7 +287,12 @@ export default function App() {
     }
   }, []);
 
-  const noCameraSelected = guideVisible && cctvList.length > 0 && !selectedCctv;
+  const filteredCctvList = useMemo(() =>
+    cctvList.filter((c) => c.road_type === "ex" ? showHighway : showNational),
+    [cctvList, showHighway, showNational]
+  );
+
+  const noCameraSelected = guideVisible && filteredCctvList.length > 0 && !selectedCctv;
   return (
     <div style={{ display: "flex", height: "100vh", background: "#111827", color: "#f9fafb", fontFamily: "system-ui, sans-serif", overflow: "hidden" }}>
 
@@ -281,11 +301,12 @@ export default function App() {
         <MapView
           vehicles={vehicles}
           extraLayers={[trailLayer]}
-          cctvList={cctvList}
+          cctvList={filteredCctvList}
           selectedCctv={selectedCctv}
           viewState={viewState}
           onViewStateChange={setViewState}
           onCctvClick={handleCctvClick}
+          onClusterClick={handleClusterClick}
           calibrationMode={calMode === "awaiting"}
           snapNodes={calMode === "awaiting" ? snapNodes : []}
           onMapClick={handleMapClick}
@@ -320,30 +341,86 @@ export default function App() {
           {isConnected ? t("app.connected") : (error ?? t("app.reconnecting"))}
         </div>
 
-        {/* CCTV 피드 상태 칩 — 국도/고속도로 */}
-        {feedStatus && (
-          <div style={{
-            position: "absolute", top: 48, left: 12,
-            display: "flex", alignItems: "center", gap: 12,
-            background: "rgba(17,24,39,0.85)", padding: "5px 14px",
-            borderRadius: 999, fontSize: 12, backdropFilter: "blur(4px)",
-          }}>
-            {[["its", t("app.feedIts")], ["ex", t("app.feedEx")]].map(([key, label]) => {
-              const s = feedStatus[key];
-              const failed = !s || s.ok === false;
-              const color  = failed ? "#f87171" : s.count > 0 ? "#34d399" : "#fbbf24";
-              return (
-                <span
-                  key={key}
-                  title={failed ? t("app.feedFail") : t("app.feedCount", { n: s.count })}
-                  style={{ display: "flex", alignItems: "center", gap: 5, color: "#d1d5db", cursor: "default" }}
+        {/* CCTV 피드 상태 + on/off 토글 — 국도/고속도로 */}
+        <div style={{
+          position: "absolute", top: 48, left: 12,
+          display: "flex", flexDirection: "column", gap: 4,
+          background: "rgba(17,24,39,0.88)", padding: "8px 12px",
+          borderRadius: 10, fontSize: 12, backdropFilter: "blur(4px)",
+          border: "1px solid #1e293b", minWidth: 160,
+        }}>
+          {[
+            ["its", t("app.feedIts"), showNational, () => setShowNational((v) => !v)],
+            ["ex",  t("app.feedEx"),  showHighway,  () => setShowHighway((v) => !v)],
+          ].map(([key, label, active, toggle]) => {
+            const s = feedStatus?.[key];
+            const failed = !s || s.ok === false;
+            const dotColor = failed ? "#f87171" : s.count > 0 ? "#34d399" : "#fbbf24";
+            return (
+              <div key={key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                {/* 왼쪽: 상태 dot + 이름 + 수량 */}
+                <div style={{ display: "flex", alignItems: "center", gap: 6, color: active ? "#e2e8f0" : "#6b7280" }}>
+                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: active ? dotColor : "#4b5563", display: "inline-block", flexShrink: 0 }} />
+                  <span>{label}</span>
+                  {feedStatus && !failed && (
+                    <span style={{ color: active ? "#94a3b8" : "#4b5563", fontSize: 11 }}>{s.count}</span>
+                  )}
+                </div>
+                {/* 오른쪽: ON/OFF 버튼 */}
+                <button
+                  onClick={toggle}
+                  style={{
+                    padding: "2px 8px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+                    cursor: "pointer", border: "none", transition: "all 0.15s",
+                    background: active ? "#2563eb" : "#374151",
+                    color: active ? "#eff6ff" : "#9ca3af",
+                    letterSpacing: "0.05em",
+                  }}
                 >
-                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, display: "inline-block" }} />
-                  {label}
-                  {!failed && <span style={{ color: "#9ca3af" }}>{s.count}</span>}
-                </span>
-              );
-            })}
+                  {active ? "ON" : "OFF"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* 클러스터 카메라 선택 팝업 */}
+        {clusterMenu && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: "absolute",
+              left: Math.min(clusterMenu.x, window.innerWidth - 220),
+              top:  Math.min(clusterMenu.y + 8, window.innerHeight - 200),
+              zIndex: 200,
+              background: "rgba(15,23,42,0.97)",
+              border: "1px solid #334155",
+              borderRadius: 10,
+              padding: "6px 0",
+              minWidth: 190,
+              boxShadow: "0 6px 24px rgba(0,0,0,0.6)",
+              backdropFilter: "blur(6px)",
+            }}
+          >
+            <div style={{ padding: "4px 14px 6px", color: "#64748b", fontSize: 11 }}>
+              📷 {clusterMenu.cameras.length}개 카메라
+            </div>
+            {clusterMenu.cameras.map((cam) => (
+              <button
+                key={cam.id}
+                onClick={() => { handleCctvClick(cam); setClusterMenu(null); }}
+                style={{
+                  display: "block", width: "100%", textAlign: "left",
+                  padding: "7px 14px", background: "none", border: "none",
+                  color: "#e2e8f0", fontSize: 13, cursor: "pointer",
+                  borderTop: "1px solid #1e293b",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "#1e293b"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+              >
+                {cctvDisplayName(cam, lang)}
+              </button>
+            ))}
           </div>
         )}
 

@@ -11,9 +11,9 @@ const BG_STATUS_COLORS = {
     normal:    { stroke: "#22c55e", bg: "#0a2210" },
     busy:      { stroke: "#f97316", bg: "#2a1200" },
     congested: { stroke: "#ef4444", bg: "#2a0000" },
-    loading:   { stroke: "#94a3b8", bg: "#1e293b" },
-    error:     { stroke: "#6b7280", bg: "#111111" },
-    default:   { stroke: "#64748b", bg: "#1e293b" },
+    loading:   { stroke: "#94a3b8", bg: "#334155" },
+    error:     { stroke: "#9ca3af", bg: "#27272a" },
+    default:   { stroke: "#cbd5e1", bg: "#475569" },
   },
   light: {
     selected:  { stroke: "#0891b2", bg: "#e0f2fe" },
@@ -25,6 +25,21 @@ const BG_STATUS_COLORS = {
     default:   { stroke: "#64748b", bg: "#f1f5f9" },
   },
 };
+
+const CLUSTER_THRESH_DEG = 0.00015; // ≈16m — 이 반경 내 카메라를 클러스터로 묶음
+
+function makeClusterIconUrl(count, theme = "dark") {
+  const bg     = theme === "dark" ? "#1e3a5f" : "#dbeafe";
+  const stroke = theme === "dark" ? "#60a5fa" : "#2563eb";
+  const tc     = theme === "dark" ? "#eff6ff" : "#1e3a8a";
+  const label  = count > 9 ? "9+" : String(count);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 46" width="36" height="46">
+    <path d="M18 1 C8.6 1 1 8.6 1 18 C1 29 18 45 18 45 C18 45 35 29 35 18 C35 8.6 27.4 1 18 1Z" fill="${bg}" stroke="${stroke}" stroke-width="2"/>
+    <circle cx="18" cy="18" r="10" fill="${stroke}" opacity="0.3"/>
+    <text x="18" y="23" text-anchor="middle" fill="${tc}" font-size="13" font-weight="800" font-family="system-ui,sans-serif">${label}</text>
+  </svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
 
 function makeCameraIconUrl(status, theme = "dark") {
   const palette = BG_STATUS_COLORS[theme] ?? BG_STATUS_COLORS.dark;
@@ -220,6 +235,7 @@ export default function MapView({
   viewState,
   onViewStateChange,
   onCctvClick,
+  onClusterClick,
   calibrationMode = false,
   snapNodes = [],
   onMapClick,
@@ -240,6 +256,38 @@ export default function MapView({
   const { t, lang } = useLang();
   const mapRef = useRef(null);
   const [fontReady, setFontReady] = useState(false);
+
+  // 같은 위치 카메라 클러스터링 (CLUSTER_THRESH_DEG 반경 내 → 하나로 묶음)
+  const { singles, clusterGroups } = useMemo(() => {
+    const assigned = new Set();
+    const allGroups = [];
+    for (let i = 0; i < cctvList.length; i++) {
+      if (assigned.has(i)) continue;
+      const a = cctvList[i];
+      const grp = [a];
+      assigned.add(i);
+      for (let j = i + 1; j < cctvList.length; j++) {
+        if (assigned.has(j)) continue;
+        const b = cctvList[j];
+        if (Math.abs(a.lat - b.lat) < CLUSTER_THRESH_DEG &&
+            Math.abs(a.lon - b.lon) < CLUSTER_THRESH_DEG) {
+          grp.push(b);
+          assigned.add(j);
+        }
+      }
+      allGroups.push(grp);
+    }
+    return {
+      singles:       allGroups.filter(g => g.length === 1).map(g => g[0]),
+      clusterGroups: allGroups.filter(g => g.length > 1).map(g => ({
+        id:      `cls-${g[0].id}`,
+        lat:     g[0].lat,
+        lon:     g[0].lon,
+        cameras: g,
+        count:   g.length,
+      })),
+    };
+  }, [cctvList]);
 
   // severe 클러스터가 해제될 때 초록색으로 잠깐 표시 후 사라짐
   const [resolvingClusters, setResolvingClusters] = useState([]);
@@ -279,7 +327,7 @@ export default function MapView({
   }, [lang, mapMode]);
 
   const cctvLabel = useCallback((d) => {
-    if (lang === "en") return d.name_en || (d.cam_key ? `CCTV ${d.cam_key.slice(0, 6)}` : String(d.id));
+    if (lang === "en") return d.name_en || d.name_ko || d.name || String(d.id);
     return d.name_ko || d.name || String(d.id);
   }, [lang]);
 
@@ -300,7 +348,7 @@ export default function MapView({
 
   const cctvHitLayer = useMemo(() => new ScatterplotLayer({
     id:           "cctvs-hit",
-    data:         cctvList,
+    data:         singles,
     getPosition:  (d) => [d.lon, d.lat],
     getRadius:    18,
     getFillColor: [0, 0, 0, 0],
@@ -308,19 +356,70 @@ export default function MapView({
     radiusUnits:  "pixels",
     pickable:     !calibrationMode,
     onClick:      ({ object }) => !calibrationMode && object && onCctvClick?.(object),
-  }), [cctvList, calibrationMode, onCctvClick]);
+  }), [singles, calibrationMode, onCctvClick]);
+
+  const clusterHitLayer = useMemo(() => new ScatterplotLayer({
+    id:           "cluster-hit",
+    data:         clusterGroups,
+    getPosition:  (d) => [d.lon, d.lat],
+    getRadius:    22,
+    getFillColor: [0, 0, 0, 0],
+    getLineColor: [0, 0, 0, 0],
+    radiusUnits:  "pixels",
+    pickable:     !calibrationMode,
+    onClick:      (info) => !calibrationMode && info.object && onClusterClick?.(info.object.cameras, info.x, info.y),
+  }), [clusterGroups, calibrationMode, onClusterClick]);
 
   const cameraIcons = useMemo(() => {
     return mapMode === "light" ? CAMERA_ICONS_LIGHT : CAMERA_ICONS_DARK;
   }, [mapMode]);
 
+  const clusterIconLayer = useMemo(() => new IconLayer({
+    id:          "cluster-icons",
+    data:        clusterGroups,
+    getPosition: (d) => [d.lon, d.lat],
+    getIcon:     (d) => {
+      const url = makeClusterIconUrl(d.count, mapMode === "light" ? "light" : "dark");
+      return { url, width: 36, height: 46, anchorX: 18, anchorY: 45 };
+    },
+    getSize:     44,
+    sizeUnits:   "pixels",
+    pickable:    false,
+    updateTriggers: { getIcon: [mapMode] },
+  }), [clusterGroups, mapMode]);
+
+  const clusterLabelLayer = useMemo(() => new TextLayer({
+    id:               "cluster-labels",
+    data:             clusterGroups,
+    getPosition:      (d) => [d.lon, d.lat],
+    getText:          (d) => {
+      const first = d.cameras[0];
+      return lang === "en"
+        ? (first.name_en || first.name_ko || "Cameras")
+        : (first.name_ko || first.name || "카메라");
+    },
+    getSize:          11,
+    getColor:         [147, 197, 253, 220],
+    getPixelOffset:   [0, -62],
+    fontFamily:       '"Segoe UI", system-ui, sans-serif',
+    fontWeight:       700,
+    characterSet:     "auto",
+    fontSettings:     { sdf: false },
+    background:       true,
+    getBackgroundColor: [15, 23, 42, 175],
+    backgroundPadding:  [4, 2, 4, 2],
+    textAnchor:       "middle",
+    alignmentBaseline: "bottom",
+    updateTriggers:   { getText: [lang] },
+  }), [clusterGroups, lang]);
+
   const cctvIconLayer = useMemo(() => new IconLayer({
     id:          "cctv-icons",
-    data:        cctvList,
+    data:        singles,
     getPosition: (d) => [d.lon, d.lat],
     getIcon:     (d) => {
       let iconKey;
-      if (selectedCctv?.id === d.id) {
+      if (selectedCctv?.id === d.id) {  // singles only
         iconKey = "selected";
       } else {
         const bgInfo = d.cam_key ? backgroundStatus[d.cam_key] : null;
@@ -333,15 +432,15 @@ export default function MapView({
     getPixelOffset: [0, 0],
     pickable:       false,
     updateTriggers: { getIcon: [selectedCctv?.id, backgroundStatus, cameraIcons], getSize: [selectedCctv?.id] },
-  }), [cctvList, selectedCctv?.id, backgroundStatus, cameraIcons]);
+  }), [singles, selectedCctv?.id, backgroundStatus, cameraIcons]);
 
   const cctvLabelLayer = useMemo(() => new TextLayer({
     id:               "cctv-labels",
-    data:             cctvList,
+    data:             singles,
     getPosition:      (d) => [d.lon, d.lat],
     getText:          (d) => wrapLabel(cctvLabel(d)),
     getSize:          (d) => selectedCctv?.id === d.id ? 13 : 11,
-    getColor:         (d) => selectedCctv?.id === d.id ? [34, 211, 238, 255] : [253, 230, 138, 230],
+    getColor:         (d) => selectedCctv?.id === d.id ? [34, 211, 238, 255] : [255, 255, 255, 210],
     getPixelOffset:   (d) => [0, selectedCctv?.id === d.id ? -72 : -58],
     fontFamily:       lang === "ko"
       ? '"Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif'
@@ -350,7 +449,7 @@ export default function MapView({
     characterSet:     "auto",
     fontSettings:     { sdf: false },
     background:       true,
-    getBackgroundColor: [0, 0, 0, 150],
+    getBackgroundColor: [15, 23, 42, 175],
     backgroundPadding:  [4, 2, 4, 2],
     lineHeight:       1.35,
     textAnchor:       "middle",
@@ -361,7 +460,7 @@ export default function MapView({
       getColor:       [selectedCctv?.id],
       getPixelOffset: [selectedCctv?.id],
     },
-  }), [cctvList, selectedCctv?.id, lang, cctvLabel, wrapLabel, fontReady]);
+  }), [singles, selectedCctv?.id, lang, cctvLabel, wrapLabel, fontReady]);
 
   const fovLayer = useMemo(() => {
     if (!selectedCctv) return null;
@@ -513,6 +612,9 @@ export default function MapView({
     ...(showVehicles ? extraLayers : []),
     roadCenterlineLayer,
     fovLayer,
+    clusterHitLayer,
+    clusterIconLayer,
+    clusterLabelLayer,
     cctvHitLayer,
     cctvIconLayer,
     cctvLabelLayer,
@@ -521,6 +623,7 @@ export default function MapView({
     snapNodeLabelLayer,
   ].filter(Boolean), [
     congestionLayer, resolvingLayer, showVehicles, extraLayers, roadCenterlineLayer, fovLayer,
+    clusterHitLayer, clusterIconLayer, clusterLabelLayer,
     cctvHitLayer, cctvIconLayer, cctvLabelLayer,
     scatterLayer, textLayer, snapNodeLayer, snapNodeLabelLayer,
   ]);

@@ -110,6 +110,9 @@ class LiveMetrics:
             self._source = ""
             self._backend = ""
             self._tracker = ""
+            # Step 1 diagnostics
+            self._depth_obs: dict[int, list[tuple[float, float]]] = defaultdict(list)
+            self._anchor_residual_px: list[float] = []
 
     def set_context(self, source: str = "", backend: str = "", tracker: str = "") -> None:
         with self._lock:
@@ -119,6 +122,22 @@ class LiveMetrics:
                 self._backend = backend
             if tracker:
                 self._tracker = tracker
+
+    def add_speed_obs(self, tid: int, row_y: float, raw_kph: float) -> None:
+        """analytics._speed가 raw 속도를 계산할 때 (track_id, bbox_bottom_y, raw_kph)를 누적.
+
+        depth-invariance CV 계산에 사용: 같은 차량이 프레임 내 다른 깊이에서 같은 속도로
+        측정되는지 검사 — CV가 낮을수록 depth 보정이 정확함을 의미.
+        """
+        if raw_kph <= 0:
+            return
+        with self._lock:
+            self._depth_obs[int(tid)].append((float(row_y), float(raw_kph)))
+
+    def set_anchor_residual(self, residual_px: float) -> None:
+        """camera_pose solver가 앵커 재투영 오차(px)를 기록."""
+        with self._lock:
+            self._anchor_residual_px.append(float(residual_px))
 
     def add_frame(
         self,
@@ -154,6 +173,40 @@ class LiveMetrics:
             self._id_appearances += len(ids - self._prev_ids)
             self._prev_ids = ids
 
+    def _compute_depth_invariance(self) -> dict:
+        """depth_obs에서 depth-invariance CV를 계산한다 (lock 밖에서 호출할 것).
+
+        각 트랙을 row_y 기준 3개 구간으로 나누어 구간별 평균 raw_kph의 CV를 구한다.
+        2개 이상의 구간에 ≥2개 샘플이 있고 총 ≥6개 샘플인 트랙만 사용.
+        CV 중앙값이 낮을수록 depth 보정이 정확함.
+        """
+        cvs: list[float] = []
+        for obs in self._depth_obs.values():
+            if len(obs) < 6:
+                continue
+            rows = np.array([o[0] for o in obs])
+            spds = np.array([o[1] for o in obs])
+            q33, q67 = np.percentile(rows, [33, 67])
+            buckets: list[np.ndarray] = [
+                spds[rows <= q33],
+                spds[(rows > q33) & (rows <= q67)],
+                spds[rows > q67],
+            ]
+            bin_means = [b.mean() for b in buckets if len(b) >= 2]
+            if len(bin_means) < 2:
+                continue
+            bm = np.array(bin_means)
+            mean_v = bm.mean()
+            if mean_v > 0:
+                cvs.append(float(bm.std() / mean_v))
+        if not cvs:
+            return {"qualifying_tracks": 0, "median_cv": None, "mean_cv": None}
+        return {
+            "qualifying_tracks": len(cvs),
+            "median_cv": round(float(np.median(cvs)), 4),
+            "mean_cv": round(float(np.mean(cvs)), 4),
+        }
+
     def report(self, outdir: Path | None = None, write: bool = True) -> dict:
         with self._lock:
             lat_track = stats(self._track)
@@ -177,6 +230,8 @@ class LiveMetrics:
             speed["total_vehicle_obs"] = self._total_obs
             class_totals = dict(self._class_totals)
             elapsed = round(time.monotonic() - self._t_start, 1)
+            depth_inv = self._compute_depth_invariance()
+            anchor_resid = stats(self._anchor_residual_px)
             summary = {
                 "source": self._source,
                 "inference_backend": self._backend,
@@ -194,6 +249,8 @@ class LiveMetrics:
                 "tracking": tracking,
                 "speed": speed,
                 "detection_class_totals": class_totals,
+                "depth_invariance": depth_inv,
+                "anchor_residual_px": anchor_resid,
             }
 
         # speed_scale snapshot (read outside lock)
@@ -222,6 +279,14 @@ class LiveMetrics:
                       list(summary["speed"].keys()), [list(summary["speed"].values())])
             write_csv(d / "eval_detections.csv", ["class", "total_detections"],
                       [[k, v] for k, v in sorted(class_totals.items())])
+            write_csv(d / "eval_depth_inv.csv",
+                      ["qualifying_tracks", "median_cv", "mean_cv"],
+                      [[depth_inv["qualifying_tracks"],
+                        depth_inv["median_cv"] or "",
+                        depth_inv["mean_cv"] or ""]])
+            if anchor_resid["n"] > 0:
+                write_csv(d / "eval_anchor_residual.csv",
+                          list(anchor_resid.keys()), [list(anchor_resid.values())])
 
         summary["markdown"] = summary_to_markdown(summary)
         return summary

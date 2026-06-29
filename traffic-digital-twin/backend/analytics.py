@@ -198,6 +198,8 @@ class TrafficAnalytics:
         # ① 깊이별 속도 보정 함수 (transform.speed_correction_at 배선)
         self.depth_corr_fn: Callable[[float, int], float] | None = None
         self.frame_h: int = 0
+        # Step 1 진단: (track_id, row_y, raw_kph) → metrics.add_speed_obs 배선
+        self.speed_obs_fn: Callable[[int, float, float], None] | None = None
         # corr 계산용 bbox-bottom y EMA (탐지 노이즈가 corr 급변으로 전달되는 것 차단)
         self._corr_y_ema: dict[int, float] = {}
         # ③ ITS 보정 적응형 수렴
@@ -448,6 +450,8 @@ class TrafficAnalytics:
 
         moving = disp_m >= SPEED_JITTER_THRESHOLD_M
         raw = self._estimate_speed_kph(win) if moving else 0.0
+        if raw > 0 and self.speed_obs_fn is not None:
+            self.speed_obs_fn(tid, smooth_y, raw)
         total_scale = min(corr * self.speed_scale, 3.0)  # corr×speed_scale 총 증폭 상한 3x
         scaled = raw * total_scale  # ① corr 적용
 

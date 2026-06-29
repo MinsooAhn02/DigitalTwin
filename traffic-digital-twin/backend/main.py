@@ -292,6 +292,7 @@ analytics.depth_corr_fn = _transformer.speed_correction_at
 # history_sampler_loop(30s)가 backend/eval_*.csv + eval_summary.json 으로 flush.
 # GET /eval/report 로 즉시 스냅샷, POST /eval/reset 로 초기화.
 _metrics     = metrics.LiveMetrics()
+analytics.speed_obs_fn = lambda tid, y, r: _metrics.add_speed_obs(tid, y, r)
 # 프레임별 파이프라인 타이밍 수집기 — 100프레임마다 perf_log.jsonl 자동 기록
 _perf_stats  = PerfStats()
 _clients: set[WebSocket] = set()

@@ -277,7 +277,9 @@ from config import (
     BEARING_BROADCAST_MIN_DEG,
     FOV_EMA_MIN_SAMPLES,
     FOV_EMA_ALPHA,
+    WARMUP_MAX_S,
 )
+import camera_pose
 from congestion import compute_clusters
 from history import HistoryStore, SnapshotRow, retention_cutoff
 
@@ -328,7 +330,6 @@ _box_ann   = sv.BoxAnnotator(thickness=2)
 _label_ann = sv.LabelAnnotator(text_scale=0.4, text_thickness=1, text_padding=3)
 
 # 차선 감지 자동 캘리브레이션 상태
-_auto_calib_attempts: int  = 0    # 남은 시도 횟수 (0 = 비활성)
 _auto_calib_road_width_m: float = 7.0  # lanes × 2 × lane_width_m
 _auto_calib_road_rank: str = ""   # NodeLink road_rank (차선 표시 규격 선택용)
 # 마지막 auto_calibrated 브로드캐스트 내용 (bearing 재보정 시 재사용)
@@ -1558,6 +1559,32 @@ async def save_calibration(body: CalibBody):
     return {"ok": True, "camera_key": cam_key, "corner_gps_pts": corner_gps_pts}
 
 
+@app.post("/recalibrate")
+async def recalibrate():
+    """현재 카메라 warm-up 재시작 (수동 재보정 버튼).
+
+    저장된 camera_pose를 삭제하고 warm-up을 다시 시작합니다.
+    """
+    if not _current_cam:
+        return {"ok": False, "error": "활성 카메라 없음"}
+    cam_key = roi_manager.camera_key(_current_cam.get("cctvurl", ""))
+    # 저장 pose 삭제
+    _atomic_delete_json(CAMERA_POSE_PATH, cam_key)
+    _transformer._pose_prior = None
+    _transformer.recalibrate()
+    _transformer.start_warmup(
+        bearing_deg=analytics.road_bearing_deg or 0.0,
+        road_width_m=_auto_calib_road_width_m,
+        fix_direction=_current_cam.get("has_name_bearing", False),
+        cam_lat=_current_cam.get("lat"),
+        cam_lon=_current_cam.get("lon"),
+        road_rank=_auto_calib_road_rank,
+    )
+    logger.info("수동 재보정 요청 — warm-up 재시작 (camera=%s)", cam_key)
+    await _broadcast({"type": "calibrating", "elapsed_s": 0, "status": "recalibrating"})
+    return {"ok": True, "camera_key": cam_key}
+
+
 @app.delete("/calibration/{camera_key}")
 async def delete_calibration(camera_key: str):
     """캘리브레이션 삭제 (기본 근사값으로 롤백)."""
@@ -2008,14 +2035,41 @@ async def live_loop(stream) -> None:
                     _ri_lane_w = 3.5 if _road_rank in ("101", "102", "103") else (3.25 if _road_rank in ("104", "105") else 3.0)
                     _cam_road_width_m = max(1, _ri_lanes) * 2 * _ri_lane_w
 
-                # 수동 캘리브레이션 없으면 차선 감지 자동 보정 예약
-                global _auto_calib_attempts, _auto_calib_road_width_m, _auto_calib_road_rank
+                # 수동 캘리브레이션 없으면 warm-up 관측 수집 시작
+                global _auto_calib_road_width_m, _auto_calib_road_rank
                 if not _manual_cal_loaded:
                     _auto_calib_road_width_m = _cam_road_width_m
                     _auto_calib_road_rank    = _road_rank
                     oneway = cam.get("is_oneway", False)
                     logger.info("도로폭: %.1fm (%s)", _cam_road_width_m, "편도" if oneway else "양방향")
-                    _auto_calib_attempts = 5  # 최대 5프레임 시도
+                    # 저장 prior pose가 있으면 적용 후 즉시 lock (warm-up 스킵)
+                    _prior = _load_camera_pose(cam_key)
+                    if _prior:
+                        _transformer._pose_prior = camera_pose.Pose(**{
+                            k: _prior[k] for k in ("H_m", "pitch_deg", "yaw_deg", "focal_px")
+                        })
+                        _h0, _w0 = 0, 0  # apply_prior_pose는 frame shape이 필요 → 루프에서 처리
+                        _transformer._warmup_params = {
+                            "bearing_deg": analytics.road_bearing_deg or 0.0,
+                            "road_width_m": _cam_road_width_m,
+                            "fix_direction": cam.get("has_name_bearing", False),
+                            "cam_lat": cam.get("lat"),
+                            "cam_lon": cam.get("lon"),
+                            "road_rank": _road_rank,
+                        }
+                        _transformer._warmup_active = False
+                        _transformer._locked = False  # frame 첫 수신 시 apply_prior_pose 후 lock
+                        logger.info("저장 pose 있음 — 첫 프레임에서 prior 적용 후 lock 예정")
+                    else:
+                        _transformer.start_warmup(
+                            bearing_deg=analytics.road_bearing_deg or 0.0,
+                            road_width_m=_cam_road_width_m,
+                            fix_direction=cam.get("has_name_bearing", False),
+                            cam_lat=cam.get("lat"),
+                            cam_lon=cam.get("lon"),
+                            road_rank=_road_rank,
+                        )
+                        logger.info("warm-up 시작 (최대 %.0fs)", WARMUP_MAX_S)
                 road_bearing_for_ui = cam.get("road_bearing")
                 name_bearing_for_ui = (
                     cam.get("name_bearing")
@@ -2090,52 +2144,88 @@ async def live_loop(stream) -> None:
             await asyncio.sleep(0.5)
             continue
 
-        # 차선 감지 자동 캘리브레이션
-        # Phase 4: 수동 cali가 있으면 완전 skip — polygon/homography 고정
-        if _auto_calib_attempts > 0 and frame is not None and not _transformer.is_calibrated:
-            _auto_calib_attempts -= 1
-            bearing = analytics.road_bearing_deg or 0.0
-            ok, used_bearing, calib_info = await asyncio.to_thread(
-                _transformer.auto_calibrate_from_frame,
-                frame, bearing, _auto_calib_road_width_m,
-                _current_cam.get("has_name_bearing", False),
-                _current_cam.get("lat"),
-                _current_cam.get("lon"),
-                _auto_calib_road_rank,
-            )
-            if ok:
-                logger.info("차선 감지 자동 캘리브레이션 완료 (bearing=%.1f°)", used_bearing)
-                _auto_calib_attempts = 0
-                if analytics.road_bearing_deg is None:
-                    analytics.road_bearing_deg = used_bearing
-                elif abs((used_bearing - bearing + 180) % 360 - 180) > 90:
-                    analytics.road_bearing_deg = used_bearing
-                if calib_info and calib_info.get("method") == "pose":
-                    _pp = _transformer.get_pose_params()
-                    if _pp:
-                        _save_camera_pose(
-                            roi_manager.camera_key(_current_cam.get("cctvurl", "")), _pp)
-                raw_info = dict(calib_info) if calib_info else {}
-                # Phase 4: FOV 파라미터에 EMA 적용 (급변 방지)
-                stabilized_info = _apply_fov_ema(raw_info)
-                _last_calib_info = stabilized_info
-                _last_broadcast_bearing = used_bearing
-                roi_ring = _compute_roi_gps_ring()
-                await _broadcast({
-                    "type": "auto_calibrated",
-                    "heading": used_bearing,
-                    **({"roi_gps_ring": roi_ring} if roi_ring else {}),
-                    **_last_calib_info,
-                })
-            elif _auto_calib_attempts == 0:
-                # 결정트리 3단계: 엣지 실패 + 저장 prior 있음 → prior 포즈 직접 적용. Phase 12
+        # ── Warm-up → commit → lock 캘리브레이션 ────────────────────────
+        # 수동 4-point cali(_is_calibrated) 또는 이미 locked이면 완전 스킵.
+        if frame is not None and not _transformer.is_calibrated:
+            cam_key_now = roi_manager.camera_key(_current_cam.get("cctvurl", "")) if _current_cam else ""
+
+            # ① prior pose 대기 경로: 첫 프레임에서 prior 적용 후 lock
+            if (not _transformer.locked and not _transformer._warmup_active
+                    and _transformer._pose_prior is not None):
                 _h0, _w0 = frame.shape[:2]
                 if _transformer.apply_prior_pose(
-                    _auto_calib_road_width_m, analytics.road_bearing_deg or 0.0, (_w0, _h0)):
-                    logger.info("차선 감지 실패 — 저장 prior 포즈로 폴백 적용")
+                        _auto_calib_road_width_m,
+                        analytics.road_bearing_deg or 0.0,
+                        (_w0, _h0)):
+                    _transformer._locked = True
+                    logger.info("저장 prior 포즈 적용 완료 — locked")
+                    await _broadcast({"type": "calibrating", "elapsed_s": 0,
+                                      "status": "locked_prior"})
                 else:
-                    logger.info("차선 감지 실패 — GPS 근사 캘리브레이션 유지 (road_width=%.1fm)",
-                                _auto_calib_road_width_m)
+                    # prior 적용 실패 → warm-up으로 전환
+                    _transformer.start_warmup(
+                        bearing_deg=analytics.road_bearing_deg or 0.0,
+                        road_width_m=_auto_calib_road_width_m,
+                        fix_direction=_current_cam.get("has_name_bearing", False),
+                        cam_lat=_current_cam.get("lat"),
+                        cam_lon=_current_cam.get("lon"),
+                        road_rank=_auto_calib_road_rank,
+                    )
+                    logger.info("prior 포즈 적용 실패 — warm-up 시작")
+
+            # ② warm-up 관측 누적
+            elif _transformer._warmup_active:
+                should_commit, elapsed = await asyncio.to_thread(
+                    _transformer.feed_warmup_frame, frame)
+
+                # 진행 상황 주기적 broadcast (30프레임 = ~1s)
+                if _frame_count % 30 == 0:
+                    await _broadcast({"type": "calibrating",
+                                      "elapsed_s": round(elapsed, 1),
+                                      "stack_frames": len(_transformer._warmup_stack)})
+
+                if should_commit:
+                    logger.info("warm-up commit 시작 (elapsed=%.1fs, stack=%d)",
+                                elapsed, len(_transformer._warmup_stack))
+                    ok, used_bearing, calib_info = await asyncio.to_thread(
+                        _transformer.commit_calibration, frame.shape[:2])
+
+                    # bearing 갱신
+                    bearing = analytics.road_bearing_deg or 0.0
+                    if ok:
+                        if analytics.road_bearing_deg is None:
+                            analytics.road_bearing_deg = used_bearing
+                        elif abs((used_bearing - bearing + 180) % 360 - 180) > 90:
+                            analytics.road_bearing_deg = used_bearing
+
+                    # 성공 시 pose 저장; fallback(heuristic)은 저장 안 함
+                    if ok and calib_info and calib_info.get("method") == "pose":
+                        _pp = _transformer.get_pose_params()
+                        if _pp:
+                            _save_camera_pose(cam_key_now, _pp)
+
+                    # vehicle-scale 최종 1회 fit 후 저장
+                    _min_obs = SCALE_MIN_OBS_SPARSE if len(_transformer._scale_obs) < SCALE_MIN_OBS else SCALE_MIN_OBS
+                    if _transformer.fit_scale_model(_min_obs):
+                        _vc_p = _transformer.get_scale_params()
+                        if _vc_p:
+                            _save_vehicle_calib(cam_key_now, _vc_p)
+                            logger.info("vehicle-scale 최종 fit 저장 (locked)")
+
+                    raw_info = dict(calib_info) if calib_info else {}
+                    stabilized_info = _apply_fov_ema(raw_info)
+                    _last_calib_info = stabilized_info
+                    _last_broadcast_bearing = used_bearing
+                    roi_ring = _compute_roi_gps_ring()
+                    await _broadcast({
+                        "type": "auto_calibrated",
+                        "heading": used_bearing,
+                        "warmup_elapsed_s": round(elapsed, 1),
+                        **({"roi_gps_ring": roi_ring} if roi_ring else {}),
+                        **_last_calib_info,
+                    })
+                    logger.info("warm-up commit 완료 — locked (ok=%s, method=%s)",
+                                ok, calib_info.get("method") if calib_info else "fallback")
 
         # _latest_frame_jpeg 는 viewer-active 체크 전에 이미 업데이트됨
 
@@ -2265,7 +2355,8 @@ def _live_process(frame_id, frame, detector, tracker, pos_msec: float = 0.0) -> 
     _min_obs = (SCALE_MIN_OBS_SPARSE
                 if (_frame_count - _scale_switch_frame) > SCALE_SPARSE_AFTER_FRAMES
                 else SCALE_MIN_OBS)
-    if (_frame_count % 10 == 0 and _transformer._scale_obs_since_fit >= _min_obs
+    if (not _transformer.locked
+            and _frame_count % 10 == 0 and _transformer._scale_obs_since_fit >= _min_obs
             and _current_cam):
         if _transformer.fit_scale_model(_min_obs):
             new_p = _transformer.get_scale_params()

@@ -56,7 +56,6 @@ export default function App() {
   const [feedStatus, setFeedStatus]       = useState(null);  // 국도/고속도로 피드 수신 상태
   const [showHighway, setShowHighway]     = useState(true);   // 고속도로 CCTV 표시 여부
   const [showNational, setShowNational]   = useState(true);   // 국도 CCTV 표시 여부
-  const [clusterMenu, setClusterMenu]     = useState(null);   // { cameras, x, y }
   const [cctvDrawerQuery, setCctvDrawerQuery] = useState("");
   const switchDebounceRef                 = useRef(null);
   const switchTimeoutRef                  = useRef(null);
@@ -252,18 +251,6 @@ export default function App() {
   const monitoredCamsRef = useRef(monitoredCams);
   useEffect(() => { monitoredCamsRef.current = monitoredCams; }, [monitoredCams]);
 
-  const handleClusterClick = useCallback((cameras, x, y) => {
-    setClusterMenu({ cameras, x, y });
-  }, []);
-
-  // 클러스터 메뉴 외부 클릭 시 닫기
-  useEffect(() => {
-    if (!clusterMenu) return;
-    const close = () => setClusterMenu(null);
-    setTimeout(() => window.addEventListener("click", close), 0);
-    return () => window.removeEventListener("click", close);
-  }, [clusterMenu]);
-
   const handleToggleMonitor = useCallback((c) => {
     const camKey = c.cam_key;
     if (!camKey || !c.cctvurl) return;
@@ -306,7 +293,6 @@ export default function App() {
           viewState={viewState}
           onViewStateChange={setViewState}
           onCctvClick={handleCctvClick}
-          onClusterClick={handleClusterClick}
           calibrationMode={calMode === "awaiting"}
           snapNodes={calMode === "awaiting" ? snapNodes : []}
           onMapClick={handleMapClick}
@@ -383,46 +369,6 @@ export default function App() {
             );
           })}
         </div>
-
-        {/* 클러스터 카메라 선택 팝업 */}
-        {clusterMenu && (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              position: "absolute",
-              left: Math.min(clusterMenu.x, window.innerWidth - 220),
-              top:  Math.min(clusterMenu.y + 8, window.innerHeight - 200),
-              zIndex: 200,
-              background: "rgba(15,23,42,0.97)",
-              border: "1px solid #334155",
-              borderRadius: 10,
-              padding: "6px 0",
-              minWidth: 190,
-              boxShadow: "0 6px 24px rgba(0,0,0,0.6)",
-              backdropFilter: "blur(6px)",
-            }}
-          >
-            <div style={{ padding: "4px 14px 6px", color: "#64748b", fontSize: 11 }}>
-              📷 {clusterMenu.cameras.length}개 카메라
-            </div>
-            {clusterMenu.cameras.map((cam) => (
-              <button
-                key={cam.id}
-                onClick={() => { handleCctvClick(cam); setClusterMenu(null); }}
-                style={{
-                  display: "block", width: "100%", textAlign: "left",
-                  padding: "7px 14px", background: "none", border: "none",
-                  color: "#e2e8f0", fontSize: 13, cursor: "pointer",
-                  borderTop: "1px solid #1e293b",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "#1e293b"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-              >
-                {cctvDisplayName(cam, lang)}
-              </button>
-            ))}
-          </div>
-        )}
 
         {/* 선택된 CCTV 표시 */}
         {selectedCctv && (

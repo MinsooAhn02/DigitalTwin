@@ -17,6 +17,8 @@ import numpy as np
 import cv2
 from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIGHT_M, CAMERA_BEARING_DEG
 from config import POSE_RESIDUAL_MAX_PX, SCALE_MIN_OBS, FAR_CAP_M
+from config import (WARMUP_MAX_S, WARMUP_EVAL_EVERY, CLEANPLATE_MAX_FRAMES,
+                    CLEANPLATE_SAMPLE_S, DASH_MIN_OBS, LANE_MIN_OBS)
 import math
 import camera_pose
 import lane_markings as _lm
@@ -103,6 +105,156 @@ class PerspectiveTransformer:
         # ── Step 3: 차선 표시 검출 결과 (로깅 전용; Step 4에서 solver에 공급) ──
         self._lane_marking_result: _lm.LaneMarkingResult | None = None
         self._lane_marking_road_rank: str = ""
+
+        # ── Warm-up → commit → lock 캘리브레이션 ──────────────────────────
+        # locked=True: commit 완료, 이후 자동 재캘리브·scale refit 없음.
+        # locked=False + _warmup_active=True: 관측 누적 중.
+        self._locked: bool = False
+        self._warmup_active: bool = False
+        self._warmup_t0: float = 0.0              # warm-up 시작 시각 (time.monotonic)
+        self._warmup_last_sample_t: float = 0.0   # 마지막 clean-plate 샘플 시각
+        self._warmup_frames_since_eval: int = 0   # 마지막 commit-check 이후 프레임 수
+        # clean-plate 스택: 1/2 해상도 그레이스케일 ROI (roi_top..h, full-width)
+        self._warmup_stack: list[np.ndarray] = []
+        # warm-up 중 캘리브 파라미터 캐시 (bearing, road_width, road_rank, etc.)
+        self._warmup_params: dict = {}
+
+    @property
+    def locked(self) -> bool:
+        return self._locked
+
+    def start_warmup(
+        self,
+        bearing_deg: float,
+        road_width_m: float,
+        fix_direction: bool,
+        cam_lat: float | None,
+        cam_lon: float | None,
+        road_rank: str,
+    ) -> None:
+        """warm-up 관측 수집 시작. 카메라 전환 시 저장 pose가 없을 때 호출."""
+        import time as _time
+        self._locked = False
+        self._warmup_active = True
+        self._warmup_t0 = _time.monotonic()
+        self._warmup_last_sample_t = 0.0
+        self._warmup_frames_since_eval = 0
+        self._warmup_stack = []
+        self._warmup_params = {
+            "bearing_deg": bearing_deg,
+            "road_width_m": road_width_m,
+            "fix_direction": fix_direction,
+            "cam_lat": cam_lat,
+            "cam_lon": cam_lon,
+            "road_rank": road_rank,
+        }
+
+    def feed_warmup_frame(self, frame: np.ndarray) -> tuple[bool, float]:
+        """warm-up 중 매 프레임 호출.
+
+        반환: (should_commit, elapsed_s)
+          should_commit=True → 즉시 commit_calibration() 호출할 것.
+        """
+        import time as _time
+        if not self._warmup_active:
+            return False, 0.0
+
+        now = _time.monotonic()
+        elapsed = now - self._warmup_t0
+
+        # clean-plate 샘플링 (CLEANPLATE_SAMPLE_S 간격)
+        if now - self._warmup_last_sample_t >= CLEANPLATE_SAMPLE_S:
+            h, w = frame.shape[:2]
+            roi_top = int(h * 0.45)
+            roi = frame[roi_top:h, :]
+            # 1/2 해상도 그레이스케일
+            small = cv2.resize(roi, (w // 2, (h - roi_top) // 2))
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if small.ndim == 3 else small
+            if len(self._warmup_stack) >= CLEANPLATE_MAX_FRAMES:
+                self._warmup_stack.pop(0)
+            self._warmup_stack.append(gray)
+            self._warmup_last_sample_t = now
+
+        self._warmup_frames_since_eval += 1
+
+        # timeout: 무조건 commit
+        if elapsed >= WARMUP_MAX_S:
+            return True, elapsed
+
+        # early-commit check: WARMUP_EVAL_EVERY 프레임마다
+        if self._warmup_frames_since_eval >= WARMUP_EVAL_EVERY:
+            self._warmup_frames_since_eval = 0
+            if len(self._warmup_stack) >= 10:
+                clean = self._build_clean_plate()
+                lm = _lm.detect_lane_markings(
+                    clean,
+                    road_rank=self._warmup_params.get("road_rank", ""),
+                    roi_top_frac=0.0,  # clean plate는 이미 ROI
+                )
+                if (len(lm.dash_period_obs) >= DASH_MIN_OBS
+                        and len(lm.lane_width_obs) >= LANE_MIN_OBS):
+                    return True, elapsed
+
+        return False, elapsed
+
+    def _build_clean_plate(self) -> np.ndarray:
+        """스택의 중앙값 프레임(차량 제거)을 원래 컬러 BGR로 복원 후 반환.
+
+        clean-plate는 1/2 그레이스케일이므로 _calibrate_from_image가 받을 수 있도록
+        그레이스케일 그대로 반환 (auto_calibrate_from_frame은 내부에서 cvtColor).
+        """
+        stack = np.stack(self._warmup_stack, axis=0).astype(np.float32)
+        median = np.median(stack, axis=0).astype(np.uint8)
+        # warm-up stack 해상도(1/2) 그대로 반환 — _calibrate_from_image가 h/w를 사용하므로
+        # 비율이 유지되면 충분. 절대 픽셀 수는 solve_pose의 row 비율 계산에만 사용.
+        return median  # 단채널 uint8
+
+    def commit_calibration(
+        self,
+        frame_shape: tuple[int, int],
+    ) -> tuple[bool, float, dict | None]:
+        """clean-plate로 최종 1회 solve 후 lock.
+
+        frame_shape: 원본 프레임의 (h, w) — GPS/픽셀 좌표 기준 복원에 필요.
+        반환: auto_calibrate_from_frame과 동일한 (ok, bearing_deg, calib_info).
+        """
+        self._warmup_active = False
+        p = self._warmup_params
+        bearing_deg = p.get("bearing_deg", 0.0)
+
+        if len(self._warmup_stack) < 5:
+            # 스택이 너무 적으면 clean-plate 사용 불가 → 일반 fallback 경로
+            self._locked = True
+            return False, bearing_deg, None
+
+        # clean-plate (1/2 해상도 그레이스케일 ROI)를 원본 크기 그레이스케일로 업스케일
+        orig_h, orig_w = frame_shape
+        roi_top = int(orig_h * 0.45)
+        roi_h = orig_h - roi_top
+        clean_small = self._build_clean_plate()
+        clean_full = cv2.resize(clean_small, (orig_w, roi_h),
+                                interpolation=cv2.INTER_LINEAR)
+        # 전체 프레임 크기의 그레이스케일 캔버스에 붙이기 (auto_calibrate_from_frame 호환)
+        canvas = np.zeros((orig_h, orig_w), dtype=np.uint8)
+        canvas[roi_top:orig_h, :] = clean_full
+
+        ok, used_bearing, calib_info = self.auto_calibrate_from_frame(
+            canvas,
+            bearing_deg=bearing_deg,
+            road_width_m=p.get("road_width_m", 7.0),
+            fix_direction=p.get("fix_direction", False),
+            cam_lat=p.get("cam_lat"),
+            cam_lon=p.get("cam_lon"),
+            road_rank=p.get("road_rank", ""),
+        )
+        self._locked = True
+        return ok, used_bearing, calib_info
+
+    def recalibrate(self) -> None:
+        """수동 재보정 요청 — lock 해제 후 warm-up 재시작 준비."""
+        self._locked = False
+        self._warmup_active = False
+        self._warmup_stack = []
 
     # ──────────────────────────────────────────────────────────────────
     def _transform_point(self, H: np.ndarray, u: float, v: float) -> tuple[float, float]:

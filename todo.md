@@ -1,5 +1,6 @@
 # Todo — Image-only metric calibration & speed accuracy
 > Plan 원본: `C:\Users\dksal\.claude\plans\toasty-wishing-backus.md`
+> 현재 플랜: `C:\Users\dksal\.claude\plans\user-answered-claude-s-replicated-scone.md`
 
 ---
 
@@ -7,233 +8,204 @@
 
 | Step | 내용 | 상태 | 검증 |
 |------|------|------|------|
-| 1 | Depth-invariance 진단 메트릭 | ✅ 구현 완료 | ⚠️ 라이브 확인 필요 (아래 참조) |
+| 1 | Depth-invariance 진단 메트릭 | ✅ 구현 완료 | ✅ 라이브 확인: 달래내1 `qualifying_tracks=9, median_cv=0.046` |
 | 2 | ITS_DRIVES_SCALE=False | ✅ 구현 완료 | ✅ 코드 확인: `analytics.py:911` return None |
 | 3 | 차선 표시 감지 (`lane_markings.py`) | ✅ 구현 완료 | ✅ 자체 테스트 PASS (lane_w_obs=2) |
 | 4 | Multi-anchor solver + free focal | ✅ 구현 완료 | ✅ ALL PASS (long_err=0.7%, Δf=1.4%) |
 | UI | startup·토글·이름·아이콘·클러스터 | ✅ 구현 완료 | - |
-| **5** | **Auto-cali 견고성 + 품질 점수** | ⬜ 미시작 | Step 1 라이브 확인 후 시작 |
-| **6** | **Digital-twin 실측값 표시** | ⬜ 미시작 | |
-| 7 | 문서 (CODE_LOGIC.md 갱신) | ⬜ 미시작 | |
+| **W** | **Warm-up → commit → lock 재설계** | 🔵 진행 중 | |
+| &nbsp;&nbsp;W1 | clean-plate 누적기 + 단일이미지 detect/solve 헬퍼 | ⬜ | |
+| &nbsp;&nbsp;W2 | warm-up 상태머신 + lock + refit 동결 + persistence | ⬜ | |
+| &nbsp;&nbsp;W3 | 프론트엔드: 보정중 배지 + 재보정 버튼 + 실측 표시 | ⬜ | |
+| 6 | Digital-twin 실측값 표시 (W3에 통합) | → W3 | |
+| 7 | 문서 (CODE_LOGIC.md 갱신) | ⬜ 미시작 | W 완료 후 |
 
-### Step 1 라이브 확인 방법 (사용자 직접)
+### 라이브 검증 결과 (경부선 상적교, 2026-06-30)
 ```
-make dev → 카메라 선택 → 1~2분 대기
-GET http://localhost:8000/eval/report
-확인: depth_invariance.qualifying_tracks > 0
+qualifying_tracks=32, median_cv=0.124
+anchor_residual_px.n=0  ← dash_obs=0: 단일프레임 autocorr 미통과 → free-focal 미작동
+speed_scale_snapshot={}  ← ITS 제거 성공
+median speed=145.8 km/h  🚨 과추정 (제한속도 100~110 km/h)
 ```
+
+### 근본 원인 & 재설계 요약
+- **단일 프레임** 캘리브레이션: 5번 시도 중 첫 residual<8px 프레임이 lock → 노이즈/차량에 매우 취약
+- **dash_obs=0** 불변: 단일 노이즈 프레임에서 점선 자기상관 peak<0.15 → focal 고정 → 종방향 scale 틀림
+- **해결**: 카메라 ON → warm-up(관측 누적) → `np.median` clean-plate → 한 번 solve → lock
+  - clean-plate = 정적 차선 페인트 복원, 차량/노이즈 제거 → `dash_obs>0` → free-focal 작동
+  - lock 후 vehicle-scale refit도 동결; 수동 재보정 버튼으로만 재시작
+- **상세**: `C:\Users\dksal\.claude\plans\user-answered-claude-s-replicated-scone.md`
 
 ### 설계 원칙 확인
 - plan의 `calibrate_from_its` docstring `alpha=0.99` → 실제 코드는 `0.15/0.05/0.01` 적응형
 - 단, `ITS_DRIVES_SCALE=False`이면 `analytics.py:911`에서 `return None` 즉시 반환 → alpha 무관
-- "ITS 없이 CCTV 이미지만으로" 원칙 = Step 2 + Step 4(free-focal)로 구현됨
+- `_is_calibrated`는 4-point 수동 캘리브 전용 → `locked`는 별도 플래그로 추가
+- "ITS 없이 CCTV 이미지만으로" 원칙 = Step 2 + Step 4(free-focal) + Step W로 완성
 
 ---
 
-## Plan: Image-only metric calibration & speed accuracy (no ITS/GPS)
+## Full Plan (최신 — 2026-06-30 재설계)
 
-## Context
+> 이전 plan: `toasty-wishing-backus.md` (Step 1–4 완료 후 종료)
+> 현재 plan: `user-answered-claude-s-replicated-scone.md`
 
-Goal: improve **speed-measurement and calibration accuracy** using only *image-observable*
-physics — in-image road geometry (road edges **and lane markings**), NodeLink lane data, camera
-position, and vehicle apparent-size-vs-depth. **No ITS segment speed, no GPS** (user: ITS is too
-coarse to be a reference; the whole point is a system that works without those). Then refresh
-`CODE_LOGIC.md`. Accuracy work first, docs last.
+### 배경 & 근본 원인
 
-The user's four explicit requirements:
-1. Verify the current vehicle-width code **line-by-line** (done below) before changing it.
-2. Measure scale from **lane-line / road markings too**, not only vehicle width.
-3. Scrutinize the **auto-calibration principle** — if auto-cali is wrong, every measurement is wrong.
-4. As a digital twin, pull **real-world data and display it on screen** properly.
+Goal: **ITS/GPS 없이 CCTV 이미지만으로** 속도·거리 정확도 확보.  
+Step 1–4 완료 후 경부선 라이브 검증 결과 **median speed 145.8 km/h (제한 100~110 km/h)**  
+→ root cause 확인:
 
----
+| 문제 | 원인 코드 | 결과 |
+|---|---|---|
+| 단일 프레임 캘리브 | `main.py:2095` 5-attempt loop (1프레임 = 1시도) | 노이즈/차량에 취약 |
+| `dash_obs=0` 불변 | `lane_markings._autocorr_period` peak<0.15 (1프레임 노이즈) | free-focal 미작동 |
+| focal 고정 `1.2·h` | `transform.py:751` | 종방향 scale 틀림 → 속도 과추정 |
+| vehicle-scale 무한 refit | `main.py:2268` 10프레임마다 재피팅, lock 없음 | 드리프트 지속 |
 
-## Part A — Verified current behavior (read line-by-line)
+**해결책:** warm-up(관측 누적) → clean-plate(차량 제거 중앙값 프레임) → 한 번 solve → lock
 
-### A.1 Vehicle apparent-size scale (`transform.py`)
-- `accumulate_scale_obs(v, bbox_w_px, class_name, frame_h, frame_w)` (`transform.py:485`):
-  looks up `VEHICLE_WIDTHS_M` (`car 1.8, truck 2.5, bus 2.5`), rejects `bbox_w_px < 20`,
-  appends `(v, real_w/bbox_w_px)` to `_scale_obs` (deque maxlen 200). So each sample is
-  **(bbox-bottom row, lateral meters-per-pixel at that row)**. Fed from `main.py:2223` using the
-  bbox bottom-centre.
-- `fit_scale_model(min_obs)` (`transform.py:501`): least-squares `1/scale = B·v + C`
-  (inverse-mpp linear in row — the correct pinhole form for a ground plane). Validity gate:
-  `B>0` and `vp_y = −C/B ∈ (0, 0.7·h)`. Refit every 10 frames (`main.py:2232`), persisted to
-  `vehicle_calib.json` with drift warning.
-- `_scale_correction_at(v)` (`transform.py:531`): `fitted_scale = 1/(Bv+C)` vs the homography's
-  horizontal scale at row v; returns the **ratio, hard-clamped `[0.6, 1.8]`**.
-- `speed_correction_at(v_px, frame_h)` (`transform.py:579`): velocity-domain wrapper (resolution
-  rescale + per-row cache), wired to `analytics.depth_corr_fn` (`main.py:290`).
-- Applied in `_speed` (`analytics.py:398, 451`): `scaled = raw · min(corr·speed_scale, 3.0)`.
+### 설계 결정 (확정)
 
-**Concrete weaknesses found:**
-- **W1 (the big one): vehicle width is a *lateral* anchor; speed needs the *longitudinal*
-  (depth) scale.** Converting one to the other needs camera pitch/focal. Today the longitudinal
-  scale comes from the homography (built with **fixed focal `1.2·h`**), and vehicle data is only a
-  clamped `[0.6,1.8]` nudge — the rich absolute-scale signal is discarded. So the depth scale is
-  never truly measured; ITS `speed_scale` patches it. This is the root cause.
-- **W2: bbox-width bias.** bbox width equals real width only head-on; under yaw/perspective the
-  bbox also captures vehicle length → mpp overestimated on oblique cameras.
-- **W3: crude widths.** `bus == truck == 2.5`, no motorcycle; single `car 1.8`.
-
-### A.2 Auto-calibration chain (`transform.auto_calibrate_from_frame`, called `main.py:2065`)
-Canny → `HoughLinesP` → keep diagonals (<60° from vertical) → sample road edges at 5 rows, take
-**15th/85th percentile x** as left/right edge → lstsq `x=a·y+b` per edge → **VP** = line
-intersection (clamped `vp_y ≤ 0.55h`) → direction decision (curvature-match, else VP+map-bearing,
-else `vp_x>0.55w`) → **`camera_pose.solve_pose`** (focal fixed; accept if `residual<8px`) →
-`pose_to_corners` → homographies. Fallbacks: heuristic trapezoid → saved prior pose → GPS grid.
-5 attempts scheduled per switch (`main.py:1988`).
-
-**Weaknesses found (these poison everything downstream if wrong):**
-- **W4: fixed focal `fy=h·1.2`** also seeds `pitch0/yaw0` and the heuristic — systematic bias for
-  any camera whose true FoV ≠ 45°, which is most of them (user: every CCTV angle/zoom differs).
-- **W5: percentile edges are not validated.** 15th/85th picks the outermost diagonals; guardrails,
-  shadows, or multi-lane markings can be latched as "road edges". No parallel-in-world check.
-- **W6: single quality gate.** Only `residual_px < 8` decides acceptance; a degenerate fit with low
-  residual still passes. No independent cross-check (e.g. does a known-length ground feature
-  reproject correctly?).
-- **W7: `road_width = lanes × 2 × lane_w` ("always ×2")** is the *only* metric anchor for the
-  solver. If it's wrong (one-way roads, wrong lane count), the recovered pose scale is wrong.
-- **W8: direction decision** is multi-branch; a wrong flip sends vehicles backward and corrupts
-  direction + speed sign handling.
-
-### A.3 Display / digital-twin data path
-`camera_ready` (`main.py:1997`) sends road_name, lanes, max_spd, bearing, snap, **nominal**
-road_width, road_pts, roi_gps_ring. `auto_calibrated` (`main.py:2093`) adds heading + FOV
-(`cam_h_m, pitch_deg, yaw_deg, focal_px, near_m, far_m, road_width_m, residual_px`). Frontend
-(`MapView.jsx`) draws the FOV polygon (`computeRoadCorridorPolygon`/`computeCalibPolygon`) and
-vehicle markers from broadcast lat/lon. **Gap:** the screen shows *nominal* NodeLink values and an
-FOV outline, but not the **measured** geometry or any **calibration-quality** signal — so a wrong
-auto-cali looks identical to a good one.
+| 항목 | 결정 |
+|---|---|
+| commit 트리거 | data-driven (dash_obs 충분) + timeout(`WARMUP_MAX_S`) fallback |
+| warm-up UI | 잠정값(fixed-focal) 표시 + `보정 중 (N s)` 배지; commit 시 정확값으로 교체 |
+| lock 정책 | 한 번 lock → 재보정은 수동 버튼(`POST /recalibrate`)으로만 |
+| vehicle-scale | lock 시 함께 동결 (commit 시점에 최종 1회 fit) |
 
 ---
 
-## Part B — Improvement design: multi-anchor metric calibration
+### Part A — 완료된 기반 (Step 1–4)
 
-Use **three independent, ground-plane, multi-depth anchors** so depth scale is *measured*, not
-patched, and anchors cross-check each other:
+**A.1 진단 메트릭 (Step 1 ✅)**
+- `metrics.LiveMetrics`: `depth_invariance` (단일 트랙 CV), `anchor_residual_px`
+- `GET /eval/report` → live 측정 가능
 
-1. **Vehicle width (lateral)** — existing `_scale_obs`; keep as fallback/cross-check (W2/W3 caveats).
-2. **Lane width (lateral)** — detected lane-marking spacing vs NodeLink lane width (~3.0–3.5 m).
-   On-ground, fixed geometry → cleaner than bbox width; cross-checks the "always ×2" road width (W7).
-3. **Dashed lane-marking longitudinal period (LONGITUDINAL)** — the missing piece. Korean dashed
-   lane markings have standardized paint/gap lengths; consecutive dashes at known image rows give a
-   **direct depth anchor** → makes focal/pitch/H fully observable → correct *speed* scale with no ITS.
-   If dashes aren't reliably detectable, the system degrades to lateral-only + fixed focal — no
-   regression.
+**A.2 ITS 의존 제거 (Step 2 ✅)**
+- `ITS_DRIVES_SCALE=False` (`config.py`) → `analytics.py:911` return None
+- `speed_scale` 항상 1.0 유지
 
-### B.1 Verified Korean standards (web-searched — go into `config.py`)
-Selected per NodeLink `road_rank` (already available on switch):
-- **Dashed centre/lane markings** (경찰청 교통노면표시 설치·관리 매뉴얼):
-  - Expressway / motor-vehicle-only (rank 101/102): **paint 8 m, gap 12 m → period 20 m**.
-  - Urban / general road: **paint 3 m, gap 5 m → period 8 m**.
-  - Line width (W): **0.10–0.20 m** (use 0.15 m nominal).
-- **Lane width** (도로의 구조·시설 기준에 관한 규칙): national road standard **3.5 m**; design
-  speed 80 → **3.25 m**, 60 → **3.0 m** — matches NodeLink `lane_w` mapping in `nodelink.py`, so
-  the lane-width anchor and NodeLink agree by construction and cross-check the "×2" road width.
-- These are **soft priors** with a tolerance band, not hard equalities — the solver fits to the
-  *detected* marking period; the standard seeds the expected value and rejects detections that are
-  implausibly far from it (robustness, not over-constraint).
-Constants: `MARK_PERIOD_M`, `MARK_PAINT_M`, `MARK_GAP_M` (per rank), `MARK_WIDTH_M`,
-`MARK_PERIOD_TOL`. Sources cited in the commit/CODE_LOGIC.
+**A.3 차선 감지 모듈 (Step 3 ✅)**
+- `lane_markings.py`: `detect_lane_markings()` → `lane_width_obs`, `dash_period_obs`
+- 한국 도로 표준 상수: 고속도로 period=20m, 일반 8m (`config.py`)
+- 현재 단일 프레임에서 `dash_obs=0` → clean-plate로 해결 예정
 
-**Core change:** extend `camera_pose.solve_pose` to take optional anchor observations
-`[(row_v, mpp_lateral)]` and `[(row_v_a, row_v_b, real_long_m)]`, add reprojection residuals for
-them (reuse `_project`/`_backproject`/`_road_to_world`), and **free `focal` as a 5th variable**
-only when anchors are sufficient and span enough depth (`FOCAL_FREE_*` gates). The recovered focal
-flows through `pose_to_corners` → `H_meter` unchanged downstream. With focal correct, the depth
-correction `κ` → ~1.0 and the homography itself carries the right longitudinal scale.
+**A.4 Multi-anchor solver + free focal (Step 4 ✅)**
+- `camera_pose.solve_pose()`: `lane_w_obs`, `dash_obs` 앵커 지원
+- `FOCAL_FREE_MIN_OBS=3`, `FOCAL_FREE_MIN_ROW_FRAC=0.20` gate
+- `dash_obs≥3` + row span 충분 시 focal 5번째 변수로 해방
+- self-test ALL PASS: `long_err=0.7%, Δf=1.4%`
 
-**Demote ITS to display-only:** gate `analytics.calibrate_from_its` behind `ITS_DRIVES_SCALE`
-(**default False**); `speed_scale` stays 1.0; keep `_inject_its_speed` comparison fields purely
-informational. Optional ITS-free residual: a conservative same-track depth-invariance nudge.
+**A.5 코드 핵심 위치 (리팩터 시 재사용)**
+- `transform.py:485` `accumulate_scale_obs` / `501` `fit_scale_model`
+- `transform.py:733` `auto_calibrate_from_frame` (detect+solve 분리 예정)
+- `transform.py:76` `_is_calibrated` = 4-point 수동 전용 (`locked`와 별개)
+- `camera_pose.py:324` `solve_pose` / `407` fixed-focal fallback (내장)
+- `main.py:2095` 5-attempt loop → warm-up 상태머신으로 교체
+- `main.py:2268` vehicle-scale refit → `not _transformer.locked` 게이트 추가
+- `main.py:140/153` `_load/_save_camera_pose` / `112/126` `_load/_save_vehicle_calib`
+- `App.jsx:701` `CollapsibleCard` (auto-calib 카드 확장)
 
 ---
 
-## Part C — Auto-cali robustness (so the foundation is trustworthy)
+### Part B — 현재 구현 대상: Warm-up → commit → lock
 
-- **Add lane-marking detection** alongside edge detection to (a) disambiguate true road edges from
-  guardrails/shadows (W5) and (b) supply the lane-width + dashed-period anchors (Part B).
-- **Add a calibration quality score** beyond `residual_px` (W6): independent-anchor reprojection
-  error + same-track speed depth-invariance (a correctly-scaled camera measures one car's speed
-  ~constant across depth). Reject/flag low-quality solves; require plausible `H` and `pitch` ranges.
-- **Cross-check road width** (W7): if detected lane width disagrees with NodeLink ×2 beyond a
-  tolerance, prefer the measured width and log it.
-- Keep the existing fallback ladder; the new anchors strengthen the *primary* path, not replace
-  the graceful-degradation chain (no regression when detection is weak — night/rain/dense traffic).
+#### B.1 핵심 아이디어: temporal clean-plate
+
+```
+warm-up 동안 N프레임 샘플 (≈1~2/s, 최대 60장)
+→ np.median(stack, axis=0) → vehicle-free clean-plate
+→ detect_lane_markings(clean_plate) → dash_obs > 0 (정적 차선만 남음)
+→ solve_pose(free-focal) → 정확한 focal 복원
+→ lock
+```
+
+단일 프레임 autocorr가 실패하는 이유: 차량/압축 노이즈가 점선 신호를 묻음.  
+clean-plate는 차량(transient)을 제거하고 차선 페인트(static)만 남김 → peak>0.15 통과.
+
+#### B.2 카메라 라이프사이클
+
+```
+switch_camera
+  └─ 저장 pose 있음? ──yes──→ apply prior + locked=True (warm-up 스킵)
+  └─ 없음 ──────────────────→ WARMUP 진입
+        └─ 매 프레임: clean-plate 스택 누적 + scale_obs 누적
+        └─ WARMUP_EVAL_EVERY 프레임마다: commit check
+        └─ 조건 통과 OR timeout → COMMIT
+              └─ clean-plate → detect → solve_pose
+              └─ quality pass → 적용 + persist + locked=True
+              └─ quality fail → fixed-focal fallback + locked=True
+        └─ 이후 LOCKED: refit 없음, 재시도 없음
+        └─ 수동 재보정: /recalibrate → locked=False + 저장 pose 삭제 → WARMUP
+```
+
+#### B.3 commit 게이트 (data-driven + timeout)
+
+**Early commit** (모두 충족 시):
+- `dash_obs ≥ DASH_MIN_OBS` (=3) AND row span ≥ `FOCAL_FREE_MIN_ROW_FRAC`
+- `solve_pose` residual < `POSE_RESIDUAL_MAX_PX`
+
+**Timeout commit** (`WARMUP_MAX_S` 초 경과):
+- 앵커 부족 → fixed focal fallback (현재 동작과 동일) + locked
+- 기존 fallback ladder 유지 (prior pose → GPS grid)
+
+#### B.4 설계 주의사항 (코드 더블체크 결과)
+
+- `locked` = **새 플래그** (`_is_calibrated`는 4-point 수동 전용, 재사용 금지)
+- warm-up은 `not _is_calibrated` 조건 하에서만 (`main.py:2095` guard 유지)
+- `solve_pose` 내부에 fixed-focal fallback 이미 있음 (`camera_pose.py:407`) → timeout 경로 자연스럽게 처리됨
 
 ---
 
-## Part D — Digital-twin real-data display
+### Part C — 구현 순서 (각각 독립 커밋)
 
-- Add **measured-vs-nominal** fields to the `auto_calibrated`/`camera_ready` payloads:
-  recovered `cam_h_m / pitch_deg / focal_px`, **measured road width**, **calibration quality score**,
-  and the **depth-invariance metric**. Render them in the existing *Auto Calibration Estimate* card
-  (`App.jsx` `CollapsibleCard`) so a bad calibration is visible, not hidden.
-- Optional **anchor overlay** on the calibration/YOLO view (`CctvPlayer.jsx`): draw the detected
-  road edges, lane lines, and dashes the solver used, so the geometry is visually verifiable.
-- Ensure corrected scale flows to vehicle GPS so markers sit on real lanes (already via `H_gps`;
-  verify after the focal change).
+**W1 — clean-plate 누적기 + 단일이미지 헬퍼** (backend only)
+- `transform.py`: `auto_calibrate_from_frame`의 detect+solve 꼬리를 `_calibrate_from_image(img, …)` 헬퍼로 분리
+- `LiveTransformer`에 warm-up 상태 추가: `_warmup_stack: list[np.ndarray]`, `_warmup_t0`, `_warmup_locked`
+- `feed_warmup_frame(frame)`: 1/2 해상도 ROI 그레이스케일 → ring buffer (maxlen=`CLEANPLATE_MAX_FRAMES`)
+- `commit_calibration(…)`: `np.median(stack)` → `_calibrate_from_image` → 성공/timeout 분기
+- `config.py`: `WARMUP_MAX_S=90`, `WARMUP_EVAL_EVERY=30`, `CLEANPLATE_MAX_FRAMES=60`, `DASH_MIN_OBS=3`
+- 검증: `python camera_pose.py` ALL PASS 유지 + unit test로 합성 점선 clean-plate → `dash_obs>0` 확인
+
+**W2 — warm-up 상태머신 + lock + 저장** (`main.py`)
+- `_auto_calib_attempts` loop (`2095-2138`) → warm-up 상태머신으로 교체
+- vehicle-scale refit (`2268`) → `not _transformer.locked` gate 추가
+- commit 시: `fit_scale_model` + `_save_vehicle_calib` + `_save_camera_pose`
+- WS broadcast: warm-up 중 `{type:"calibrating", elapsed_s:N}` 매 30프레임 전송
+- `POST /recalibrate` endpoint: `_transformer.recalibrate()` + 저장 pose 삭제
+- 검증: `make dev` → `보정 중 (N s)` 로그 확인, commit 후 lock, 재보정 버튼 API 작동
+
+**W3 — 프론트엔드** (`App.jsx`, `useWebSocket.js`, `i18n/index.jsx`)
+- `calibrating` WS 메시지 → `보정 중 (N s)` 배지 (속도 숫자 위에 반투명 오버레이, 기존 provisional 값은 유지)
+- `auto_calibrated` 수신 시 배지 제거
+- **재보정 버튼** → `POST /recalibrate` → warm-up 재시작
+- `CollapsibleCard` (Auto Calibration) 확장: `cam_h_m`, `pitch_deg`, `focal_px`, `residual_px`, `quality_score`
+- i18n 키: `calib.warming`, `calib.recalibrate`, `calib.quality`
+
+**W4 — docs** (`CODE_LOGIC.md`)
+- warm-up/lock 아키텍처, clean-plate 설명
+- 기존 오류 수정: `calibrate_from_its` docstring alpha=0.99 (실제 0.15/0.05/0.01); eval CSV 경로
 
 ---
 
-## Steps (each is one self-contained, independently pushable commit)
+### Part D — 검증 체크리스트
 
-Workflow: I implement **one step at a time and stop** so you can review, commit, and push it
-before the next. Each step is ordered so the tree stays working (no half-broken states).
+1. **Self-test**: `python camera_pose.py` → ALL PASS (focal-recovery 유지)
+2. **Unit**: clean-plate에서 `dash_obs>0` + `focal_px ≠ h*1.2` 확인
+3. **Live (경부선)**: `make dev` → 배지 표시 → commit 후 `/eval/report` → `anchor_residual_px.n>0`, **median speed ↓ 100~110 km/h**
+4. **Lock**: commit 후 pose/scale 변화 없음, `/recalibrate` 후 warm-up 재시작
+5. **Regression**: 점선 미감지 카메라 → timeout + fixed-focal lock, 크래시 없음
 
-- **Step 1 — Diagnostics (no behavior change).** ✅ 완료. Add the self-consistency metrics so we can
-  measure improvement without ground truth: single-track **depth-invariance** (CV of one track's
-  pre-scale speed across `bbox_bottom_y` bins) + **anchor reprojection residual**.
-  *Files:* `metrics.py` (`LiveMetrics` accumulators + `report()` fields, CSV), hook in
-  `main.py:_live_process` / `analytics._speed` to emit per-track raw-speed+row. Safe to push.
-  ⚠️ 라이브 검증 필요: `GET /eval/report` → `qualifying_tracks > 0`
+---
 
-- **Step 2 — Stop ITS driving speed (isolated, reversible).** ✅ 완료. Add `ITS_DRIVES_SCALE` (default
-  **False**) in `config.py`; gate `analytics.calibrate_from_its` and `main.py:_update_its_speed`
-  save so `speed_scale` stays 1.0; keep `_inject_its_speed` fields as display-only. Push.
+### Reuse 목록
 
-- **Step 3 — Lane-marking detection module.** ✅ 완료. New `lane_markings.py` (or function in
-  `transform.py`) detecting lane lines → lateral lane-width obs + longitudinal dashed-period obs;
-  verified constants (B.1) in `config.py`, selected by NodeLink `road_rank`. Wire detections into
-  diagnostics/logging only (no solver change yet) so it's observable and safe to push.
-  자체 테스트 PASS: `lane_w_obs=2, dash_obs=0` (합성 프레임 정상)
-
-- **Step 4 — Multi-anchor solver + free focal (the core accuracy change).** ✅ 완료. `camera_pose.py`:
-  extend `solve_pose`/`_residuals`/`_initial_opt` to take vehicle-width + lane-width + dash-period
-  anchors and free `focal` when anchors span enough depth (`FOCAL_FREE_MIN_OBS`,
-  `FOCAL_FREE_MIN_ROW_FRAC`); extend `_self_test` with a longitudinal-anchor trial that recovers
-  focal. `transform.auto_calibrate_from_frame` feeds the anchors. Push.
-  자체 테스트 ALL PASS: `focal-recovery long_err=0.7%, Δf=1.4%`
-
-- **Step 5 — Auto-cali robustness + quality score.** ⬜ 미시작. Edge/marking disambiguation, plausibility
-  bounds on `H`/`pitch`, and a calibration **quality score** (anchor reprojection + depth-invariance)
-  beyond `residual_px`; cross-check measured vs NodeLink road width. Push.
-
-- **Step 6 — Digital-twin display.** ⬜ 미시작. Add measured `cam_h_m/pitch_deg/focal_px`, measured road
-  width, and quality score to `camera_ready`/`auto_calibrated`; render in the *Auto Calibration
-  Estimate* card (`App.jsx`); optional anchor overlay in `CctvPlayer.jsx`. Push.
-
-- **Step 7 — Docs.** ⬜ 미시작. Refresh `CODE_LOGIC.md` (multi-anchor calibration, lane-marking module, ITS
-  demotion, diagnostics, display fields) and **fix existing drift**: `calibrate_from_its` docstring
-  says `alpha=0.99` (real: adaptive `0.15/0.05/0.01`, 단 ITS_DRIVES_SCALE=False라 실행 안 됨);
-  §8 says eval → `backend/eval_*.csv` but code writes `backend/logs/` (`metrics.LOGS_DIR`);
-  undocumented `min(corr·speed_scale, 3.0)` cap and `_corr_y_ema` (0.7/0.3) y-smoothing in `_speed`. Push.
-
-## Reuse (don't reinvent)
-- `camera_pose._project/_backproject/_road_to_world/_boundary_curve` for anchor reprojection.
-- `transform._scale_obs`, `VEHICLE_WIDTHS_M`, `_apply_homography_corners` (shared cali tail).
-- `metrics.LiveMetrics` + `stats()`; `camera_pose._self_test` synthetic round-trip.
-- Existing Hough/edge pipeline in `auto_calibrate_from_frame` (extend, don't replace).
-- `App.jsx` `CollapsibleCard` for the new measured-data card.
-
-## Verification (no ground truth)
-1. **Geometry self-test:** `python camera_pose.py` — ✅ ALL PASS (focal-recovery trial PASS)
-2. **Live self-consistency:** `make dev`, watch 3–4 cameras of differing angle/zoom; via
-   `GET /eval/report` confirm depth-invariance CV ↓ and anchor reprojection residual ↓ vs a
-   baseline capture (before/after). ⚠️ 미확인
-3. **Visual:** anchor overlay matches real lanes; vehicle markers sit on the road; FOV follows the
-   curve; measured road width ≈ visual reality.
-4. **Regression guard:** cameras with weak detection keep fixed focal + fallback ladder unchanged.
-5. **ITS-independence:** with `ITS_DRIVES_SCALE=False`, `speed_scale` stays 1.0; speeds plausible
-   against the YOLO overlay (the user's stated eval method). ✅ 코드 확인 완료
+| 재사용 항목 | 위치 |
+|---|---|
+| `solve_pose` focal-free path | `camera_pose.py:324` |
+| `_load/_save_camera_pose` | `main.py:140,153` |
+| `_load/_save_vehicle_calib` | `main.py:112,126` |
+| `metrics.LiveMetrics` depth-invariance | `metrics.py` |
+| `_apply_homography_corners` | `transform.py` |
+| `CollapsibleCard` | `App.jsx:799` |
+| Hough/Canny/VP body | `auto_calibrate_from_frame` (헬퍼로 추출) |

@@ -26,21 +26,6 @@ const BG_STATUS_COLORS = {
   },
 };
 
-const CLUSTER_THRESH_DEG = 0.00015; // ≈16m — 이 반경 내 카메라를 클러스터로 묶음
-
-function makeClusterIconUrl(count, theme = "dark") {
-  const bg     = theme === "dark" ? "#1e3a5f" : "#dbeafe";
-  const stroke = theme === "dark" ? "#60a5fa" : "#2563eb";
-  const tc     = theme === "dark" ? "#eff6ff" : "#1e3a8a";
-  const label  = count > 9 ? "9+" : String(count);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 46" width="36" height="46">
-    <path d="M18 1 C8.6 1 1 8.6 1 18 C1 29 18 45 18 45 C18 45 35 29 35 18 C35 8.6 27.4 1 18 1Z" fill="${bg}" stroke="${stroke}" stroke-width="2"/>
-    <circle cx="18" cy="18" r="10" fill="${stroke}" opacity="0.3"/>
-    <text x="18" y="23" text-anchor="middle" fill="${tc}" font-size="13" font-weight="800" font-family="system-ui,sans-serif">${label}</text>
-  </svg>`;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-}
-
 function makeCameraIconUrl(status, theme = "dark") {
   const palette = BG_STATUS_COLORS[theme] ?? BG_STATUS_COLORS.dark;
   const { stroke, bg } = palette[status] ?? palette.default;
@@ -235,7 +220,6 @@ export default function MapView({
   viewState,
   onViewStateChange,
   onCctvClick,
-  onClusterClick,
   calibrationMode = false,
   snapNodes = [],
   onMapClick,
@@ -257,37 +241,31 @@ export default function MapView({
   const mapRef = useRef(null);
   const [fontReady, setFontReady] = useState(false);
 
-  // 같은 위치 카메라 클러스터링 (CLUSTER_THRESH_DEG 반경 내 → 하나로 묶음)
-  const { singles, clusterGroups } = useMemo(() => {
+  // 같은 위치(≈16m) 카메라는 대표 1개만 표시 — 팝업 없이 아이콘/레이블 중복 방지.
+  // 선택된 카메라가 그룹 내에 있으면 그 카메라를 대표로 우선 사용.
+  const singles = useMemo(() => {
+    const THRESH = 0.00015;
     const assigned = new Set();
-    const allGroups = [];
+    const result = [];
     for (let i = 0; i < cctvList.length; i++) {
       if (assigned.has(i)) continue;
       const a = cctvList[i];
-      const grp = [a];
+      const group = [i];
       assigned.add(i);
       for (let j = i + 1; j < cctvList.length; j++) {
         if (assigned.has(j)) continue;
         const b = cctvList[j];
-        if (Math.abs(a.lat - b.lat) < CLUSTER_THRESH_DEG &&
-            Math.abs(a.lon - b.lon) < CLUSTER_THRESH_DEG) {
-          grp.push(b);
+        if (Math.abs(a.lat - b.lat) < THRESH && Math.abs(a.lon - b.lon) < THRESH) {
+          group.push(j);
           assigned.add(j);
         }
       }
-      allGroups.push(grp);
+      // 선택된 카메라가 그룹 내에 있으면 그걸 대표로
+      const selectedIdx = group.find((idx) => cctvList[idx].id === selectedCctv?.id);
+      result.push(cctvList[selectedIdx ?? group[0]]);
     }
-    return {
-      singles:       allGroups.filter(g => g.length === 1).map(g => g[0]),
-      clusterGroups: allGroups.filter(g => g.length > 1).map(g => ({
-        id:      `cls-${g[0].id}`,
-        lat:     g[0].lat,
-        lon:     g[0].lon,
-        cameras: g,
-        count:   g.length,
-      })),
-    };
-  }, [cctvList]);
+    return result;
+  }, [cctvList, selectedCctv?.id]);
 
   // severe 클러스터가 해제될 때 초록색으로 잠깐 표시 후 사라짐
   const [resolvingClusters, setResolvingClusters] = useState([]);
@@ -358,60 +336,9 @@ export default function MapView({
     onClick:      ({ object }) => !calibrationMode && object && onCctvClick?.(object),
   }), [singles, calibrationMode, onCctvClick]);
 
-  const clusterHitLayer = useMemo(() => new ScatterplotLayer({
-    id:           "cluster-hit",
-    data:         clusterGroups,
-    getPosition:  (d) => [d.lon, d.lat],
-    getRadius:    22,
-    getFillColor: [0, 0, 0, 0],
-    getLineColor: [0, 0, 0, 0],
-    radiusUnits:  "pixels",
-    pickable:     !calibrationMode,
-    onClick:      (info) => !calibrationMode && info.object && onClusterClick?.(info.object.cameras, info.x, info.y),
-  }), [clusterGroups, calibrationMode, onClusterClick]);
-
   const cameraIcons = useMemo(() => {
     return mapMode === "light" ? CAMERA_ICONS_LIGHT : CAMERA_ICONS_DARK;
   }, [mapMode]);
-
-  const clusterIconLayer = useMemo(() => new IconLayer({
-    id:          "cluster-icons",
-    data:        clusterGroups,
-    getPosition: (d) => [d.lon, d.lat],
-    getIcon:     (d) => {
-      const url = makeClusterIconUrl(d.count, mapMode === "light" ? "light" : "dark");
-      return { url, width: 36, height: 46, anchorX: 18, anchorY: 45 };
-    },
-    getSize:     44,
-    sizeUnits:   "pixels",
-    pickable:    false,
-    updateTriggers: { getIcon: [mapMode] },
-  }), [clusterGroups, mapMode]);
-
-  const clusterLabelLayer = useMemo(() => new TextLayer({
-    id:               "cluster-labels",
-    data:             clusterGroups,
-    getPosition:      (d) => [d.lon, d.lat],
-    getText:          (d) => {
-      const first = d.cameras[0];
-      return lang === "en"
-        ? (first.name_en || first.name_ko || "Cameras")
-        : (first.name_ko || first.name || "카메라");
-    },
-    getSize:          11,
-    getColor:         [147, 197, 253, 220],
-    getPixelOffset:   [0, -62],
-    fontFamily:       '"Segoe UI", system-ui, sans-serif',
-    fontWeight:       700,
-    characterSet:     "auto",
-    fontSettings:     { sdf: false },
-    background:       true,
-    getBackgroundColor: [15, 23, 42, 175],
-    backgroundPadding:  [4, 2, 4, 2],
-    textAnchor:       "middle",
-    alignmentBaseline: "bottom",
-    updateTriggers:   { getText: [lang] },
-  }), [clusterGroups, lang]);
 
   const cctvIconLayer = useMemo(() => new IconLayer({
     id:          "cctv-icons",
@@ -612,9 +539,6 @@ export default function MapView({
     ...(showVehicles ? extraLayers : []),
     roadCenterlineLayer,
     fovLayer,
-    clusterHitLayer,
-    clusterIconLayer,
-    clusterLabelLayer,
     cctvHitLayer,
     cctvIconLayer,
     cctvLabelLayer,
@@ -623,7 +547,6 @@ export default function MapView({
     snapNodeLabelLayer,
   ].filter(Boolean), [
     congestionLayer, resolvingLayer, showVehicles, extraLayers, roadCenterlineLayer, fovLayer,
-    clusterHitLayer, clusterIconLayer, clusterLabelLayer,
     cctvHitLayer, cctvIconLayer, cctvLabelLayer,
     scatterLayer, textLayer, snapNodeLayer, snapNodeLabelLayer,
   ]);

@@ -175,6 +175,21 @@ SCALE_SPARSE_AFTER_FRAMES: int = int(os.getenv("SCALE_SPARSE_AFTER_FRAMES", "600
 # 차량간 속도 outlier 제거 MAD 계수 (한계3 A) — |x-median| > K*MAD 면 이상치.
 SPEED_OUTLIER_MAD_K: float = float(os.getenv("SPEED_OUTLIER_MAD_K", "3.0"))
 
+# ── Warm-up → commit → lock 캘리브레이션 ─────────────────────────────────────
+# 카메라 전환 후 clean-plate 생성을 위한 관측 누적 기간(초). 이 시간 안에 data-driven
+# commit 조건이 충족되면 즉시 lock; 미충족 시 timeout에서 fixed-focal fallback으로 lock.
+WARMUP_MAX_S: float = float(os.getenv("WARMUP_MAX_S", "90.0"))
+# clean-plate commit 체크 주기 (프레임 수).
+WARMUP_EVAL_EVERY: int = int(os.getenv("WARMUP_EVAL_EVERY", "30"))
+# clean-plate 스택 최대 프레임 수 (1/2해상도 그레이스케일 ROI, 메모리 cap).
+CLEANPLATE_MAX_FRAMES: int = int(os.getenv("CLEANPLATE_MAX_FRAMES", "60"))
+# clean-plate 샘플링 간격(초) — 너무 자주 샘플하면 스택이 같은 차량 위치로 포화됨.
+CLEANPLATE_SAMPLE_S: float = float(os.getenv("CLEANPLATE_SAMPLE_S", "0.5"))
+# early-commit 게이트: clean-plate에서 이 수 이상의 dash_obs가 있어야 focal 해방.
+DASH_MIN_OBS: int = int(os.getenv("DASH_MIN_OBS", "3"))
+# early-commit 게이트: clean-plate에서 이 수 이상의 lane_w_obs가 있어야 측면 앵커 신뢰.
+LANE_MIN_OBS: int = int(os.getenv("LANE_MIN_OBS", "2"))
+
 # ── Movement-based direction classification (Task 1) ──────────────────────
 # Along-axis EMA threshold (m) below which direction is kept unchanged.
 DIR_DEADZONE_M: float = float(os.getenv("DIR_DEADZONE_M", "0.10"))

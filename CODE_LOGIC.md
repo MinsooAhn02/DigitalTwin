@@ -202,8 +202,41 @@ along the real road curve instead of a flat plane:
 direction by matching the **image** road-curve sign (`_image_curve_sign`, from the detected lane
 centres) against the **map** curve sign for each candidate direction.
 
-**Automatic calibration from one frame (`auto_calibrate_from_frame`).** Estimates a homography from
-lane geometry when no manual calibration exists. Steps:
+**Warm-up / commit-once / lock calibration pipeline (replaces single-frame 5-attempt loop).** When a
+camera has no saved pose, `LiveTransformer` enters a **warm-up** accumulation phase instead of
+attempting to calibrate from one noisy frame.
+
+Lifecycle:
+1. **Camera switch** — if `camera_pose.json` has a saved pose for `camera_key`, `load_pose_params` is
+   called immediately and `_locked = True` is set; no warm-up. Otherwise `start_warmup(...)` is called
+   and `_warmup_active = True`.
+2. **Warm-up** — each processed frame calls `feed_warmup_frame(frame)`. The method samples frames at
+   `CLEANPLATE_SAMPLE_S = 0.5 s` intervals, stores a **½-resolution grayscale ROI** in `_warmup_stack`
+   (cap `CLEANPLATE_MAX_FRAMES = 60`). Every `WARMUP_EVAL_EVERY = 30` frames it checks if data quality
+   is sufficient for an early commit. If `WARMUP_MAX_S = 90 s` elapses with no early commit, a timeout
+   commit is forced. During warm-up, `main.py` broadcasts `{type: "calibrating", elapsed_s}` every
+   `WARMUP_EVAL_EVERY` frames so the frontend shows a `보정 중 (Ns)` badge.
+3. **Clean plate.** `_build_clean_plate()` computes `np.median(stack, axis=0).astype(np.uint8)` over the
+   collected frames. Because vehicles and compression artefacts are transient, the median removes them and
+   reveals **static lane paint** — producing a vehicle-free image where dashed-line autocorrelation
+   reliably clears the `peak_val ≥ 0.15` gate (`lane_markings.py`), giving `dash_obs ≥ DASH_MIN_OBS = 3`
+   and enabling the focal-free solve (see `camera_pose.py`). This is the root fix for
+   `dash_obs = 0` + median speed overestimation on single-frame calibration.
+4. **Commit** — `commit_calibration(frame_shape)` upscales the clean plate back to full resolution, calls
+   `auto_calibrate_from_frame` on it (the same solve as before), and on success sets `_locked = True`.
+   The solved pose is saved to `camera_pose.json`; the final `fit_scale_model` is run once and saved.
+   `main.py` broadcasts `auto_calibrated` (with `warmup_elapsed_s`, `focal_px`, `residual_px`).
+5. **Locked** — `_transformer.locked` is `True`. Vehicle-scale refit (`fit_scale_model`) is **gated** by
+   `not _transformer.locked`, so the scale never drifts after commit. Pose also never re-solves.
+6. **Re-calibrate** — `POST /recalibrate` calls `_atomic_delete_json(CAMERA_POSE_PATH, cam_key)`,
+   `_transformer.recalibrate()` (clears `_locked`, `_warmup_active`, `_warmup_stack`), then
+   `start_warmup(...)`. The frontend's Re-calibrate button triggers this endpoint.
+
+**`_locked` vs `_is_calibrated`.** `_is_calibrated` is set only by the 4-point **manual** calibration
+(`update_from_calibration`). `_locked` is the warm-up system's flag. The warm-up runs only when
+`not _is_calibrated`, so manual calibration always takes priority and is never overwritten by warm-up.
+
+**`auto_calibrate_from_frame`.** Estimates a homography from lane geometry. Steps:
 1. Gray → Gaussian blur → Canny; keep only the lower 55 % (road ROI).
 2. `HoughLinesP`; keep diagonals (< 60° from vertical).
 3. Sample road edges at 5 vertical levels; per level take the 15th/85th percentile x as left/right.
@@ -212,48 +245,57 @@ lane geometry when no manual calibration exists. Steps:
    fallback uses the median of pairwise Hough intersections).
 6. **Direction decision:** curvature match if available, else compare the VP horizontal angle
    `φ = atan2(vp_x − w/2, fy)` against the camera→snap bearing (flip 180° if the reverse candidate is
-   closer), else fall back to `vp_x > 0.55·w`. Skipped entirely when `fix_direction=True`
-   (a name-derived bearing is already trusted).
-7. **Road-model pose solver (primary, `camera_pose.solve_pose`).** Feeds the multi-level lane edges +
-   VP + NodeLink `road_width_m` to the pose solver (next subsection). On success with
-   `residual_px < POSE_RESIDUAL_MAX_PX` (8 px) it builds the 4 image↔GPS corners (`pose_to_corners`) →
-   `_apply_homography_corners` and returns immediately (`method="pose"`, carrying
-   `cam_h_m/pitch_deg/yaw_deg/near_m/far_m` for the FOV).
-8. **Heuristic trapezoid fallback** (only when the pose solve fails or is low-quality). The legacy
-   estimate: pitch `= atan2(h/2 − vp_y, fy)`, `fy = h·1.2`; `d_near = road_width_m·fy/road_px_w`;
+   closer), else fall back to `vp_x > 0.55·w`. Skipped entirely when `fix_direction=True`.
+7. **Road-model pose solver (primary, `camera_pose.solve_pose`).** Feeds multi-level lane edges + VP +
+   dashed-line observations (`dash_obs`, `dash_period_px` from `lane_markings.detect_lane_markings`) +
+   NodeLink `road_width_m` to the pose solver. On success with `residual_px < POSE_RESIDUAL_MAX_PX`
+   (8 px) it builds the 4 image↔GPS corners → `_apply_homography_corners` and returns
+   (`method="pose"`, carrying `cam_h_m/pitch_deg/yaw_deg/focal_px/near_m/far_m/residual_px`).
+8. **Heuristic trapezoid fallback** (only when the pose solve fails). The legacy estimate: pitch
+   `= atan2(h/2 − vp_y, fy)`, `fy = h·1.2`; `d_near = road_width_m·fy/road_px_w`;
    `cam_h = d_near·tan(pitch+vfov/2)` (3–40 m); trapezoid `src_pts` → GPS corners → homographies.
 
-Either path leaves `is_calibrated` **False** (auto-calib is an approximation) so the UI still shows
-"not calibrated" and `speed_scale` keeps correcting. `_apply_homography_corners` is the shared tail that
-builds `_H_gps`/`_H_meter` from the 4 image↔GPS corners and refreshes the curve-mapping snap/bearing.
+Either path leaves `is_calibrated` **False**. `_apply_homography_corners` builds `_H_gps`/`_H_meter`.
 
-**Road-model camera-pose solver (`camera_pose.py`).** A pinhole-camera pose fit that replaces the
-trapezoid heuristic with a physically-meaningful pose, so calibration degrades gracefully and persists
-per camera.
+**Road-model camera-pose solver (`camera_pose.py`).** A pinhole-camera pose fit with optional
+focal-length recovery.
 - **Model.** World frame is nadir-aligned ENU at the snap point (camera at `(0,0,H)`, ground `Z=0`).
-  Camera rotation is pitch-only; the road carries `yaw` and lateral offset `x0`. Parameters
-  `θ = (H, pitch, yaw, x0)`; **focal is fixed** at `FOCAL_RATIO·h` (≈45° FoV).
-- **Solve (`solve_pose`).** `scipy.optimize.least_squares` (soft-L1) minimises, over the 5 sampled rows,
-  the reprojection residual of the projected left/right road boundaries (`±road_width_m/2`) against the
-  detected lane edges, plus a vanishing-point residual. Road width is the metric anchor.
-- **Output (`pose_to_corners`).** Projects 4 road-frame corners to image (`src_pts`) and to GPS via
-  snap + bearing (`dst_gps`); the shared tail turns them into the two homographies, so all downstream
-  (curved Stage-2 mapping, speed) is unchanged.
-- **Why 4 params, focal fixed.** Lane edges give a single vanishing point, so road width fixes the
-  **lateral** metric scale but not the **longitudinal** (depth/speed) scale — that is focal/FoV-dependent
-  and not observable from edges alone. Solving focal is unstable; fixing it keeps lateral accuracy
-  (<1 % in the synthetic self-test) and leaves the residual longitudinal scale to `speed_scale` (ITS).
-  The solver's job is removing the heuristic's *shape* error, not replacing `speed_scale`.
-- **Persistence & cold-start.** `get_pose_params`/`load_pose_params` serialise the pose to
-  `camera_pose.json` per `camera_key`; on camera switch the saved pose seeds the solver (`_pose_prior`)
-  so each session refines the last. `apply_prior_pose` applies the saved pose directly when edges are too
-  weak to solve; `rough_pose_from_vehicles` is a last-resort cold-start from the first 1–3 vehicle bboxes
-  (marked high-residual so it is overwritten once real edges/observations accumulate). A `__main__`
-  synthetic round-trip self-test validates the geometry.
-- **Vehicle scale model demoted.** The legacy apparent-size model (`fit_scale_model`, linear
-  `1/scale = B·v + C` from bbox widths, persisted to `vehicle_calib.json`) is now a **secondary**
-  refinement; its minimum-observation threshold is adaptive (`SCALE_MIN_OBS` 12 → `SCALE_MIN_OBS_SPARSE`
-  8 in light traffic, after `SCALE_SPARSE_AFTER_FRAMES`).
+  Camera rotation is pitch-only; the road carries `yaw` and lateral offset `x0`. `Pose` dataclass:
+  `H_m, pitch_deg, yaw_deg, focal_px, x0_m`.
+- **Fixed-focal solve (`solve_pose`, default path).** `scipy.optimize.least_squares` (soft-L1)
+  minimises, over 5 sampled rows, the reprojection residual of the projected left/right road boundaries
+  (`±road_width_m/2`) against detected lane edges, plus a vanishing-point residual. Focal fixed at
+  `FOCAL_RATIO·h`. `θ = (H, pitch, yaw, x0)`.
+- **Focal-free solve (when `dash_obs ≥ FOCAL_FREE_MIN_DASH_OBS`).** If dashed-line observations from
+  `lane_markings.detect_lane_markings` are available and pass the `FOCAL_FREE_MIN_ROW_FRAC` gate, focal
+  is added as a 5th free parameter. The dashed-line period (in pixels) anchors the **longitudinal**
+  scale that road-width alone cannot observe — fixing the root cause of speed overestimation. On the
+  clean plate this gate reliably fires; on a single live frame it rarely does.
+- **Output (`pose_to_corners`).** Projects 4 road-frame corners to image and GPS; shared tail builds
+  both homographies.
+- **Persistence & cold-start.** `get_pose_params`/`load_pose_params` serialise the 5-field `Pose` to
+  `camera_pose.json` per `camera_key`. `apply_prior_pose` uses the saved pose when edges are too weak.
+  `rough_pose_from_vehicles` is a last-resort cold-start. A `__main__` synthetic self-test validates.
+- **Vehicle scale model gated on lock.** `fit_scale_model` (linear `1/scale = B·v + C` from bbox
+  widths, persisted to `vehicle_calib.json`) runs adaptively during warm-up but is **frozen on lock**
+  (`not _transformer.locked` guard in `main.py`). Minimum-obs threshold is adaptive
+  (`SCALE_MIN_OBS` 12 → `SCALE_MIN_OBS_SPARSE` 8 after `SCALE_SPARSE_AFTER_FRAMES`).
+
+### 4.3b `lane_markings.py` — dashed lane marking detection
+
+`detect_lane_markings(frame, roi_top_frac, road_rank)` extracts dashed-line observations used by the
+focal-free pose solver.
+
+1. Convert to grayscale, apply Gaussian blur, crop to the road ROI (`roi_top_frac..h`).
+2. For each of `N_STRIPS = 5` horizontal strips: compute a column-intensity profile; subtract a 1-D
+   Gaussian baseline; run 1-D autocorrelation; find the dominant peak at lags `LAG_MIN..LAG_MAX`; if
+   `peak_val ≥ 0.15`, record the period (`period_px`) and the strip's vertical centre pixel.
+3. Fit a linear model `period_px = A·y_px + B` (period grows with depth) to passing strips; the slope
+   encodes the dashed-line perspective foreshortening and is what `solve_pose` uses.
+4. Returns `LaneMarkingResult(dash_obs, dash_period_px, dash_period_slope, lane_w_obs, ...)`; `dash_obs`
+   is the number of strips that cleared the autocorrelation gate. On a **clean plate** (median of 30–60
+   frames) this reliably returns `dash_obs ≥ 3`; on a single compressed highway frame it typically
+   returns 0 (motivating the warm-up accumulator in §4.3).
 
 **Fallback grid (`update_gps_center`).** With no calibration at all, builds a trapezoidal homography
 (top edge 25–75 % of width, near 15 m / far 80 m / half-width 25 m) rotated to the road bearing. Also
@@ -401,6 +443,8 @@ older than `retention_cutoff(HISTORY_RETENTION_DAYS = 14)`.
   - Tracker: `TRACKER_TIER`, `BYTE_TRACK_FPS=30`, `BYTE_TRACK_BUFFER=30`
   - Speed: `SPEED_WINDOW_S=0.7s` → `SPEED_WINDOW_FRAMES`, `SPEED_EMA_ALPHA=0.35`, `SPEED_SPIKE_FACTOR=2.5`, `SPEED_STOP_SPAN_S=1.0` (imported in analytics but stop-decay uses fixed 0.6 multiplier), `SPEED_MIN_KPH=5`, `MAX_REASONABLE_KPH=180`, `SPEED_JITTER_THRESHOLD_M=0.5`, `SPEED_OUTLIER_MAD_K=3.0`, `SPEED_TRUST_MAX_DEPTH_M=100` (GPS distance cutoff; vehicles beyond this are `speed_reliable=False`)
   - Pose/scale: `POSE_RESIDUAL_MAX_PX=8.0`, `SCALE_MIN_OBS=12`, `SCALE_MIN_OBS_SPARSE=8`, `SCALE_SPARSE_AFTER_FRAMES=600`
+  - Warm-up / clean-plate: `WARMUP_MAX_S=90.0`, `WARMUP_EVAL_EVERY=30`, `CLEANPLATE_MAX_FRAMES=60`, `CLEANPLATE_SAMPLE_S=0.5`, `DASH_MIN_OBS=3`, `LANE_MIN_OBS=2`
+  - Focal-free solve: `FOCAL_FREE_MIN_DASH_OBS` (min strips for free-focal), `FOCAL_FREE_MIN_ROW_FRAC` (min depth span)
   - Direction: `DIR_DEADZONE_M=0.10`, `DIR_EMA_ALPHA=0.4`
   - Bearing refinement: `BEARING_REFINE_MIN_SAMPLES=30`, `BEARING_REFINE_EMA_ALPHA=0.15`, `BEARING_REFINE_INTERVAL_FRAMES=30`, `BEARING_BROADCAST_MIN_DEG=1.5`
   - Road-shape learning: `ROAD_PTS_REFINE_MIN_SAMPLES=50`, `ROAD_PTS_REFINE_NBINS=10`
@@ -442,6 +486,7 @@ older than `retention_cutoff(HISTORY_RETENTION_DAYS = 14)`.
 | `POST /background/add`, `/background/remove/{key}`, `GET /background/status` | multi-camera monitoring |
 | `GET /history/cameras`, `/history/series`, `/history/peak`, `/history/export.csv` | history analytics |
 | `POST /viewer-active` | report tab visibility (pauses live GPU work) |
+| `POST /recalibrate` | delete saved pose for current camera, clear `_locked`, restart warm-up |
 | `POST /stop-camera`, `GET /health`, `/runtime-config`, `/speed-debug/{state}` | control/diagnostics |
 
 **WebSockets.** `/ws` (broadcast sink) and `/ws/detect` (browser JPEG → annotate → analytics).
@@ -449,7 +494,8 @@ Messages on `/ws`:
 | Type | Trigger |
 |------|---------|
 | `camera_ready` | camera switch complete (road_name, bearing, snap, road_width, road_pts, roi_gps_ring, calibrated) |
-| `auto_calibrated` | pose solver succeeded or bearing changed (heading, near_m, far_m, road_width_m, roi_gps_ring) |
+| `calibrating` | warm-up in progress (`elapsed_s`, `stack_frames`); sent every `WARMUP_EVAL_EVERY` frames |
+| `auto_calibrated` | warm-up commit succeeded or bearing changed (heading, near_m, far_m, road_width_m, focal_px, residual_px, warmup_elapsed_s, roi_gps_ring) |
 | `camera_error` | stream open failed |
 | `background_status` | background camera status change |
 | `congestion_clusters` | cluster recompute after history tick |
@@ -466,12 +512,18 @@ the BoxMOT tracker, kicks an async ITS speed fetch, queries NodeLink (`get_road_
 bearing ?? link bearing**), stores `_current_cam`, and queues the stream switch for `live_loop`.
 
 **`live_loop` camera-switch block.** Switches the OpenCV stream, sets the road corridor
-(`set_road_corridor`), restores saved ROI, manual calibration, the scale model **and the pose prior**,
-schedules 5 auto-calibration attempts when there's no manual calibration, computes road width, and
-broadcasts `camera_ready` (then `auto_calibrated` once calibration succeeds). On a successful pose
-calibration the solved pose is written back to `camera_pose.json` (`_save_camera_pose`); if all 5
-lane-detection attempts fail it falls back to `apply_prior_pose` (saved pose) before the GPS-grid
-approximation.
+(`set_road_corridor`), restores saved ROI, manual calibration, and the scale model. If a saved pose
+exists (`_load_camera_pose`), it is applied via `load_pose_params` and `_locked = True` is set
+immediately — no warm-up. Otherwise `start_warmup(...)` is called. Computes road width, broadcasts
+`camera_ready`.
+
+**`live_loop` warm-up state machine.** While `_warmup_active` and `not _is_calibrated`:
+- Each frame calls `_transformer.feed_warmup_frame(frame)` which samples frames into `_warmup_stack`.
+- Every `WARMUP_EVAL_EVERY` frames `main.py` broadcasts `{type: "calibrating", elapsed_s}`.
+- When `feed_warmup_frame` signals ready (quality gate or timeout), `commit_calibration(frame.shape)`
+  is called: builds the median clean plate, runs `auto_calibrate_from_frame`, saves the pose and final
+  scale fit, sets `_locked = True`, and broadcasts `auto_calibrated`.
+- Vehicle-scale refit (`fit_scale_model`) is gated by `not _transformer.locked` so it stops after commit.
 
 **`live_loop` bearing auto-refinement.** Every `BEARING_REFINE_INTERVAL_FRAMES = 30` frames, calls
 `analytics.refine_bearing()`. If the refined bearing differs from the last broadcast by ≥
@@ -537,12 +589,13 @@ the bottom-centre of the map. Its colours adapt to `mapMode`: light mode uses a 
 card (`rgba(17,24,39,0.88)`, `#374151` border). The 📷 icon gets a cyan glow on dark and no filter
 on light. Size and padding are slightly larger than before (14 px text, 12 px 20 px padding).
 
-**`CollapsibleCard`.** Defined inline in `App.jsx`. Accepts an optional `description` prop; when
-provided a small `ℹ` button appears in the card header. Clicking it opens a **centered fixed-position
-modal overlay** (dark card, `zIndex 9999`, click-outside to dismiss) showing the description text.
-The Auto Calibration Estimate and ITS Speed Comparison cards both pass a bilingual description string
-(via `t("app.autoCalibDesc")` / `t("app.itsCompareDesc")`) explaining what the section does and what
-each displayed value means.
+**`CollapsibleCard`.** Defined inline in `App.jsx`. Accepts a `label` (string or React node) and an
+optional `description`. When `description` is provided a small `ℹ` button opens a modal overlay.
+The **Auto Calibration** card: (1) becomes visible as soon as `calibrating` is non-null (i.e., during
+warm-up, before the commit), showing a `보정 중 (Ns)` / `Calibrating (Ns)` amber badge in the card
+header; (2) after commit shows `focal_px` (px) and `residual_px` (colour-coded green < 5 / yellow
+< 10 / red ≥ 10) in addition to the existing geometry fields; (3) always shows a **Re-calibrate /
+재보정** button (when a camera is selected) that calls `POST /recalibrate`.
 
 ### 5.2 `MapView.jsx` — deck.gl rendering
 Layer z-order (bottom→top): `congestion-clusters` → trails (`extraLayers`) → `cctv-fov` →
@@ -550,6 +603,11 @@ Layer z-order (bottom→top): `congestion-clusters` → trails (`extraLayers`) �
 `vehicles` + `vehicle-labels` (only at zoom ≥ 15) → `snap-nodes` (calibration only). All layers are
 memoized; `getTooltip` renders vehicle / node / congestion / CCTV tooltips. Map mode cycles
 dark→light→satellite.
+
+**CCTV location deduplication (`singles` useMemo).** Same-location cameras (within
+`THRESH = 0.00015°` ≈ 16 m in both lat and lon) are grouped and only one representative icon+label
+is rendered per location group, eliminating overlapping Korean + English name labels. Within a group
+the currently-selected camera takes priority so its name is always visible.
 
 **Three FOV polygon strategies** (priority):
 1. **Manual** — `selectedCctv.calibGpsRing`: the actual 4 clicked GPS corners.
@@ -583,8 +641,10 @@ Recharts line charts for vehicle count (average + peak) and average speed over 6
 
 ### 5.7 `useWebSocket.js`
 Single `/ws` connection with 3 s auto-reconnect. Demultiplexes message types into
-`frameData, cameraReadyInfo (+counter), autoCalibInfo, backgroundStatus, congestionClusters, roiUpdated`
-and an `error` string.
+`frameData, cameraReadyInfo (+counter), calibrating, autoCalibInfo, backgroundStatus, congestionClusters, roiUpdated`
+and an `error` string. `calibrating` is `{ elapsed_s } | null`; set on `"calibrating"` messages,
+cleared on `"camera_ready"` and `"auto_calibrated"`. `autoCalibInfo` now includes `focal_px` and
+`residual_px` from the `auto_calibrated` payload.
 
 ### 5.7b `VehicleTable.jsx` — direction tabs
 The vehicle list now has a 3-tab toggle (`All / Inbound / Outbound`) above the table. A local
@@ -619,10 +679,12 @@ with a high-contrast variant for light/satellite maps.
    with a ±10% per-update step clamp, then saved per camera. The scale accumulates across sessions as a
    running soft-reference correction; `speed_reliable` vehicles (GPS ≤ 100 m from snap) feed the
    calibration window exclusively.
-7. **Road-model pose calibration** — on switch, lane edges + VP + NodeLink width/bearing →
-   `camera_pose.solve_pose` → homography; the solved pose is saved to `camera_pose.json` and seeds the
-   next session's solve (per-camera refinement). Edges too weak → saved prior; no prior → rough
-   vehicle-bbox pose; nothing → GPS-grid approximation.
+7. **Warm-up / commit-once pose calibration** — on switch with no saved pose, warm-up begins:
+   frames are accumulated into a ring buffer; `np.median(stack)` produces a vehicle-free clean plate;
+   `detect_lane_markings` on the clean plate reliably returns `dash_obs ≥ 3`; `solve_pose` fires
+   the focal-free path; pose is saved to `camera_pose.json`; `_locked = True` freezes further
+   refits. Next session: saved pose is applied immediately (no warm-up). Manual re-calibrate:
+   `POST /recalibrate` → delete saved pose → restart warm-up.
 
 ---
 
@@ -651,15 +713,16 @@ with a high-contrast variant for light/satellite maps.
   (longitudinal) scale error over time.
 - **Bidirectional centre fix** uses the link's overall F→T bearing, not the local snap-segment bearing
   (which differs 40–60° on curves and would fail the ±60° reverse-link test).
-- **Auto-calibration limits & the monocular lateral/longitudinal split.** The road-model pose solver
-  fixes the homography's *shape* (lateral position, lane offset, curve), but a single road vanishing
-  point cannot recover the *longitudinal* (depth → speed) scale from lane width alone — that depends on
-  the focal length/FoV, which is fixed at `FOCAL_RATIO·h` (≈45° FoV). So lateral metric is accurate
-  (<1 % in the self-test) while the absolute longitudinal/speed scale carries a focal-dependent error
-  (~±15–20 % per FoV mismatch) that **`speed_scale` (ITS) absorbs** — the pose solver does not replace
-  it. Road width is still estimated from NodeLink lane count, not measured; lane detection fails at
-  night / in rain / in dense traffic, in which case the saved pose prior (or, last, the GPS-grid
-  approximation) is used. `is_calibrated` stays False to prompt manual calibration.
+- **Auto-calibration & the monocular lateral/longitudinal split.** A single road vanishing point
+  cannot recover the *longitudinal* (depth → speed) scale from lane width alone — that depends on the
+  focal length/FoV. The warm-up clean plate solves this by letting `detect_lane_markings` see static
+  dashed lane paint that is invisible on a single compressed frame; the dashed-line period anchors the
+  longitudinal scale and enables the **focal-free** `solve_pose` path (5-parameter `θ = (H, pitch, yaw,
+  x0, focal)`). Without this, focal is fixed at `FOCAL_RATIO·h` and the residual ~±15–20% longitudinal
+  error falls to `speed_scale` (ITS) to absorb. After lock, the vehicle-scale refit is frozen so the
+  calibrated pose is never destabilised by noisy bbox-width estimates. Road width is still estimated from
+  NodeLink lane count; lane detection can fail at night/rain/dense traffic, in which case the saved
+  prior or GPS-grid approximation is used. `is_calibrated` stays False to prompt manual calibration.
 - **No camera metadata.** The ITS `cctvInfo` API exposes only position/name/URL — no installation
   height, heading, or FoV — so the pose must be solved from the image + road model, not read off.
 - **"Always ×2" road width** assumes bidirectional carriageways; one-way roads are over-wide.

@@ -2042,13 +2042,10 @@ async def live_loop(stream) -> None:
                     _auto_calib_road_rank    = _road_rank
                     oneway = cam.get("is_oneway", False)
                     logger.info("도로폭: %.1fm (%s)", _cam_road_width_m, "편도" if oneway else "양방향")
-                    # 저장 prior pose가 있으면 적용 후 즉시 lock (warm-up 스킵)
+                    # 저장 prior pose가 있으면 seed로 로드 (첫 프레임에서 apply_prior_pose → lock)
                     _prior = _load_camera_pose(cam_key)
                     if _prior:
-                        _transformer._pose_prior = camera_pose.Pose(**{
-                            k: _prior[k] for k in ("H_m", "pitch_deg", "yaw_deg", "focal_px")
-                        })
-                        _h0, _w0 = 0, 0  # apply_prior_pose는 frame shape이 필요 → 루프에서 처리
+                        _transformer.load_pose_params(_prior)  # _pose_prior 설정
                         _transformer._warmup_params = {
                             "bearing_deg": analytics.road_bearing_deg or 0.0,
                             "road_width_m": _cam_road_width_m,
@@ -2058,7 +2055,7 @@ async def live_loop(stream) -> None:
                             "road_rank": _road_rank,
                         }
                         _transformer._warmup_active = False
-                        _transformer._locked = False  # frame 첫 수신 시 apply_prior_pose 후 lock
+                        _transformer._locked = False
                         logger.info("저장 pose 있음 — 첫 프레임에서 prior 적용 후 lock 예정")
                     else:
                         _transformer.start_warmup(

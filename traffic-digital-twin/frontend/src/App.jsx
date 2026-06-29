@@ -35,7 +35,7 @@ function trailReducer(state, vehicles) {
 }
 
 export default function App() {
-  const { frameData, isConnected, error, cameraReady, cameraReadyInfo, autoCalibInfo, backgroundStatus, congestionClusters, cameraStatus } = useWebSocket();
+  const { frameData, isConnected, error, cameraReady, cameraReadyInfo, calibrating, autoCalibInfo, backgroundStatus, congestionClusters, cameraStatus } = useWebSocket();
   const { t, lang, setLang } = useLang();
   const [trailMap, dispatchTrail]         = useReducer(trailReducer, new Map());
   const [cctvList, setCctvList]           = useState([]);
@@ -644,18 +644,52 @@ export default function App() {
                 </CollapsibleCard>
               )}
 
-              {autoCalibInfo?.cam_h_m != null && (
-                <CollapsibleCard label={t("app.autoCalib")} defaultOpen={false} description={t("app.autoCalibDesc")}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 12, color: "#94a3b8" }}>
-                    <span>{t("app.calibCamH")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.cam_h_m} m</b>
-                    <span>{t("app.calibRoadW")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_width_m} m</b>
-                    <span>{t("app.calibNear")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.near_m} m</b>
-                    <span>{t("app.calibFar")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.far_m} m</b>
-                    {autoCalibInfo.road_length_m != null && <>
-                      <span>{t("app.calibRoadLen")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_length_m} m</b>
-                    </>}
-                    <span>{t("app.calibTilt")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.pitch_deg}°</b>
-                  </div>
+              {(autoCalibInfo?.cam_h_m != null || calibrating) && (
+                <CollapsibleCard
+                  label={
+                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      {t("app.autoCalib")}
+                      {calibrating && (
+                        <span style={{ fontSize: 10, background: "#f59e0b", color: "#1c1917", borderRadius: 4, padding: "1px 6px", fontWeight: 700 }}>
+                          {t("app.calibrating", { n: Math.round(calibrating.elapsed_s) })}
+                        </span>
+                      )}
+                    </span>
+                  }
+                  defaultOpen={false}
+                  description={t("app.autoCalibDesc")}
+                >
+                  {autoCalibInfo?.cam_h_m != null && (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 12, color: "#94a3b8" }}>
+                      <span>{t("app.calibCamH")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.cam_h_m} m</b>
+                      <span>{t("app.calibRoadW")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_width_m} m</b>
+                      <span>{t("app.calibNear")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.near_m} m</b>
+                      <span>{t("app.calibFar")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.far_m} m</b>
+                      {autoCalibInfo.road_length_m != null && <>
+                        <span>{t("app.calibRoadLen")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.road_length_m} m</b>
+                      </>}
+                      <span>{t("app.calibTilt")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{autoCalibInfo.pitch_deg}°</b>
+                      {autoCalibInfo.focal_px != null && <>
+                        <span>{t("app.calibFocal")}</span><b style={{ color: "#e2e8f0", textAlign: "right" }}>{Math.round(autoCalibInfo.focal_px)} px</b>
+                      </>}
+                      {autoCalibInfo.residual_px != null && <>
+                        <span>{t("app.calibResidual")}</span><b style={{ color: autoCalibInfo.residual_px < 5 ? "#4ade80" : autoCalibInfo.residual_px < 10 ? "#fbbf24" : "#f87171", textAlign: "right" }}>{autoCalibInfo.residual_px.toFixed(1)} px</b>
+                      </>}
+                    </div>
+                  )}
+                  {calibrating && !autoCalibInfo?.cam_h_m && (
+                    <div style={{ fontSize: 12, color: "#94a3b8", textAlign: "center", padding: "4px 0" }}>
+                      {t("app.calibrating", { n: Math.round(calibrating.elapsed_s) })}
+                    </div>
+                  )}
+                  {selectedCctv && (
+                    <button
+                      onClick={() => fetch(`${API_BASE}/recalibrate`, { method: "POST" }).catch(() => {})}
+                      style={{ marginTop: 8, width: "100%", fontSize: 11, padding: "4px 0", background: "transparent", border: "1px solid #475569", borderRadius: 4, color: "#94a3b8", cursor: "pointer" }}
+                    >
+                      {t("app.recalibrate")}
+                    </button>
+                  )}
                 </CollapsibleCard>
               )}
 

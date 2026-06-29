@@ -19,6 +19,7 @@ from config import PIXEL_POINTS, GPS_POINTS, REAL_WORLD_WIDTH_M, REAL_WORLD_HEIG
 from config import POSE_RESIDUAL_MAX_PX, SCALE_MIN_OBS, FAR_CAP_M
 import math
 import camera_pose
+import lane_markings as _lm
 
 CALIBRATION_PATH = Path(__file__).parent / "calibration_data.json"
 
@@ -98,6 +99,10 @@ class PerspectiveTransformer:
         self._snap_meter_y:  float        | None = None    # snap의 H_meter y좌표 (북쪽)
         self._curve_bearing_rad: float = 0.0               # 도로 방위각 (라디안)
         self._curve_dir_sign: float = 1.0
+
+        # ── Step 3: 차선 표시 검출 결과 (로깅 전용; Step 4에서 solver에 공급) ──
+        self._lane_marking_result: _lm.LaneMarkingResult | None = None
+        self._lane_marking_road_rank: str = ""
 
     # ──────────────────────────────────────────────────────────────────
     def _transform_point(self, H: np.ndarray, u: float, v: float) -> tuple[float, float]:
@@ -733,6 +738,7 @@ class PerspectiveTransformer:
         fix_direction: bool = False,
         cam_lat: float | None = None,
         cam_lon: float | None = None,
+        road_rank: str = "",
     ) -> tuple[bool, float, dict | None]:
         """차선 감지(Hough)로 원근 파라미터 자동 추정.
 
@@ -765,6 +771,12 @@ class PerspectiveTransformer:
         )
         if lines is None or len(lines) < 3:
             return False, bearing_deg, None
+
+        # ── Step 3: 차선 표시 검출 (로깅 전용) ──────────────────────────
+        lm_result = _lm.detect_lane_markings(frame, road_rank=road_rank,
+                                             roi_top_frac=roi_top / h)
+        self._lane_marking_result  = lm_result
+        self._lane_marking_road_rank = road_rank
 
         diag: list[tuple] = []
         for l in lines:

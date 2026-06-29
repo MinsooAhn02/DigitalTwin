@@ -330,6 +330,7 @@ _label_ann = sv.LabelAnnotator(text_scale=0.4, text_thickness=1, text_padding=3)
 # 차선 감지 자동 캘리브레이션 상태
 _auto_calib_attempts: int  = 0    # 남은 시도 횟수 (0 = 비활성)
 _auto_calib_road_width_m: float = 7.0  # lanes × 2 × lane_width_m
+_auto_calib_road_rank: str = ""   # NodeLink road_rank (차선 표시 규격 선택용)
 # 마지막 auto_calibrated 브로드캐스트 내용 (bearing 재보정 시 재사용)
 _last_calib_info: dict = {}
 _last_broadcast_bearing: float = 0.0
@@ -1981,9 +1982,10 @@ async def live_loop(detector, stream) -> None:
                     _cam_road_width_m = max(1, _ri_lanes) * 2 * _ri_lane_w
 
                 # 수동 캘리브레이션 없으면 차선 감지 자동 보정 예약
-                global _auto_calib_attempts, _auto_calib_road_width_m
+                global _auto_calib_attempts, _auto_calib_road_width_m, _auto_calib_road_rank
                 if not _manual_cal_loaded:
                     _auto_calib_road_width_m = _cam_road_width_m
+                    _auto_calib_road_rank    = _road_rank
                     oneway = cam.get("is_oneway", False)
                     logger.info("도로폭: %.1fm (%s)", _cam_road_width_m, "편도" if oneway else "양방향")
                     _auto_calib_attempts = 5  # 최대 5프레임 시도
@@ -2072,6 +2074,7 @@ async def live_loop(detector, stream) -> None:
                 _current_cam.get("has_name_bearing", False),
                 _current_cam.get("lat"),
                 _current_cam.get("lon"),
+                _auto_calib_road_rank,
             )
             if ok:
                 logger.info("차선 감지 자동 캘리브레이션 완료 (bearing=%.1f°)", used_bearing)

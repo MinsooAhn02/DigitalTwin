@@ -1,0 +1,143 @@
+
+an: Update traffic_digital_twin.tex to match the actual code
+
+ Context
+
+ The paper traffic_digital_twin.tex describes the calibration pipeline as it existed
+ before two major code changes that have since landed (git: 9f0ad52 "Replace
+ single-frame auto-calib with warm-up/lock pipeline", d94d898 "W3 — warm-up badge,
+ recalibrate button, focal/residual"). The paper still says auto-calibration "estimates a
+ homography from one frame" and that focal length is fixed at 1.2×h — both obsolete. The
+   real, substantive algorithmic improvements (a warm-up clean-plate accumulator and a
+   focal-free pose solve driven by dashed-line period) are missing entirely, even though
+   they are the actual root-cause fix for the longitudinal speed-scale problem the paper
+ spends its whole Discussion on.
+
+ CODE_LOGIC.md was written as a convenience map but has drifted from the code (e.g. it
+ names FOCAL_FREE_MIN_DASH_OBS; the real constant is FOCAL_FREE_MIN_OBS). Ground                                                                                        ↓
+   truth is the actual source, not CODE_LOGIC.md.
+
+   Scope (per user)
+                                                                                                                                                                          ↓
+   - DO: fix the paper's framing/structure, describe the mechanisms correctly, and make
+   every technical claim match the actual code (verified per-edit).
+   - DO NOT: change any evaluation numbers / table values. The user will re-run the                                                                                       ↓
+   pipeline and refill the tables themselves (code has changed, so live data will differ).
+   - ASK the user for design-rationale ("why this / why used") whenever the code alone
+   doesn't justify a claim.
+   - Eval auto-generation: confirmed working (metrics.LiveMetrics → report() writes
+   eval_summary.json + eval_*.csv every 30 s; GET /eval/report, POST /eval/reset).                                                                                        ↓
+   Nothing to change here; user just runs make dev and watches a camera.
+                                                                                                                                                                          ↓
+   Methodology (how to stay efficient — verify on delta, never bulk-read code)
+                                                                                                                                                                          ↓
+   For each section we touch: read only the specific function / config.py constant that
+   backs the change. Verification surface = the set of edits, not the codebase. Files that
+   back each section are named below.                                                                                                                                     ↓
+
+   ---
+   Changes to traffic_digital_twin.tex
+
+   1. Map-Anchored Localization / auto-calibration  (biggest rewrite)                                                                                                     ↓
+
+   Location: §Implementation "Map-Anchored Localization", lines ~477–516.                                                                                                 ↓
+   Backed by (verify before editing): transform.py (start_warmup, feed_warmup_frame,
+   _build_clean_plate, commit_calibration, recalibrate, auto_calibrate_from_frame),                                                                                       ↓
+   camera_pose.py:solve_pose, lane_markings.py:detect_lane_markings, config.py.
+
+   Replace the single-frame description (lines 477–484) with the warm-up / clean-plate /                                                                                  ↓
+   commit-once / lock lifecycle:
+   - On camera switch: if a saved pose exists in camera_pose.json → load + lock immediately
+   (no warm-up). Otherwise enter warm-up.                                                                                                                                 ↓
+   - Warm-up: sample frames at CLEANPLATE_SAMPLE_S=0.5 s into a ring buffer (cap
+   CLEANPLATE_MAX_FRAMES=60), evaluate every WARMUP_EVAL_EVERY=30 frames, force commit
+   at WARMUP_MAX_S=90 s.                                                                                                                                                  ↓
+   - Clean plate = per-pixel median over the stack → removes transient vehicles → reveals
+   static lane paint → dashed-line autocorrelation clears its gate (dash_obs ≥ DASH_MIN_OBS=3). This is the root fix for dash_obs=0 on a single compressed frame.
+   - Commit: upscale clean plate, run auto_calibrate_from_frame, save pose, fit scale model                                                                               ↓
+   once, set _locked. After lock the vehicle-scale refit is frozen and the pose never
+   re-solves. POST /recalibrate clears the lock and restarts warm-up.
+                                                                                                                                                                          ↓
+   Then extend the pose-solver paragraph (lines ~486–508) with the focal-free solve:
+   - Default fixed-focal solve: θ=(H, pitch, yaw, x0), focal fixed at FOCAL_RATIO·h,
+   scipy.optimize.least_squares (soft-L1) over 5 rows of lane-edge reprojection + a VP                                                                                    ↓
+   residual; gated by residual < POSE_RESIDUAL_MAX_PX=8 px.
+   - Focal-free solve: when dash_obs ≥ FOCAL_FREE_MIN_OBS=3 (and the depth-span gate
+   FOCAL_FREE_MIN_ROW_FRAC passes), focal becomes a 5th free parameter. The dashed-line
+   period anchors the longitudinal scale that road width alone cannot observe — the
+   geometric fix for speed overestimation. On the clean plate this gate reliably fires; on a
+   single live frame it rarely does (motivating the warm-up accumulator).
+   - Add a short description of lane_markings.py (5 strips, column-intensity autocorrelation,
+   peak_val ≥ 0.15, period grows with depth).
+
+   2. Discussion — reconcile the lateral/longitudinal narrative
+                                                                                                                                                                          ↓
+   Location: §Discussion, lines ~870–948 (esp. the f=1.2h claims at ~876, ~906; the
+   orthogonality argument; the synthetic-analysis footnote).
+   The paper currently argues longitudinal error is only correctable by the ITS                                                                                           ↓
+   speed_scale loop. With focal-free solve this is no longer strictly true. Reframe as:
+   - Longitudinal scale is recovered geometrically by the focal-free solve when dashed
+   lines are observable on the clean plate; the ITS speed_scale loop absorbs the                                                                                          ↓
+   residual (and the case where dashed lines are not visible → focal stays fixed at
+   FOCAL_RATIO·h, leaving the ±15–20 % error to ITS).
+   - Keep the lateral=geometry / longitudinal=scale split, but make ITS the fallback/residual                                                                             ↓
+   corrector rather than the sole longitudinal mechanism.
+   - The synthetic footnote (fixed f=864 px = 1.2×720) still illustrates the fixed-focal
+   regime — keep it but label it as the fixed-focal case, not the only case.
+                                                                                                                                                                          ↓
+   ▎ NOTE (effectiveness claims): describe focal-free as the mechanism and intent. Do not
+   ▎ assert a measured longitudinal-error reduction — that needs the user's re-run data. Keep
+   ▎ effectiveness statements qualitative / pending evaluation.                                                                                                           ↓
+
+   3. Abstract, Contributions, Introduction
+                                                                                                                                                                          ↓
+   Location: Abstract ~64–79; Contributions bullets ~103–124; Intro prose.
+   Fold warm-up clean-plate + focal-free into the calibration contribution (currently bullet 3                                                                            ↓
+   "per-camera scale" + bullet 4 "automatic lane-based calibration"). Make the calibration
+   story: geometric pose solver with focal-free longitudinal anchoring from a warm-up clean                                                                               ↓
+ plate, plus the ITS speed_scale loop for the residual.
+
+ 4. System Design / Background services                                                                                                                                 ↓
+
+   Location: §System Design, lines ~357–375.
+   Add the warm-up broadcasts (calibrating with elapsed_s; auto_calibrated with
+   focal_px, residual_px, warmup_elapsed_s). Backed by main.py (/ws message types).                                                                                       ↓
+
+   5. Visualization (frontend)                                                                                                                                            ↓
+
+   Location: §Visualization, lines ~635–651.                                                                                                                              ↓
+   Add: the Auto-Calibration card now shows a 보정 중 (Ns) warm-up badge, post-commit
+   focal_px + colour-coded residual_px, and a Re-calibrate button (POST /recalibrate).                                                                                    ↓
+   Backed by App.jsx, useWebSocket.js, git d94d898.
+
+   6. Smaller code-accuracy fixes (verify each constant against config.py / module)                                                                                       ↓
+
+   - Speed estimation §: confirm 5-stage matches analytics._speed; optionally add the
+   cross-vehicle MAD outlier rejection (_reject_speed_outliers, K=SPEED_OUTLIER_MAD_K=3)                                                                                  ↓
+   if not already covered. Verify SPEED_WINDOW_S=0.7, SPEED_EMA_ALPHA=0.35,
+   MAX_REASONABLE_KPH=180, SPEED_TRUST_MAX_DEPTH_M=100.
+   - Detection/Tracking §: verify against detector.py (dedup IoU 0.3 / 40 px, IDStabilizer                                                                                ↓
+   80 px, ByteTrack match_thresh 0.35, empty-detection grace 3, YOLO_CONF=0.30).
+   - Aggregation §: optionally add bearing auto-refinement (refine_bearing,
+   BEARING_REFINE_* constants) one sentence.                                                                                                                              ↓
+
+   7. Evaluation section — leave numbers, keep prose consistent
+                                                                                                                                                                          ↓
+   Do not alter any table values. Only adjust surrounding prose so it doesn't contradict
+   the new methodology. Flag (in the handoff message, not in the file) which tables the user
+   should regenerate after re-running. Optionally note the auto-generated CSV set now includes                                                                            ↓
+ eval_depth_inv.csv and eval_anchor_residual.csv.
+                                                                                                                                                                        ↓
+   ---
+   Out of scope
+                                                                                                                                                                          ↓
+   - CODE_LOGIC.md corrections (drift noted but not the deliverable). Mention to user.
+   - Re-running evaluations / editing table data (user does this).
+
+   Verification
+                                                                                                                                                                          ↓
+ - After edits, the .tex must still compile: pdflatex traffic_digital_twin (or Overleaf).
+ Check no undefined refs/labels introduced; algorithms/tables unchanged structurally.                                                                                   ↓
+   - Cross-check every changed technical claim against the named source file (per §Methodology).
+   - Confirm no evaluation numbers were modified (git diff should show only prose/algorithm
+ text in Eval section, zero table-cell changes).

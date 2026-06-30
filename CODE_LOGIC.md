@@ -247,7 +247,7 @@ Lifecycle:
    `φ = atan2(vp_x − w/2, fy)` against the camera→snap bearing (flip 180° if the reverse candidate is
    closer), else fall back to `vp_x > 0.55·w`. Skipped entirely when `fix_direction=True`.
 7. **Road-model pose solver (primary, `camera_pose.solve_pose`).** Feeds multi-level lane edges + VP +
-   dashed-line observations (`dash_obs`, `dash_period_px` from `lane_markings.detect_lane_markings`) +
+   dashed-line observations (`dash_period_obs`, plus `lane_width_obs`, from `lane_markings.detect_lane_markings`) +
    NodeLink `road_width_m` to the pose solver. On success with `residual_px < POSE_RESIDUAL_MAX_PX`
    (8 px) it builds the 4 image↔GPS corners → `_apply_homography_corners` and returns
    (`method="pose"`, carrying `cam_h_m/pitch_deg/yaw_deg/focal_px/near_m/far_m/residual_px`).
@@ -266,7 +266,7 @@ focal-length recovery.
   minimises, over 5 sampled rows, the reprojection residual of the projected left/right road boundaries
   (`±road_width_m/2`) against detected lane edges, plus a vanishing-point residual. Focal fixed at
   `FOCAL_RATIO·h`. `θ = (H, pitch, yaw, x0)`.
-- **Focal-free solve (when `dash_obs ≥ FOCAL_FREE_MIN_DASH_OBS`).** If dashed-line observations from
+- **Focal-free solve (when `dash_period_obs ≥ FOCAL_FREE_MIN_OBS`).** If dashed-line observations from
   `lane_markings.detect_lane_markings` are available and pass the `FOCAL_FREE_MIN_ROW_FRAC` gate, focal
   is added as a 5th free parameter. The dashed-line period (in pixels) anchors the **longitudinal**
   scale that road-width alone cannot observe — fixing the root cause of speed overestimation. On the
@@ -283,19 +283,28 @@ focal-length recovery.
 
 ### 4.3b `lane_markings.py` — dashed lane marking detection
 
-`detect_lane_markings(frame, roi_top_frac, road_rank)` extracts dashed-line observations used by the
-focal-free pose solver.
+`detect_lane_markings(frame, road_rank, roi_top_frac=0.45)` extracts two kinds of lane observation
+used by the focal-free pose solver — lateral lane width and longitudinal dashed-line period.
 
-1. Convert to grayscale, apply Gaussian blur, crop to the road ROI (`roi_top_frac..h`).
-2. For each of `N_STRIPS = 5` horizontal strips: compute a column-intensity profile; subtract a 1-D
-   Gaussian baseline; run 1-D autocorrelation; find the dominant peak at lags `LAG_MIN..LAG_MAX`; if
-   `peak_val ≥ 0.15`, record the period (`period_px`) and the strip's vertical centre pixel.
-3. Fit a linear model `period_px = A·y_px + B` (period grows with depth) to passing strips; the slope
-   encodes the dashed-line perspective foreshortening and is what `solve_pose` uses.
-4. Returns `LaneMarkingResult(dash_obs, dash_period_px, dash_period_slope, lane_w_obs, ...)`; `dash_obs`
-   is the number of strips that cleared the autocorrelation gate. On a **clean plate** (median of 30–60
-   frames) this reliably returns `dash_obs ≥ 3`; on a single compressed highway frame it typically
-   returns 0 (motivating the warm-up accumulator in §4.3).
+1. Convert to grayscale, crop to the road ROI (`roi_top_frac..h`), and apply **CLAHE** contrast
+   normalization (clipLimit 2.0, 8×8 tiles) to absorb lighting variation.
+2. **Lateral (lane width).** Sample `_SAMPLE_ROWS = 5` rows (fractions 0.9→0.1 of the ROI). On each
+   row, find white runs (`> _WHITE_THRESH = 200`, min run `_MIN_LINE_WIDTH_PX = 3`) and take their
+   centres; each adjacent pair within `[_MIN_LANE_WIDTH_PX = 20, 0.6·w]` becomes a
+   `(row_y, lane_width_px)` observation.
+3. **Longitudinal (dash period).** Cluster all detected line-x positions (gap `> 0.05·w` starts a new
+   cluster) into lane-line centres. At each centre, take a vertical strip (half-width
+   `_STRIP_HALF_W = 8`), average columns, and run 1-D autocorrelation (`_autocorr_period`); the first
+   local maximum at lag `≥ _MIN_PERIOD_ROW = 6` with normalized `peak_val ≥ 0.15` is recorded as one
+   `(row_center, period_px)` observation. (No linear slope is fit here — the per-row period pairs are
+   passed straight to `solve_pose`, which anchors the longitudinal scale.)
+4. Returns `LaneMarkingResult` with `lane_width_obs`, `dash_period_obs`, `detected_line_xs`,
+   `n_lanes_detected`, and the road-rank marking constants (`mark_period_m/paint_m/gap_m`). The
+   warm-up early-commit gate (`feed_warmup_frame`) requires both `len(dash_period_obs) ≥
+   DASH_MIN_OBS = 3` **and** `len(lane_width_obs) ≥ LANE_MIN_OBS = 2`. On a **clean plate** (median
+   of 30–60 frames) these gates reliably pass; on a single compressed highway frame `dash_period_obs`
+   is typically empty (motivating the warm-up accumulator in §4.3). `validate_dash_period` cross-checks
+   a measured period against the road-rank spec within `MARK_PERIOD_TOL`.
 
 **Fallback grid (`update_gps_center`).** With no calibration at all, builds a trapezoidal homography
 (top edge 25–75 % of width, near 15 m / far 80 m / half-width 25 m) rotated to the road bearing. Also
@@ -444,7 +453,7 @@ older than `retention_cutoff(HISTORY_RETENTION_DAYS = 14)`.
   - Speed: `SPEED_WINDOW_S=0.7s` → `SPEED_WINDOW_FRAMES`, `SPEED_EMA_ALPHA=0.35`, `SPEED_SPIKE_FACTOR=2.5`, `SPEED_STOP_SPAN_S=1.0` (imported in analytics but stop-decay uses fixed 0.6 multiplier), `SPEED_MIN_KPH=5`, `MAX_REASONABLE_KPH=180`, `SPEED_JITTER_THRESHOLD_M=0.5`, `SPEED_OUTLIER_MAD_K=3.0`, `SPEED_TRUST_MAX_DEPTH_M=100` (GPS distance cutoff; vehicles beyond this are `speed_reliable=False`)
   - Pose/scale: `POSE_RESIDUAL_MAX_PX=8.0`, `SCALE_MIN_OBS=12`, `SCALE_MIN_OBS_SPARSE=8`, `SCALE_SPARSE_AFTER_FRAMES=600`
   - Warm-up / clean-plate: `WARMUP_MAX_S=90.0`, `WARMUP_EVAL_EVERY=30`, `CLEANPLATE_MAX_FRAMES=60`, `CLEANPLATE_SAMPLE_S=0.5`, `DASH_MIN_OBS=3`, `LANE_MIN_OBS=2`
-  - Focal-free solve: `FOCAL_FREE_MIN_DASH_OBS` (min strips for free-focal), `FOCAL_FREE_MIN_ROW_FRAC` (min depth span)
+  - Focal-free solve: `FOCAL_FREE_MIN_OBS=3` (min dash-period obs for free-focal), `FOCAL_FREE_MIN_ROW_FRAC=0.20` (min depth span)
   - Direction: `DIR_DEADZONE_M=0.10`, `DIR_EMA_ALPHA=0.4`
   - Bearing refinement: `BEARING_REFINE_MIN_SAMPLES=30`, `BEARING_REFINE_EMA_ALPHA=0.15`, `BEARING_REFINE_INTERVAL_FRAMES=30`, `BEARING_BROADCAST_MIN_DEG=1.5`
   - Road-shape learning: `ROAD_PTS_REFINE_MIN_SAMPLES=50`, `ROAD_PTS_REFINE_NBINS=10`
@@ -771,3 +780,9 @@ Usage: `python evaluate.py --source <video-or-HLS> --frames 300 [--lat --lon --b
   against the ITS segment speed; learned per-camera `speed_scale` snapshot
   (`eval_speed.csv`, `eval_summary.json`).
 - **Detection counts** — per-class totals as a pipeline sanity check (`eval_detections.csv`).
+- **Depth invariance** — coefficient of variation of each qualifying track's speed across depth
+  (median/mean CV over qualifying tracks); low CV means speed is stable regardless of distance,
+  i.e. the depth correction is working (`eval_depth_inv.csv`).
+- **Anchor residual** — reprojection-residual (px) statistics for calibration anchor points fed via
+  `set_anchor_residual` (written only when ≥ 1 sample): a localization/calibration-quality metric
+  (`eval_anchor_residual.csv`).

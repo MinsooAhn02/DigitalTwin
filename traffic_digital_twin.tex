@@ -72,7 +72,10 @@ that maps pixels along the true road centreline from the national node-link road
 network; (ii) a five-stage speed estimator with physics-based outlier rejection,
 sliding-window least-squares regression, and per-track exponential smoothing; and
 (iii) a per-camera scale factor updated online via an ITS-referenced calibration
-loop. The system additionally supports multi-camera background monitoring,
+loop. The homography itself is produced without manual setup by a warm-up pipeline
+that builds a vehicle-free \emph{clean plate} to expose lane markings and solve camera
+pose, recovering the focal length geometrically when dashed markings are visible. The
+system additionally supports multi-camera background monitoring,
 congestion clustering, and a SQLite time-series history. We describe the
 architecture and key algorithms, and report latency, throughput, tracking
 stability, and localization accuracy over live streams.
@@ -113,13 +116,15 @@ standpoint, are:
   per-track exponential smoothing with spike rejection, and scale correction)
   produces stable speeds despite detection jitter and tracker ID churn.
   \item \textbf{Per-camera scale correction.} Because absolute distance scale is
-  unknowable from an uncalibrated camera, the system maintains a per-camera
-  \texttt{speed\_scale} that decouples geometric projection from absolute speed
+  unknowable from an uncalibrated camera whenever the geometric focal-free solve cannot
+  fire, the system maintains a per-camera \texttt{speed\_scale} that absorbs the residual
+  longitudinal scale error and decouples geometric projection from absolute speed
   accuracy. An ITS-referenced online update loop with adaptive rate $\alpha_s$ (0.15 initially, decaying to 0.01) accumulates the factor across sessions; the current deployment has collected
   factors for 48 cameras (range 0.34--2.25), though multi-session operation is required for full convergence (see Section~\ref{sec:discuss}).
-  \item \textbf{A complete, resilient pipeline.} Automatic lane-based calibration,
-  manual 4-point calibration, dual-path inference (browser canvas and server-side
-  HLS) over a shared detector, multi-camera background monitoring, congestion
+  \item \textbf{A complete, resilient pipeline.} A warm-up clean-plate auto-calibration
+  that solves camera pose with focal-free longitudinal anchoring and locks once committed
+  (manual 4-point calibration available), dual-path inference (browser canvas and
+  server-side HLS) over a shared detector, multi-camera background monitoring, congestion
   clustering, and a historical analytics store.
 \end{itemize}
 
@@ -363,7 +368,10 @@ self-calibration (5\,min), and snapshot all monitored cameras into a SQLite hist
 while recomputing congestion clusters (30\,s). To prevent the FOV polygon from
 flickering during auto-calibration, a slow EMA filter stabilizes near/far distance
 and road-width estimates, holding the initial accepted value fixed until sufficient
-samples accumulate. ROI edits trigger an immediate GPS ring recomputation and
+samples accumulate. During the warm-up calibration phase the backend broadcasts a
+\texttt{calibrating} message (with elapsed time) every 30 frames so the frontend can show
+a progress badge, and emits an \texttt{auto\_calibrated} message carrying the recovered
+focal length and the reprojection residual once the pose commits. ROI edits trigger an immediate GPS ring recomputation and
 broadcast to keep the map view synchronized. The resulting map view is shown in
 Fig.~\ref{fig:map}.
 
@@ -474,24 +482,54 @@ offset; the perpendicular projection follows the bend and eliminates that artifa
 \end{algorithmic}
 \end{algorithm}
 
-When no manual calibration exists, an automatic procedure estimates a homography
-from one frame: Canny edges in the lower image, Hough line filtering, multi-row
-sampling of left/right road edges, least-squares edge fits, vanishing-point
-intersection, a pitch/height estimate from a pinhole model, and a trapezoid-to-GPS
-homography. Direction (which way the camera looks along the road) is resolved by
-matching the \emph{image} road-curve sign against the \emph{map} curve sign, falling
-back to a vanishing-point heading test. A manual 4-point mode remains available for
+When no manual calibration exists, the system does \emph{not} calibrate from a single
+frame. A single compressed CCTV frame rarely exposes the dashed lane markings needed to
+anchor scale---autocorrelation typically returns zero dashed-period observations---and
+calibrating from such a frame systematically overestimates speed. Instead, on camera
+switch the transformer enters a \emph{warm-up} accumulation phase
+(\texttt{transform.start\_warmup}): it samples a half-resolution grayscale road ROI every
+\texttt{CLEANPLATE\_SAMPLE\_S}${=}0.5$\,s into a bounded ring buffer
+(\texttt{CLEANPLATE\_MAX\_FRAMES}${=}60$) and, every \texttt{WARMUP\_EVAL\_EVERY}${=}30$
+frames, tests whether enough lane evidence has accumulated to commit early; a commit is
+forced after \texttt{WARMUP\_MAX\_S}${=}90$\,s. The \emph{clean plate}---the per-pixel
+median of the buffered frames (\texttt{\_build\_clean\_plate})---removes transient vehicles
+and compression artefacts and reveals the static lane paint, so that the dashed-marking
+detector clears its gate ($\ge$\,\texttt{DASH\_MIN\_OBS}${=}3$ dashed-period observations).
+If a pose was saved for the camera in a previous session it is loaded immediately and the
+warm-up is skipped.
+
+On commit (\texttt{commit\_calibration}) the clean plate is upscaled to full resolution and
+a homography is estimated from its lane geometry: Canny edges in the lower image, Hough line
+filtering, multi-row sampling of left/right road edges, least-squares edge fits, and
+vanishing-point intersection. Direction (which way the camera looks along the road) is
+resolved by matching the \emph{image} road-curve sign against the \emph{map} curve sign,
+falling back to a vanishing-point heading test. A manual 4-point mode remains available for
 maximum accuracy. Fig.~\ref{fig:calib} shows an automatic calibration result.
 
 The primary auto-calibration path is a road-model \emph{pose solver}
 (\texttt{camera\_pose.solve\_pose}): the sampled lane edges, vanishing point, and
-NodeLink road width are fitted to a four-parameter pinhole-camera model ($H$,
-pitch, yaw, lateral offset~$x_0$) via \texttt{scipy.optimize.least\_squares}
-(soft-L1 loss). A per-row reprojection residual gates the output ($<$8\,px); on
-success the solved pose is converted to four image--GPS corner pairs and used to
-build both homographies. The pose is then persisted per camera to
-\texttt{camera\_pose.json} so each session refines the prior, with a cold-start
-fallback chain (saved prior $\to$ vehicle-bbox rough pose $\to$ GPS-grid).
+NodeLink road width are fitted to a pinhole-camera model via
+\texttt{scipy.optimize.least\_squares} (soft-L1 loss). By default the focal length is
+fixed at \texttt{FOCAL\_RATIO}$\,{\cdot}\,h = 1.2h$ and four parameters are solved
+(height~$H$, pitch, yaw, lateral offset~$x_0$).
+\textbf{Focal-free solve.} When the clean plate yields enough dashed-marking
+observations ($\ge$\,\texttt{FOCAL\_FREE\_MIN\_OBS}${=}3$, spanning at least
+\texttt{FOCAL\_FREE\_MIN\_ROW\_FRAC} of the frame height), the focal length is promoted
+to a fifth free parameter. The dashed-line \emph{period} measured at several image rows
+anchors the \emph{longitudinal} (depth) scale that road width alone cannot
+observe---recovering the focal length geometrically is the direct fix for the speed
+overestimation a fixed-focal assumption causes. This gate fires reliably on the median
+clean plate but rarely on a single live frame, which is precisely why the warm-up
+accumulator exists. The dashed-marking observations come from
+\texttt{lane\_markings.detect\_lane\_markings}: after CLAHE contrast normalization it
+samples vertical strips at detected lane-line positions and takes the dominant 1-D
+autocorrelation period (accepted when the normalized peak $\ge 0.15$), reporting one
+(row, period) pair per strip. A per-row reprojection residual gates the output
+($<$\,\texttt{POSE\_RESIDUAL\_MAX\_PX}${=}8$\,px); on success the solved pose is
+converted to four image--GPS corner pairs and used to build both homographies. The pose
+is then persisted per camera to \texttt{camera\_pose.json} so each session refines the
+prior, with a cold-start fallback chain (saved prior $\to$ vehicle-bbox rough pose $\to$
+GPS-grid).
 A complementary \texttt{vehicle\_calib.json} accumulates a per-camera linear
 pixel-to-distance model ($d = B{\cdot}y_{px} + C$, implied vanishing-point
 $y_v{=}-C/B$) fitted from observed vehicle bounding-box heights; it is restored
@@ -504,8 +542,15 @@ homography, but a large disagreement between the two flags an unreliable
 geometric fit. We do not claim this size-based scale as novel---recovering scene
 scale from known vehicle dimensions is established~\cite{sochor2019,revaud2021};
 here it functions only as a lightweight, training-free cross-check.
-The trapezoid heuristic above serves only as the fallback when the residual exceeds
-the quality gate or lane detection fails.
+The trapezoid heuristic above (pitch from the vanishing point, height from road width
+and a pinhole model) serves only as the fallback when the residual exceeds the quality
+gate or lane detection fails.
+
+\textbf{Commit-once and lock.} On a successful commit the solved pose is saved, the
+vehicle-scale model is fitted once, and the transformer is \emph{locked}: the pose is
+never re-solved and the scale refit is frozen (gated by the lock flag), so a calibrated
+camera cannot drift from later noisy frames. A \texttt{POST /recalibrate} request clears
+the lock, deletes the saved pose, and restarts the warm-up.
 
 \begin{figure}[t]
 \centering
@@ -579,9 +624,10 @@ Cluster $\varepsilon$ & 500\,m (haversine) \\
 All thresholds in Table~\ref{tab:const} were empirically tuned on live ITS streams;
 sensitivity analysis is left as future work.
 
-Two additional reliability mechanisms reduce systematic bias in the speed estimate.
+Three additional reliability mechanisms reduce systematic bias in the speed estimate.
 First, a depth-varying correction factor $\kappa$ is computed from a per-camera vehicle apparent-size model (a linear fit of inverse apparent bbox width versus vertical pixel position), compensating for the depth-dependent projection error of the homography without introducing frame-to-frame position discontinuities.
 Second, vehicles whose GPS position lies more than 100\,m from the camera snap point (\texttt{SPEED\_TRUST\_MAX\_DEPTH\_M}) are flagged \texttt{speed\_reliable=False}: their speed is still displayed, but excluded from the frame average, the ITS calibration input, and speeding alerts, preventing far-field pixel noise from biasing aggregate statistics.
+Third, when the frame average is formed over the reliable vehicles, a robust cross-vehicle filter (\texttt{\_reject\_speed\_outliers}) drops any sample more than $K{=}\texttt{SPEED\_OUTLIER\_MAD\_K}{=}3$ scaled median-absolute-deviations ($1.4826\,\mathrm{MAD}$) from the median (applied only with at least three vehicles), so a single ID-swap or homography spike cannot pull the average that also feeds the \texttt{speed\_scale} statistics.
 
 \subsection{Per-Camera Scale Correction}
 The absolute distance scale of an uncalibrated camera is unknowable from geometry
@@ -611,7 +657,10 @@ frames, each vehicle's inter-frame displacement is projected onto the road beari
 axis and smoothed with an EMA deadzone filter that commits a direction only when
 the smoothed component exceeds an ambiguity threshold. When road bearing is
 unavailable, a horizontal LineZone crossing serves as a fallback and also provides
-In/Out counts. Dwell
+In/Out counts. The road bearing itself is auto-refined online (\texttt{refine\_bearing}):
+per-frame vehicle-flow vectors are accumulated with double-angle statistics (free of the
+$180^\circ$ direction ambiguity) and, after enough samples, blended into the working
+bearing by a slow EMA. Dwell
 counting flags bottlenecks and parked vehicles (the latter remembered by pixel
 position so they survive ID changes), and a Level-of-Service grade is assigned from
 the active vehicle count. Background monitoring polls additional cameras every
@@ -648,7 +697,11 @@ Outbound) that filter the displayed rows by the movement-vector-based direction;
 per-direction vehicle count is shown in each tab badge, and the min/avg/max speed
 summary is recomputed from the filtered set. Two collapsible cards (Auto Calibration
 Estimate, ITS Speed Comparison) include an info button that opens a modal explanation
-of each metric, adapting to the selected map theme.
+of each metric, adapting to the selected map theme. During warm-up the Auto Calibration
+card shows a progress badge (\emph{Calibrating (Ns)}) driven by the \texttt{calibrating}
+broadcast; after the pose commits it displays the recovered focal length and a
+colour-coded reprojection residual, and exposes a \emph{Re-calibrate} button that issues
+\texttt{POST /recalibrate} to clear the lock and restart the warm-up.
 
 %=============================================================================
 \section{Evaluation}\label{sec:eval}
@@ -873,10 +926,11 @@ The homography is accurate inside the calibration quadrilateral and extrapolates
 with growing error toward the far field; we mitigate this with the dual-matrix
 calibration, the regression window, and lane-based auto-calibration, but a
 residual error remains on poorly observed cameras.
-Automatic calibration assumes a focal length of $1.2\times$ image height (unknown
-intrinsics), giving a $\pm$15--20\,\% scale uncertainty per FoV mismatch. It also
-fails when lane markings are not visible (night, rain, dense traffic), falling back
-to an approximate grid.
+Automatic calibration recovers the focal length geometrically (the focal-free pose
+solve, Section~\ref{sec:impl}) only when dashed lane markings are visible on the warm-up
+clean plate; otherwise it falls back to a fixed focal length of $1.2\times$ image height
+(unknown intrinsics), leaving a $\pm$15--20\,\% FoV-dependent scale uncertainty, and to an
+approximate grid when lane detection fails entirely (night, rain, dense traffic).
 Road width is inferred from lane count and assumed bidirectional, so one-way roads
 are over-wide. The nearest node-link road is occasionally the wrong one (e.g., a
 camera near both a national route and an expressway), which displaces the FOV
@@ -891,8 +945,9 @@ single ``accuracy'' mechanism. A controlled synthetic analysis---projecting vehi
 onto a circular-arc centreline of known curvature with exact ground-truth positions
 and recovering them through both the flat homography and Algorithm~\ref{alg:curved}---yields
 a more precise account of what each component does.\footnote{Synthetic conditions:
-pinhole camera at $10$\,m height, $18^\circ$ downward pitch, focal length $f=864$\,px
-($1.2\times$ a $720$\,px frame height), snap point $10$\,m ahead of the camera;
+pinhole camera at $10$\,m height, $18^\circ$ downward pitch, focal length fixed at
+$f=864$\,px ($1.2\times$ a $720$\,px frame height, modelling the fixed-focal fallback
+regime), snap point $10$\,m ahead of the camera;
 circular-arc roads of radius $R\in\{80,120,200,300,500,1000,\infty\}$\,m over a
 $160$\,m corridor; vehicles placed with up to $\pm3.5$\,m lane offset and $1.5$\,px
 detection noise. Errors are exact since ground-truth positions are known by
@@ -904,8 +959,9 @@ homography already recovers ground positions correctly on a planar curve, since
 every point of the curve lies on the same $z{=}0$ plane the homography was fitted
 to; in this regime the centreline transform changes accuracy negligibly. The
 displacement that matters in practice comes instead from the focal-length assumption
-in the automatic calibration path ($f_y = 1.2h$, a $\pm$15--20\,\% FoV-dependent
-scale error), and it falls almost entirely in the \emph{longitudinal} (depth)
+in the fixed-focal calibration regime ($f_y = 1.2h$, a $\pm$15--20\,\% FoV-dependent
+scale error)---which the focal-free solve removes when dashed markings are observable on
+the clean plate---and it falls almost entirely in the \emph{longitudinal} (depth)
 direction rather than laterally.
 Second, the original fixed-bearing decomposition in Algorithm~\ref{alg:curved}
 constituted a coordinate artifact: resolving the ENU displacement against the snap
@@ -926,20 +982,22 @@ pose-calibrated cameras the error is dominated by the longitudinal component
 ($29$--$40$\,m, set by focal-scale uncertainty), while the lateral component is small
 ($1.8$--$10.3$\,m) and is the only axis the curved transform alters---changing it by
 under $0.2$\,m when the flat fit is already accurate. The real data thus supports the
-orthogonality claim and the role assignment (geometry for lateral placement, the
-\texttt{speed\_scale} loop for longitudinal scale), while showing that the curved
+orthogonality claim and the role assignment (centreline geometry for lateral placement;
+the focal-free solve and the \texttt{speed\_scale} loop for longitudinal scale), while showing that the curved
 transform is a safeguard that does not degrade a good flat fit rather than a uniform
 accuracy gain.
 The centreline transform addresses only the \emph{lateral} component: it constrains
 vehicle markers and the FOV polygon to the road's true shape on bends, but it cannot
 recover absolute longitudinal scale, since the along-road distance inherits whatever
-scale error the homography carries.
-That residual scale error is absorbed instead by the ITS-referenced
-\texttt{speed\_scale} loop, which converges a per-camera multiplicative factor
-against the official segment speed.
-The two mechanisms are therefore complementary rather than redundant: the geometry
-fixes \emph{where on the road} a vehicle is placed, and the ITS loop fixes
-\emph{how far} the geometry believes it has travelled.
+scale error the homography carries. Longitudinal scale is instead recovered along two
+paths. When dashed lane markings are observable on the clean plate, the focal-free pose
+solve fixes it \emph{geometrically} by recovering the focal length. Whatever residual
+remains---and the entire error in the fixed-focal fallback regime---is absorbed by the
+ITS-referenced \texttt{speed\_scale} loop, which converges a per-camera multiplicative
+factor against the official segment speed.
+The mechanisms are therefore complementary rather than redundant: the centreline geometry
+fixes \emph{where on the road} a vehicle is placed, while the focal-free solve and the ITS
+loop together fix \emph{how far} the geometry believes it has travelled.
 This separation also disciplines evaluation: lateral road-alignment can be judged
 geometrically (markers either lie on the carriageway or they do not), whereas
 longitudinal accuracy is only meaningful against a speed or distance reference.

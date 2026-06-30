@@ -63,6 +63,8 @@ Open `http://localhost:5173` in your browser.
 | `make backend` | Run backend only |
 | `make frontend` | Run frontend only |
 | `make kill` | Force-release port 8000 |
+| `make report` | Build the report PDFs |
+| `make bench NAME="<cctv name>"` | Benchmark backend×tracker on one camera (no server needed); writes `backend/logs/bench/` + prints Markdown/LaTeX. Options: `SECONDS=60 MODE=both\|latency\|tracker` |
 
 ---
 

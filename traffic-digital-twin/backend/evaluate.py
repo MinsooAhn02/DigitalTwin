@@ -106,9 +106,18 @@ def run(args) -> None:
         analytics.road_bearing_deg = args.bearing
     line_tracker = VehicleTracker()
 
-    cap = cv2.VideoCapture(args.source, cv2.CAP_FFMPEG)
-    if not cap.isOpened():
-        raise SystemExit(f"Could not open source: {args.source}")
+    # HLS URLs: use the detector's robust opener (resolves HTTP 302 redirects and
+    # validates that frames actually decode). Local files: plain VideoCapture.
+    if str(args.source).lower().startswith("http"):
+        from detector import open_video_source  # noqa: E402
+        try:
+            cap = open_video_source(args.source)
+        except Exception as exc:
+            raise SystemExit(f"Could not open HLS source: {exc}")
+    else:
+        cap = cv2.VideoCapture(args.source, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            raise SystemExit(f"Could not open source: {args.source}")
 
     # per-stage latency (ms)
     t_yolo: list[float] = []      # isolated detector.detect() (pure YOLO+ROI)
@@ -133,8 +142,18 @@ def run(args) -> None:
     n = 0
     processed = 0
     warmup = max(0, args.warmup)
-    print(f"Processing up to {args.frames} frames (warmup {warmup})…")
-    while processed < args.frames:
+    seconds = args.seconds
+    t_measure_start: float | None = None  # set on first post-warmup frame
+    if seconds is not None:
+        print(f"Measuring for {seconds:.0f}s of decoded video (warmup {warmup} frames)…")
+    else:
+        print(f"Processing up to {args.frames} frames (warmup {warmup})…")
+    while True:
+        if seconds is not None:
+            if t_measure_start is not None and (time.monotonic() - t_measure_start) >= seconds:
+                break
+        elif processed >= args.frames:
+            break
         ok, frame = cap.read()
         if not ok or frame is None:
             print("  stream ended / read failed.")
@@ -188,6 +207,8 @@ def run(args) -> None:
 
         if n <= warmup:
             continue
+        if t_measure_start is None:
+            t_measure_start = time.monotonic()
         processed += 1
 
         # record latency
@@ -217,7 +238,11 @@ def run(args) -> None:
                 moving_frames += 1
 
         if processed % 50 == 0:
-            print(f"  {processed}/{args.frames}  (vehicles this frame: {len(vehicles)})")
+            if seconds is not None:
+                el = time.monotonic() - t_measure_start
+                print(f"  {processed} frames / {el:.0f}s  (vehicles: {len(vehicles)})")
+            else:
+                print(f"  {processed}/{args.frames}  (vehicles this frame: {len(vehicles)})")
 
     cap.release()
 
@@ -343,6 +368,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Traffic Digital Twin evaluation harness")
     p.add_argument("--source", required=True, help="Video file path or HLS URL")
     p.add_argument("--frames", type=int, default=300, help="Frames to measure (after warmup)")
+    p.add_argument("--seconds", type=float, default=None,
+                   help="Measure for N seconds of decoded video instead of a fixed frame count")
     p.add_argument("--warmup", type=int, default=20, help="Warmup frames to skip from stats")
     p.add_argument("--lat", type=float, default=None, help="Camera latitude (optional, for transform)")
     p.add_argument("--lon", type=float, default=None, help="Camera longitude (optional)")

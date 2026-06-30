@@ -6,7 +6,12 @@ PIP_EXE  = $(VENV)\Scripts\pip.exe
 PY_EXE   = $(VENV)\Scripts\python.exe
 UVICORN  = $(VENV)\Scripts\uvicorn.exe
 
-.PHONY: dev report _check-python _setup-venv _setup-torch _setup-pip _setup-nodelink _setup-engine _setup-npm
+.PHONY: dev report bench _check-python _setup-venv _setup-torch _setup-pip _setup-nodelink _setup-engine _setup-npm
+
+# bench 기본값 (덮어쓰기: make bench NAME="국도3호선 성남 대원IC" SECONDS=60 MODE=both)
+NAME    ?=
+SECONDS ?= 60
+MODE    ?= both
 
 # ── 메인 진입점 ──────────────────────────────────────────────────────
 dev: _check-python _setup-venv _setup-torch _setup-pip _setup-nodelink _setup-engine _setup-npm
@@ -21,6 +26,14 @@ report:
 	@if not exist "..\report\img" mkdir "..\report\img"
 	cd ..\report && for %%f in (report_base report_contribution) do (echo [report] building %%f.pdf ... && pdflatex -interaction=nonstopmode -halt-on-error %%f.tex >nul && bibtex %%f >nul && pdflatex -interaction=nonstopmode %%f.tex >nul && pdflatex -interaction=nonstopmode %%f.tex >nul || echo [report] FAILED: %%f -- pdflatex 가 PATH에 있는지 확인하세요.)
 	@echo [report] done: ..\report\report_base.pdf, ..\report\report_contribution.pdf
+
+# ── 벤치마크: 카메라 이름으로 backend×tracker 비교 측정 ────────────────
+# 사용법: make bench NAME="국도3호선 성남 대원IC" [SECONDS=60] [MODE=both|latency|tracker]
+# 결과: backend\logs\bench\ 에 CSV/JSON + 콘솔에 Markdown/LaTeX 표.
+# 서버(make dev) 없이도 동작 — ITS API로 카메라를 직접 해석합니다.
+bench:
+	@if "$(NAME)"=="" (echo 사용법: make bench NAME="카메라이름" [SECONDS=60] [MODE=both^|latency^|tracker] & exit /b 1)
+	"$(PY_EXE)" backend\benchmark.py --name "$(NAME)" --seconds $(SECONDS) --mode $(MODE)
 
 # ── Python 3.13 체크 ─────────────────────────────────────────────────
 _check-python:

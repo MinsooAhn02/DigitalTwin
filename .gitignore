@@ -28,7 +28,7 @@ node-link-data/*.dbf
 node-link-data/*.shx
 node-link-data/*.prj
 node-link-data/*.cpg
-node-link-data/*.sqlite
+node-link-data/*.sqlite*
 
 # 트래픽 히스토리 DB (런타임 누적, 용량 증가)
 traffic-digital-twin/backend/history.sqlite*

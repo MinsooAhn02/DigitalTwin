@@ -2189,11 +2189,21 @@ async def live_loop(stream) -> None:
 
                     # bearing 갱신
                     bearing = analytics.road_bearing_deg or 0.0
+                    _dir_confident = (
+                        bool(calib_info.get("direction_confident")) if calib_info else False
+                    )
                     if ok:
                         if analytics.road_bearing_deg is None:
                             analytics.road_bearing_deg = used_bearing
                         elif abs((used_bearing - bearing + 180) % 360 - 180) > 90:
-                            analytics.road_bearing_deg = used_bearing
+                            # 180° 반전은 방향 신뢰가 확실할 때만 채택; 아니면 prior 유지.
+                            if _dir_confident:
+                                analytics.road_bearing_deg = used_bearing
+                            else:
+                                logger.info(
+                                    "commit bearing %.1f°가 prior %.1f°와 180° 차이지만 "
+                                    "방향 비신뢰 → prior 유지", used_bearing, bearing)
+                                used_bearing = bearing
 
                     # 성공 시 pose 저장; fallback(heuristic)은 저장 안 함
                     if ok and calib_info and calib_info.get("method") == "pose":

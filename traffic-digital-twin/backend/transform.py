@@ -1021,29 +1021,38 @@ class PerspectiveTransformer:
         #     cand_B: B_cam = bearing_deg + 180° - phi  (T→F 방향이 VP 방향)
         #   카메라 GPS → snap GPS 방위(B_to_road)에 더 가까운 후보를 선택.
         #   (CCTV는 도로 쪽을 향해 설치되므로 B_cam ≈ B_to_road)
+        # ── 방향(F→T / T→F) 결정 — 저신뢰 추측이 올바른 prior를 뒤집지 않도록 ──
+        # 우선순위: (1) 이름/ITS 확정 fix_direction → 절대 반전 안 함,
+        #           (2) 강한 곡률 매칭(영상 곡률이 임계 마진 초과)일 때만 반전,
+        #           (3) VP+지도 방위가 명확한 마진을 가질 때만 반전, 그 외엔 기권(prior 유지).
         image_curve_sign, image_curve_px = self._image_curve_sign(left_pts, right_pts, w)
         curve_flip, curve_info = self._curvature_flip_candidate(image_curve_sign)
-        direction_source = "fixed" if fix_direction else "vp"
+        direction_source = "prior"
+        direction_confident = False
+        do_flip = False
 
-        if curve_flip is not None:
+        if fix_direction:
+            direction_source = "fixed"
+            direction_confident = True
+
+        elif curve_flip is not None and abs(image_curve_px) >= max(10.0, w * 0.02):
             direction_source = "curvature"
-            if curve_flip:
-                bearing_deg = (bearing_deg + 180.0) % 360.0
+            direction_confident = True
+            do_flip = bool(curve_flip)
             logger.info(
-                "curve direction: image=%s(%.1fpx) map_ft=%s(%.1fm) "
+                "curve direction(confident): image=%s(%.1fpx) map_ft=%s(%.1fm) "
                 "map_tf=%s(%.1fm) -> %s",
                 image_curve_sign, image_curve_px,
                 curve_info.get("map_ft_sign"), curve_info.get("map_ft_curve_m", 0.0),
                 curve_info.get("map_tf_sign"), curve_info.get("map_tf_curve_m", 0.0),
-                "T->F" if curve_flip else "F->T",
+                "T->F" if do_flip else "F->T",
             )
-        elif not fix_direction:
-            phi_deg = math.degrees(math.atan2(vp_x - w / 2.0, fy))
 
+        else:
+            phi_deg = math.degrees(math.atan2(vp_x - w / 2.0, fy))
             cand_a_cam = (bearing_deg - phi_deg) % 360.0          # F→T 방향이 VP
             cand_b_cam = (bearing_deg + 180.0 - phi_deg) % 360.0  # T→F 방향이 VP
 
-            flip = False
             if (cam_lat is not None and cam_lon is not None
                     and self._gps_center_lat != 0.0):
                 d_north = (self._gps_center_lat - cam_lat) * 110574.0
@@ -1051,30 +1060,33 @@ class PerspectiveTransformer:
                            * 111320.0 * math.cos(math.radians(cam_lat)))
                 cam_dist = math.hypot(d_north, d_east)
 
-                if cam_dist > 2.0:
+                if cam_dist > 5.0:
                     b_to_road = math.degrees(math.atan2(d_east, d_north)) % 360.0
                     diff_a = abs(((cand_a_cam - b_to_road + 180) % 360) - 180)
                     diff_b = abs(((cand_b_cam - b_to_road + 180) % 360) - 180)
-                    flip = diff_b < diff_a
-                    logger.info(
-                        "VP+지도 방향: phi=%.1f° cam→road=%.1f° "
-                        "F→T_cam=%.1f°(Δ%.0f°) T→F_cam=%.1f°(Δ%.0f°) → %s",
-                        phi_deg, b_to_road,
-                        cand_a_cam, diff_a, cand_b_cam, diff_b,
-                        "T→F 선택" if flip else "F→T 선택",
-                    )
+                    # 두 후보의 정렬차가 충분히 크고, 선택 후보가 도로를 향할 때만 신뢰.
+                    if abs(diff_a - diff_b) >= 20.0 and min(diff_a, diff_b) <= 60.0:
+                        do_flip = diff_b < diff_a
+                        direction_source = "vp"
+                        direction_confident = True
+                        logger.info(
+                            "VP+지도 방향(confident): phi=%.1f° cam→road=%.1f° "
+                            "F→T_cam=%.1f°(Δ%.0f°) T→F_cam=%.1f°(Δ%.0f°) → %s",
+                            phi_deg, b_to_road,
+                            cand_a_cam, diff_a, cand_b_cam, diff_b,
+                            "T→F" if do_flip else "F→T",
+                        )
+                    else:
+                        logger.info("VP 방향 모호 → prior 유지(기권): Δa=%.0f Δb=%.0f",
+                                    diff_a, diff_b)
                 else:
-                    flip = vp_x > w * 0.55
-                    logger.info("VP 방향 fallback(cam≈snap): vp_x=%.0f/%.0f → %s",
-                                vp_x, w, "반전" if flip else "유지")
+                    logger.info("VP 방향 기권(cam≈snap, dist=%.1fm) → prior 유지", cam_dist)
             else:
-                flip = vp_x > w * 0.55
-                logger.info("VP 방향 fallback(cam GPS 없음): vp_x=%.0f/%.0f → %s",
-                            vp_x, w, "반전" if flip else "유지")
+                logger.info("VP 방향 기권(cam GPS 없음) → prior 유지")
 
-            if flip:
-                bearing_deg = (bearing_deg + 180.0) % 360.0
-                logger.info("bearing %.1f°로 반전", bearing_deg)
+        if do_flip:
+            bearing_deg = (bearing_deg + 180.0) % 360.0
+            logger.info("bearing %.1f°로 반전 (%s)", bearing_deg, direction_source)
 
         # ── 5c. Road-model 포즈 솔버 (主 캘리브) ───────────────────────
         # 차선 엣지 + VP + 도로폭으로 카메라 물리 포즈를 역산(camera_pose.solve_pose).
@@ -1133,6 +1145,7 @@ class PerspectiveTransformer:
                         "far_m":            round(far_m, 1),
                         "road_length_m":    round(max(0.0, far_m - near_m), 1),
                         "direction_source": direction_source,
+                        "direction_confident": direction_confident,
                         "image_curve_sign": image_curve_sign,
                     }
         logger.info("포즈 솔브 실패/품질미달(residual=%.1f) — 휴리스틱 폴백", residual)
@@ -1216,6 +1229,7 @@ class PerspectiveTransformer:
             "pitch_deg":     round(pitch_deg, 1),
             "road_length_m": round(road_length_m, 1),
             "direction_source": direction_source,
+            "direction_confident": direction_confident,
             "image_curve_sign": image_curve_sign,
             "image_curve_px": round(image_curve_px, 1),
             "map_ft_sign": curve_info.get("map_ft_sign"),

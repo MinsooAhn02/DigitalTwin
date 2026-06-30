@@ -760,8 +760,9 @@ values). There are two ways to obtain them.
 per-stage latency (track / transform / analytics) plus tracking, speed, and detection
 stats; the browser path (`/ws/detect`) adds tracking/speed/detection stats. So simply
 running `make dev` and watching a camera accumulates measurements automatically:
-- `history_sampler_loop` flushes `backend/eval_*.csv` + `backend/eval_summary.json` every
-  30 s (only once frames have been processed).
+- `history_sampler_loop` flushes `backend/logs/eval_*.csv` + `backend/logs/eval_summary.json`
+  every 30 s (only once frames have been processed). The output dir is `metrics.LOGS_DIR`
+  (= `backend/logs/`); any stale `backend/eval_*.json` are leftovers from older runs.
 - `GET /eval/report` returns the current aggregate as JSON (including a ready-to-paste
   Markdown table) and writes the files immediately.
 - `POST /eval/reset` clears the accumulator to start a fresh experiment.

@@ -1915,6 +1915,7 @@ async def live_loop(stream) -> None:
     _switch_retry_at: float = 0.0           # 재시도 허용 시각 (monotonic)
     _SWITCH_MAX_RETRY = 2
     _SWITCH_RETRY_DELAY = 2.0               # 재시도 간격 (초). FFmpeg timeout 10s 기준 총 ~24s
+    _dir_validated = False                  # Step 2: 세션당 1회 방향 검증 수행 플래그
     global _stream_fps, _latest_frame_jpeg
 
     logger.info("Live 루프 대기 중 — 지도에서 CCTV를 클릭하여 스트림을 시작하세요")
@@ -1930,6 +1931,7 @@ async def live_loop(stream) -> None:
             _switch_retry_cam = cam
             _switch_retry_count = 0
             _switch_retry_at = now_mono
+            _dir_validated = False   # 새 카메라 세션 → 방향 검증 재무장
         elif (_switch_retry_cam is not None
               and _switch_retry_count < _SWITCH_MAX_RETRY
               and now_mono >= _switch_retry_at):
@@ -2284,6 +2286,35 @@ async def live_loop(stream) -> None:
                     **({"roi_gps_ring": roi_ring} if roi_ring else {}),
                     **_last_calib_info,
                 })
+
+            # Step 2: 관측 모션으로 heading 방향(F→T/T→F) 검증 — 세션당 1회.
+            # 잠금(commit 완료) + 수동보정 아님일 때만. 카메라 GPS 거리와 along-축
+            # 모션이 반대로 일치하면 prior 방향이 180° 뒤집힌 것 → 교정 재보정.
+            if (not _dir_validated and _current_cam is not None
+                    and _transformer.locked and not _transformer.is_calibrated):
+                _verdict = analytics.validate_direction()
+                if _verdict is not None:
+                    _vn, _vmean = analytics.direction_vote_stats()
+                    _dir_validated = True
+                    logger.info("방향 검증: votes=%d mean=%.2f → %s", _vn, _vmean, _verdict)
+                    if _verdict == "flip":
+                        _corrected = ((analytics.road_bearing_deg or 0.0) + 180.0) % 360.0
+                        analytics.road_bearing_deg = _corrected
+                        _p = _transformer._warmup_params or {}
+                        _ck = roi_manager.camera_key(_current_cam.get("cctvurl", ""))
+                        _atomic_delete_json(CAMERA_POSE_PATH, _ck)
+                        _transformer.recalibrate()
+                        _transformer.start_warmup(
+                            bearing_deg=_corrected,
+                            road_width_m=_p.get("road_width_m",
+                                                _current_cam.get("road_width_m") or 7.0),
+                            fix_direction=True,
+                            cam_lat=_p.get("cam_lat", _current_cam.get("lat")),
+                            cam_lon=_p.get("cam_lon", _current_cam.get("lon")),
+                            road_rank=_p.get("road_rank", ""),
+                        )
+                        logger.warning("방향 반전 감지 → %.1f°로 교정 재보정 시작", _corrected)
+                        await _broadcast({"type": "calibrating", "elapsed_s": 0.0})
 
         elapsed = time.perf_counter() - t0
         if elapsed > target_interval:

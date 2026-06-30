@@ -224,8 +224,66 @@ def _auto_tracker_tier() -> str:
     return "cpu"
 
 
+_BOXMOT_NP2_PATCHED = False
+
+
+def _patch_boxmot_numpy2() -> None:
+    """boxmot 12.x × NumPy 2.x 호환 패치 (boxmot issue #2207).
+
+    KalmanFilterXYSR.unfreeze가 history box((4,1))를 언패킹한 뒤 ``w / float(h)``를
+    호출하는데, NumPy 2.x는 1-원소 배열의 스칼라 변환을 막아
+    'only 0-dimensional arrays can be converted to Python scalars'로 실패한다.
+    이 경로는 관측중심 재업데이트(OcSort/DeepOcSort/BotSort)에서 트랙이 가림 후
+    재등장할 때마다 호출되므로, 실패 시 추적이 stale 상태로 정체된다.
+    박스 언패킹을 스칼라로 평탄화한 동일 로직으로 메서드를 교체한다(NumPy 1.x/2.x 모두 호환).
+    """
+    global _BOXMOT_NP2_PATCHED
+    if _BOXMOT_NP2_PATCHED:
+        return
+    try:
+        from copy import deepcopy
+        from collections import deque
+        from boxmot.motion.kalman_filters.aabb.xysr_kf import KalmanFilterXYSR
+
+        def _unfreeze(self):
+            if self.attr_saved is None:
+                return
+            new_history = deepcopy(list(self.history_obs))
+            self.__dict__ = self.attr_saved
+            self.history_obs = deque(list(self.history_obs)[:-1], maxlen=self.max_obs)
+            occur = [int(d is None) for d in new_history]
+            indices = np.where(np.array(occur) == 0)[0]
+            index1, index2 = indices[-2], indices[-1]
+            box1, box2 = new_history[index1], new_history[index2]
+            # NumPy 2.x: (4,1) 박스를 스칼라로 평탄화해 float() 변환이 동작하게 함.
+            x1, y1, s1, r1 = np.asarray(box1, dtype=float).reshape(-1)[:4]
+            w1, h1 = np.sqrt(s1 * r1), np.sqrt(s1 / r1)
+            x2, y2, s2, r2 = np.asarray(box2, dtype=float).reshape(-1)[:4]
+            w2, h2 = np.sqrt(s2 * r2), np.sqrt(s2 / r2)
+            time_gap = index2 - index1
+            dx, dy = (x2 - x1) / time_gap, (y2 - y1) / time_gap
+            dw, dh = (w2 - w1) / time_gap, (h2 - h1) / time_gap
+            for i in range(index2 - index1):
+                x, y = x1 + (i + 1) * dx, y1 + (i + 1) * dy
+                w, h = w1 + (i + 1) * dw, h1 + (i + 1) * dh
+                s, r = w * h, w / float(h)
+                new_box = np.array([x, y, s, r]).reshape((4, 1))
+                self.update(new_box)
+                if not i == (index2 - index1 - 1):
+                    self.predict()
+                    self.history_obs.pop()
+            self.history_obs.pop()
+
+        KalmanFilterXYSR.unfreeze = _unfreeze
+        _BOXMOT_NP2_PATCHED = True
+        logger.info("boxmot KalmanFilterXYSR.unfreeze NumPy2 호환 패치 적용 (issue #2207)")
+    except Exception as exc:
+        logger.warning("boxmot NumPy2 패치 실패: %s", exc)
+
+
 def _build_tracker(tier: str, device: Any) -> Any:
     """boxmot tracker 인스턴스 생성. 실패 시 ByteTrack으로 폴백."""
+    _patch_boxmot_numpy2()
     from boxmot import ByteTrack, OcSort, BotSort, DeepOcSort
 
     cfg = _TRACKER_CONFIGS.get(tier, _TRACKER_CONFIGS["cpu"])

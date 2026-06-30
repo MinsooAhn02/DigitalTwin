@@ -36,10 +36,11 @@
 \newcommand{\figorbox}[2]{%
   \IfFileExists{img/#1}{\includegraphics[width=\linewidth]{#1}}{%
   \IfFileExists{figures/#1}{\includegraphics[width=\linewidth]{#1}}{%
+  \IfFileExists{report/img/#1}{\includegraphics[width=\linewidth]{#1}}{%
   \IfFileExists{../poster/#1}{\includegraphics[width=\linewidth]{#1}}{%
   \IfFileExists{#1}{\includegraphics[width=\linewidth]{#1}}{%
     \fbox{\parbox[c][3.2cm][c]{0.92\linewidth}{\centering\small\itshape
-      [figure placeholder: \texttt{\detokenize{#1}}]\\#2}}}}}}}
+      [figure placeholder: \texttt{\detokenize{#1}}]\\#2}}}}}}}}
 
 \begin{document}
 
@@ -708,8 +709,8 @@ colour-coded reprojection residual, and exposes a \emph{Re-calibrate} button tha
 %=============================================================================
 Measurements are produced from the real pipeline in two ways. While the system runs
 (\texttt{make dev}), an in-process collector records per-frame stage latency,
-tracking, speed, and detection statistics and flushes \texttt{eval\_*.csv} and
-\texttt{eval\_summary.json} every 30\,s (also on demand via \texttt{GET /eval/report});
+tracking, speed, and detection statistics and flushes \texttt{logs/eval\_*.csv} and
+\texttt{logs/eval\_summary.json} every 30\,s (also on demand via \texttt{GET /eval/report});
 an offline harness (\texttt{backend/evaluate.py}) reproduces the same metrics over a
 live HLS source for controlled benchmarks. The system auto-selects the inference backend
 (TensorRT\,$\to$\,ONNX Runtime\,$\to$\,PyTorch) and tracker tier (ByteTrack\,/\,OC-SORT\,/\,BoT-SORT\,/\,DeepOC-SORT by GPU VRAM).
@@ -728,8 +729,8 @@ conditions are held constant. Each table is an independent measurement run, so t
 shared TensorRT\,+\,OC-SORT operating point differs slightly across
 Tables~\ref{tab:latency}--\ref{tab:tracker}, and the tracking-stability counts vary
 with the traffic present at each capture time. Speed and vehicle-count figures in
-Table~\ref{tab:track} are from the TensorRT\,+\,OC-SORT run and reflect
-nighttime traffic at this specific location; they are included to confirm the
+Table~\ref{tab:track} are from a separate, longer live TensorRT\,+\,OC-SORT run on
+National Route\,3 (Seongnam Daewon\,IC, 6{,}877 frames); they are included to confirm the
 pipeline produces plausible output, not as ground-truth benchmarks.
 
 \begin{table}[t]
@@ -785,7 +786,7 @@ wider p95 (18.5\,ms vs 8.9\,ms).
 
 \begin{table}[t]
 \caption{Tracking stability, speed distribution, and detection breakdown
-(TensorRT\,+\,OC-SORT run, 1{,}000 frames, nighttime).}
+(TensorRT\,+\,OC-SORT run, 6{,}877 frames, National Route\,3 Seongnam Daewon\,IC).}
 \label{tab:track}
 \centering
 \small
@@ -793,25 +794,26 @@ wider p95 (18.5\,ms vs 8.9\,ms).
 \toprule
 Metric & Value \\
 \midrule
-Frames processed              & 1{,}000 \\
-Unique tracks                 & 12 \\
-Track creation events (re-entries + re-acquisitions) & 58 (4.83$\times$ unique tracks) \\
-Mean track lifetime (frames)  & 124.2 \\
-Median track lifetime (frames) & 131.5 \\
-Max track lifetime (frames)   & 229 \\
+Frames processed              & 6{,}877 \\
+Unique tracks                 & 556 \\
+Track creation events (re-entries + re-acquisitions) & 2{,}164 (3.89$\times$ unique tracks) \\
+Mean track lifetime (frames)  & 96.7 \\
+Median track lifetime (frames) & 63.5 \\
+Max track lifetime (frames)   & 611 \\
 \midrule
-Vehicle speed -- mean (km/h)  & 90.9 \\
-Vehicle speed -- median (km/h) & 78.2 \\
-Vehicle speed -- p95 (km/h)   & 174.2$^{\dagger}$ \\
-\% moving observations        & 79.6\,\% \\
-Total speed observations      & 1{,}186 of 1{,}490 detections$^{\ddagger}$ \\
+Vehicle speed -- mean (km/h)  & 85.7 \\
+Vehicle speed -- median (km/h) & 79.9 \\
+Vehicle speed -- p95 (km/h)   & 175.3$^{\dagger}$ \\
+\% moving observations        & 84.4\,\% \\
+Total speed observations      & 45{,}393 of 53{,}772 detections$^{\ddagger}$ \\
 \midrule
-Detections -- car             & 1{,}424 \\
-Detections -- truck           & 66 \\
+Detections -- car             & 42{,}866 \\
+Detections -- truck           & 10{,}088 \\
+Detections -- bus             & 818 \\
 \bottomrule
 \end{tabular}
 \vspace{2pt}
-{\footnotesize $^{\dagger}$Far-field outliers; median 78.2\,km/h is representative.\\
+{\footnotesize $^{\dagger}$Far-field outliers; median 79.9\,km/h is representative.\\
 $^{\ddagger}$Speed requires ${\ge}W$ track-history frames; single-frame detections excluded.}
 \end{table}
 

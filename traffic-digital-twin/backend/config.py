@@ -205,6 +205,16 @@ BEARING_REFINE_INTERVAL_FRAMES: int = int(os.getenv("BEARING_REFINE_INTERVAL_FRA
 # Minimum angular change (deg) before re-broadcasting updated heading.
 BEARING_BROADCAST_MIN_DEG: float = float(os.getenv("BEARING_BROADCAST_MIN_DEG", "1.5"))
 
+# ── Direction (F→T / T→F) validation from observed motion (Step 2) ─────────
+# Resolves a 180° heading flip post-commit by comparing each vehicle's along-axis
+# motion sign against its camera-distance change sign (camera GPS = absolute anchor).
+# Minimum per-track votes before a verdict is trusted.
+DIR_VALIDATE_MIN_SAMPLES: int = int(os.getenv("DIR_VALIDATE_MIN_SAMPLES", "40"))
+# Mean-vote magnitude required to act: < -MARGIN ⇒ flip, > +MARGIN ⇒ ok, else undecided.
+DIR_VALIDATE_MARGIN: float = float(os.getenv("DIR_VALIDATE_MARGIN", "0.4"))
+# Per-frame camera-distance change deadzone (m) below which a vehicle casts no vote.
+DIR_VALIDATE_DIST_DEADZONE_M: float = float(os.getenv("DIR_VALIDATE_DIST_DEADZONE_M", "0.10"))
+
 # ── Road-shape learning from vehicle GPS traces ───────────────────────────────
 # Minimum GPS positions before attempting road_pts refinement.
 ROAD_PTS_REFINE_MIN_SAMPLES: int = int(os.getenv("ROAD_PTS_REFINE_MIN_SAMPLES", "50"))

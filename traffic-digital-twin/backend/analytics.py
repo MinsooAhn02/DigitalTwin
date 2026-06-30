@@ -104,6 +104,9 @@ from config import (
     SPEED_TRUST_MAX_DEPTH_M,
     DIR_DEADZONE_M,
     DIR_EMA_ALPHA,
+    DIR_VALIDATE_MIN_SAMPLES,
+    DIR_VALIDATE_MARGIN,
+    DIR_VALIDATE_DIST_DEADZONE_M,
     BEARING_REFINE_MIN_SAMPLES,
     BEARING_REFINE_EMA_ALPHA,
     ROAD_PTS_REFINE_MIN_SAMPLES,
@@ -187,6 +190,11 @@ class TrafficAnalytics:
         self._flow_sin2: float = 0.0
         self._flow_cos2: float = 0.0
         self._flow_n: int = 0
+        # Step 2 direction validation: along-axis motion sign vs camera-distance sign.
+        # Camera GPS is the absolute anchor that breaks the 180° flip symmetry.
+        self._dist_prev: dict[int, float] = {}   # per-track camera distance (m)
+        self._dir_vote_sum: float = 0.0          # Σ sign(d_along_ema)·sign(d_dist)
+        self._dir_vote_n: int = 0
         # Road-shape learning: GPS positions of moving vehicles for road_pts refinement
         self._gps_trace: deque = deque(maxlen=1000)
         # ITS 구간속도 비교 자동 보정
@@ -223,6 +231,9 @@ class TrafficAnalytics:
             self._flow_sin2 = 0.0
             self._flow_cos2 = 0.0
             self._flow_n = 0
+            self._dist_prev.clear()
+            self._dir_vote_sum = 0.0
+            self._dir_vote_n = 0
             self._gps_trace.clear()
             self._speed_samples.clear()
             self._spd_log_last.clear()
@@ -587,6 +598,24 @@ class TrafficAnalytics:
             )
             self._dir_ema[tid] = new_ema
 
+            # Step 2: vote whether the bearing is correctly oriented. The along-axis
+            # motion sign must agree with the camera-distance change sign (camera GPS is
+            # the absolute anchor unaffected by a 180° bearing flip). Net-negative votes
+            # ⇒ bearing is reversed (see validate_direction).
+            if self.cam_lat is not None and self.cam_lon is not None:
+                R_lat = 110574.0
+                R_lon = 111320.0 * math.cos(math.radians(self.cam_lat))
+                dist = math.hypot((v.lat - self.cam_lat) * R_lat,
+                                  (v.lon - self.cam_lon) * R_lon)
+                prev_dist = self._dist_prev.get(tid)
+                self._dist_prev[tid] = dist
+                if (prev_dist is not None
+                        and abs(new_ema) > DIR_DEADZONE_M
+                        and abs(dist - prev_dist) > DIR_VALIDATE_DIST_DEADZONE_M):
+                    agree = (new_ema > 0) == ((dist - prev_dist) > 0)
+                    self._dir_vote_sum += 1.0 if agree else -1.0
+                    self._dir_vote_n += 1
+
             if new_ema < -DIR_DEADZONE_M:
                 dir_now = "In"
             elif new_ema > DIR_DEADZONE_M:
@@ -807,6 +836,32 @@ class TrafficAnalytics:
                 (current + BEARING_REFINE_EMA_ALPHA * angle_diff) % 360, 2
             )
             return self.road_bearing_deg
+
+    def validate_direction(self) -> str | None:
+        """Step 2: observed-motion verdict on whether the heading is 180° reversed.
+
+        Uses votes accumulated in `_assign_directions` comparing along-axis motion sign
+        against camera-distance change sign (camera GPS = absolute anchor). Returns:
+          "flip" — strong evidence the bearing is reversed,
+          "ok"   — strong evidence the bearing is correct,
+          None   — not enough samples / undecided.
+        """
+        with self._lock:
+            n = self._dir_vote_n
+            if n < DIR_VALIDATE_MIN_SAMPLES:
+                return None
+            mean_vote = self._dir_vote_sum / n
+            if mean_vote < -DIR_VALIDATE_MARGIN:
+                return "flip"
+            if mean_vote > DIR_VALIDATE_MARGIN:
+                return "ok"
+            return None
+
+    def direction_vote_stats(self) -> tuple[int, float]:
+        """(vote count, mean vote) for diagnostics/logging."""
+        with self._lock:
+            n = self._dir_vote_n
+            return n, (self._dir_vote_sum / n if n else 0.0)
 
     def _dwell_update(self, v: VehicleState) -> None:
         if v.is_parked:

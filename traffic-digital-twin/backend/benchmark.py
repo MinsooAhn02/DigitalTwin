@@ -159,7 +159,10 @@ def main() -> None:
 
     bbox = DEFAULT_BBOX
     if args.bbox:
-        bbox = tuple(float(x) for x in args.bbox.split(","))  # type: ignore[assignment]
+        parts = args.bbox.split(",")
+        if len(parts) != 4:
+            raise SystemExit("--bbox must be 'minX,maxX,minY,maxY' (4 comma-separated values)")
+        bbox = tuple(float(x) for x in parts)  # type: ignore[assignment]
 
     cam = resolve_camera(args.name, bbox)
     bearing = get_bearing(cam["lat"], cam["lon"], cam["name"])

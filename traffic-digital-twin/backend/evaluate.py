@@ -348,8 +348,9 @@ def run(args) -> None:
 
     print("\n### Speed distribution (measured, km/h)\n")
     print(_md_table(["Metric", "Value"], [[k, v] for k, v in speed_stats.items()]))
-    print("\n> Compare `mean`/`median` against the ITS segment speed for this camera/time "
-          "to fill the speed-accuracy table.")
+    print("\n> NOTE: this harness uses the uncalibrated grid homography (no warm-up / "
+          "focal-free pose), so these speeds are rough sanity checks, not pose-calibrated "
+          "figures. Latency and tracking metrics above are unaffected by calibration.")
 
     print("\n### Detection class totals\n")
     print(_md_table(["Class", "Detections"],

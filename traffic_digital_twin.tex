@@ -740,7 +740,9 @@ the traffic present at each capture time. The latency/tracker runs use the uncal
 grid homography (timing is independent of calibration quality); the tracking-stability,
 speed, and detection figures in Table~\ref{tab:track} are from a separate, longer
 \emph{pose-calibrated} live run on the same camera (6{,}877 frames), included to confirm
-the pipeline produces plausible output, not as ground-truth benchmarks.
+the pipeline produces plausible output, not as ground-truth benchmarks. The FPS columns
+report the offline harness's sequential single-stream throughput, which is lower than the
+deployed pipeline's effective rate under dense traffic.
 
 \begin{table}[t]
 \caption{Inference backend comparison (OC-SORT tracker fixed, ${\approx}60$\,s per backend,

@@ -72,11 +72,12 @@ challenges. We address them with three mechanisms: (i) a two-stage curved transf
 that maps pixels along the true road centreline from the national node-link road
 network; (ii) a five-stage speed estimator with physics-based outlier rejection,
 sliding-window least-squares regression, and per-track exponential smoothing; and
-(iii) a per-camera scale factor updated online via an ITS-referenced calibration
-loop. The homography itself is produced without manual setup by a warm-up pipeline
-that builds a vehicle-free \emph{clean plate} to expose lane markings and solve camera
-pose, recovering the focal length geometrically when dashed markings are visible. The
-system additionally supports multi-camera background monitoring,
+(iii) geometric recovery of the absolute speed scale via a \emph{focal-free} pose solve
+that reads the focal length from the dashed lane-marking period. The homography is
+produced without manual setup by a warm-up pipeline that builds a vehicle-free
+\emph{clean plate} to expose those markings and solve camera pose. An ITS-referenced
+segment-speed cross-check is available as an optional refinement but is disabled by
+default. The system additionally supports multi-camera background monitoring,
 congestion clustering, and a SQLite time-series history. We describe the
 architecture and key algorithms, and report latency, throughput, tracking
 stability, and localization accuracy over live streams.
@@ -116,12 +117,12 @@ standpoint, are:
   (duplicate skip, physics jump guard, sliding-window least-squares regression,
   per-track exponential smoothing with spike rejection, and scale correction)
   produces stable speeds despite detection jitter and tracker ID churn.
-  \item \textbf{Per-camera scale correction.} Because absolute distance scale is
-  unknowable from an uncalibrated camera whenever the geometric focal-free solve cannot
-  fire, the system maintains a per-camera \texttt{speed\_scale} that absorbs the residual
-  longitudinal scale error and decouples geometric projection from absolute speed
-  accuracy. An ITS-referenced online update loop with adaptive rate $\alpha_s$ (0.15 initially, decaying to 0.01) accumulates the factor across sessions; the current deployment has collected
-  factors for 48 cameras (range 0.34--2.25), though multi-session operation is required for full convergence (see Section~\ref{sec:discuss}).
+  \item \textbf{Geometric speed-scale recovery.} The absolute longitudinal (speed) scale is
+  recovered \emph{geometrically} by a focal-free pose solve that reads the focal length from
+  the dashed lane-marking period on the warm-up clean plate, removing the dependence on any
+  external speed reference. An ITS-referenced \texttt{speed\_scale} cross-check remains
+  available as an \emph{optional, off-by-default} refinement for cameras where dashed
+  markings are not observable.
   \item \textbf{A complete, resilient pipeline.} A warm-up clean-plate auto-calibration
   that solves camera pose with focal-free longitudinal anchoring and locks once committed
   (manual 4-point calibration available), dual-path inference (browser canvas and
@@ -171,9 +172,10 @@ mode and a vanishing-point/lane auto-calibration path.
 \textbf{ITS dashboards and data.} National ITS portals~\cite{its_openapi} publish
 CCTV streams and aggregated segment speeds, but typically as separate views; the
 aggregated speed is never fed back to correct the vision-derived estimate, leaving
-any geometric scale error unchecked. We bridge this gap by \emph{fusing} the
-segment speed into the pipeline as an online calibration signal for per-camera
-scale correction.
+any geometric scale error unchecked. Our pipeline can \emph{optionally} fuse the segment
+speed back as a soft cross-check, though by default it recovers the longitudinal scale
+geometrically (focal-free solve) and uses the ITS segment speed only as an independent
+comparison.
 Congestion grouping uses density-based clustering~\cite{dbscan} and convex
 hulls~\cite{andrew1979}; service levels follow the Highway Capacity
 Manual~\cite{los_hcm}. The visualization uses deck.gl~\cite{deckgl} over
@@ -282,8 +284,8 @@ calibration, and self-correction layers that turn raw tracks into a map-anchored
 twin. Among the compared systems, ours is the only one supporting the full set of
 columns in Table~\ref{tab:sota}; we nonetheless note that this breadth reflects a
 systems-integration contribution rather than a single-metric advance, and that the
-per-axis novelty (curved localization, ITS-referenced scale) is what we claim as
-new.
+per-axis novelty (curved localization, focal-free geometric scale recovery) is what we
+claim as new.
 
 %=============================================================================
 \section{System Design and Architecture}\label{sec:design}
@@ -630,12 +632,17 @@ First, a depth-varying correction factor $\kappa$ is computed from a per-camera 
 Second, vehicles whose GPS position lies more than 100\,m from the camera snap point (\texttt{SPEED\_TRUST\_MAX\_DEPTH\_M}) are flagged \texttt{speed\_reliable=False}: their speed is still displayed, but excluded from the frame average, the ITS calibration input, and speeding alerts, preventing far-field pixel noise from biasing aggregate statistics.
 Third, when the frame average is formed over the reliable vehicles, a robust cross-vehicle filter (\texttt{\_reject\_speed\_outliers}) drops any sample more than $K{=}\texttt{SPEED\_OUTLIER\_MAD\_K}{=}3$ scaled median-absolute-deviations ($1.4826\,\mathrm{MAD}$) from the median (applied only with at least three vehicles), so a single ID-swap or homography spike cannot pull the average that also feeds the \texttt{speed\_scale} statistics.
 
-\subsection{Per-Camera Scale Correction}
-The absolute distance scale of an uncalibrated camera is unknowable from geometry
-alone, so a residual scale error persists after geometric calibration. The system
-maintains a per-camera \texttt{speed\_scale} factor that multiplies the geometric
-speed estimate (Algorithm~\ref{alg:speed}, line~6) and is updated online using the
-ITS official segment speed as a soft reference. The ITS signal carries inherent
+\subsection{Optional ITS Scale Cross-Reference}
+The focal-free pose solve (Section~\ref{sec:impl}-B) recovers the longitudinal scale
+geometrically from the dashed-marking period, so it is the primary mechanism for absolute
+speed scale; a residual error can remain only on cameras where dashed markings are not
+observable. As an \emph{optional} refinement---\textbf{disabled by default}
+(\texttt{ITS\_DRIVES\_SCALE=false})---the system can maintain a per-camera
+\texttt{speed\_scale} factor that multiplies the geometric speed estimate
+(Algorithm~\ref{alg:speed}, line~6), updated online using the ITS official segment speed as
+a soft reference. With the option off (the default and evaluated configuration), the ITS
+segment speed is shown only as an independent comparison (Section~\ref{sec:impl}-F) and is
+never fed back into the estimate. When enabled, the ITS signal carries inherent
 uncertainty---aggregated over $\approx$1\,km segments at 5-minute intervals, the
 reported direction may not match the camera's field of view---so the loop adapts
 slowly:
@@ -721,22 +728,24 @@ TensorRT\,10.16, ONNX\,Runtime\,1.25, Windows\,11. Absolute latency and FPS are
 hardware-specific; the relative ordering across tiers and backends is the
 transferable result.
 
-\textit{Run conditions.} Model \texttt{YOLO26m}, source: National Route\,6
-Namyangju Dongmakgol Intersection (live ITS HLS, nighttime), 1{,}000 frames
-per run (20-frame warmup excluded). Backend and tracker are varied across runs
-as shown in Tables~\ref{tab:latency} and~\ref{tab:tracker}; all other
-conditions are held constant. Each table is an independent measurement run, so the
-shared TensorRT\,+\,OC-SORT operating point differs slightly across
-Tables~\ref{tab:latency}--\ref{tab:tracker}, and the tracking-stability counts vary
-with the traffic present at each capture time. Speed and vehicle-count figures in
-Table~\ref{tab:track} are from a separate, longer live TensorRT\,+\,OC-SORT run on
-National Route\,3 (Seongnam Daewon\,IC, 6{,}877 frames); they are included to confirm the
-pipeline produces plausible output, not as ground-truth benchmarks.
+\textit{Run conditions.} Model \texttt{YOLO26m}, source: National Route\,3 Seongnam
+Daewon\,IC (live ITS HLS, dense daytime traffic), measured for ${\approx}60$\,s per
+configuration (20-frame warmup excluded), so the frame count per run varies with
+throughput. Backend and tracker are varied across runs as shown in
+Tables~\ref{tab:latency} and~\ref{tab:tracker}; all other conditions are held constant.
+Each table is an independent measurement run over a different 60\,s window, so the shared
+TensorRT\,+\,OC-SORT operating point differs slightly across
+Tables~\ref{tab:latency}--\ref{tab:tracker}, and the tracking-stability counts vary with
+the traffic present at each capture time. The latency/tracker runs use the uncalibrated
+grid homography (timing is independent of calibration quality); the tracking-stability,
+speed, and detection figures in Table~\ref{tab:track} are from a separate, longer
+\emph{pose-calibrated} live run on the same camera (6{,}877 frames), included to confirm
+the pipeline produces plausible output, not as ground-truth benchmarks.
 
 \begin{table}[t]
-\caption{Inference backend comparison (OC-SORT tracker fixed, 1{,}000 frames,
-RTX\,4070 Laptop, National Route\,6 Namyangju). Track stage includes YOLO\,+\,BoxMOT
-end-to-end. Results from the archived evaluation run stored in the repository.}
+\caption{Inference backend comparison (OC-SORT tracker fixed, ${\approx}60$\,s per backend,
+RTX\,4070 Laptop, National Route\,3 Seongnam Daewon\,IC, dense daytime traffic). Track stage
+includes YOLO\,+\,BoxMOT end-to-end.}
 \label{tab:latency}
 \centering
 \small
@@ -744,18 +753,18 @@ end-to-end. Results from the archived evaluation run stored in the repository.}
 \toprule
 Backend & Mean\,(ms) & p95\,(ms) & FPS \\
 \midrule
-TensorRT FP16  &  6.7 &  8.7 & 147.6 \\
-PyTorch (CUDA) &  8.4 & 11.6 & 117.6 \\
-ONNX Runtime   & 13.9 & 16.8 &  71.5 \\
+TensorRT FP16  & 16.3 & 19.9 & 59.6 \\
+PyTorch (CUDA) & 28.0 & 33.1 & 35.1 \\
+ONNX Runtime   & 29.3 & 38.1 & 33.4 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[t]
-\caption{Tracker comparison (TensorRT FP16 backend fixed, 1{,}000 frames,
-National Route\,6 Namyangju, archived run).
-BoT-SORT overhead is from OSNet appearance ReID; ByteTrack shows more ID
-creation events due to the absence of re-identification.}
+\caption{Tracker comparison (TensorRT FP16 backend fixed, ${\approx}60$\,s each,
+National Route\,3 Seongnam Daewon\,IC, dense daytime traffic).
+BoT-SORT overhead is from OSNet appearance ReID; ByteTrack fragments heavily without
+re-identification.}
 \label{tab:tracker}
 \centering
 \scriptsize
@@ -763,26 +772,28 @@ creation events due to the absence of re-identification.}
 \toprule
 Tracker & Mean\,(ms) & p95\,(ms) & FPS & IDs & ID\,ev. & Life\,(fr.) \\
 \midrule
-ByteTrack &  6.6 &  7.8 & 150.9 & 27 & 286 &  35.6 \\
-OC-SORT   &  6.6 &  8.9 & 150.2 &  8 &  18 &  80.0 \\
-BoT-SORT  & 10.7 & 18.5 &  93.4 &  5 &  16 & 132.0 \\
+ByteTrack & 43.9 & 61.2 & 22.4 & 946 & 2940 &  13.1 \\
+OC-SORT   & 16.3 & 19.9 & 59.6 & 272 & 1609 & 121.1 \\
+BoT-SORT  & 60.7 & 78.6 & 16.3 &  79 &  214 & 176.0 \\
 \bottomrule
 \multicolumn{7}{@{}l}{\scriptsize IDs = unique track IDs; ID ev. = ID creation events; Life = mean lifetime.}\\
 \end{tabular}
 \end{table}
 
-TensorRT FP16 achieves the lowest latency (6.7\,ms mean), 2.1$\times$ faster
-than ONNX Runtime and 1.25$\times$ faster than PyTorch on the same GPU.
-The evaluation harness additionally breaks end-to-end time into pipeline stages;
-the homography transform and analytics stages each contribute under 0.5\,ms
-(median 0.14\,ms and 0.40\,ms respectively), confirming that the localization
-and speed-estimation layers add negligible overhead to the dominant tracking stage.
-ByteTrack and OC-SORT are iso-latency ($\approx$6.6\,ms), but OC-SORT's
-occlusion-centric cost function reduces ID creation events from 286 to 18
-and more than doubles mean track lifetime (35.6\,$\to$\,80.0 frames); BoT-SORT
-adds OSNet ReID, further reducing ID events to 16 and improving lifetime to
-132.0 frames at the cost of 1.6$\times$ higher latency (10.7\,ms) and a
-wider p95 (18.5\,ms vs 8.9\,ms).
+TensorRT FP16 achieves the lowest track-stage latency (16.3\,ms mean), 1.8$\times$ faster
+than ONNX Runtime (29.3\,ms) and 1.7$\times$ faster than PyTorch (28.0\,ms) on the same GPU.
+The harness additionally breaks end-to-end time into pipeline stages; the homography
+transform and analytics stages each contribute under 0.5\,ms (median 0.06\,ms and 0.43\,ms
+respectively), confirming that the localization and speed-estimation layers add negligible
+overhead to the dominant tracking stage. With the backend fixed to TensorRT, the dense
+daytime scene separates the trackers sharply. OC-SORT is simultaneously the fastest
+(16.3\,ms) and far more stable than ByteTrack, whose lack of re-identification fragments the
+heavy traffic into 946 short-lived tracks (2{,}940 ID-creation events, 13-frame mean
+lifetime) and inflates association cost to 43.9\,ms. BoT-SORT's OSNet appearance ReID yields
+the most stable tracks (79 IDs, 214 ID events, 176-frame mean lifetime) but is the slowest
+(60.7\,ms mean, 78.6\,ms p95) due to the embedding network. OC-SORT therefore gives the best
+stability/latency trade-off for this workload, while BoT-SORT is preferable when maximum
+ID persistence matters and the GPU budget allows.
 
 \begin{table}[t]
 \caption{Tracking stability, speed distribution, and detection breakdown
@@ -817,29 +828,24 @@ Detections -- bus             & 818 \\
 $^{\ddagger}$Speed requires ${\ge}W$ track-history frames; single-frame detections excluded.}
 \end{table}
 
-\textbf{Per-camera scale calibration.}
-Because no per-vehicle ground truth exists for public CCTV, the system maintains a
-per-camera \texttt{speed\_scale} updated online via the ITS-referenced loop.
-Table~\ref{tab:scale} summarises the factors accumulated across all 48 cameras whose
-streams have been monitored (\texttt{speed\_scale.json}). These factors are still
-\emph{accumulating} rather than failed: convergence requires sustained multi-session
-operation per camera (Section~\ref{sec:discuss}), and the snapshot reported here
-captures a single monitoring pass over many cameras rather than repeated visits to
-any one. Crucially, the system produces map-anchored output throughout this
-accumulation---the scale factor refines the speed estimate but is not a precondition
-for localization.
-The majority (62.5\,\%) fall within $\pm$20\,\% of 1.0, confirming that the geometric
-calibration is roughly correct for most cameras; the left tail (20.8\,\% below 0.8)
-reflects cameras with steep pitch or far-field observation zones that compress apparent
-displacement, while the right tail (8.3\,\% above 1.2) corresponds to
-wide-angle or low-mounted cameras that exaggerate it.
+\textbf{Optional ITS scale cross-reference (archived).}
+The default pipeline recovers the speed scale geometrically (the focal-free solve), so the
+ITS \texttt{speed\_scale} loop is an optional, off-by-default refinement rather than a core
+mechanism. For completeness we report an archived snapshot from earlier operation with the
+loop enabled: Table~\ref{tab:scale} summarises the factors accumulated across the cameras
+monitored in that mode. The distribution is informative as a diagnostic---it shows how far
+the raw geometric projection deviated per camera before any focal-free correction: the bulk
+cluster within $\pm$20\,\% of 1.0 (geometric calibration roughly correct), while the tails
+reflect steep-pitch / far-field cameras that compress apparent displacement (below~0.8) and
+wide-angle / low-mounted cameras that exaggerate it (above~1.2). It is \emph{not} part of
+the default evaluated configuration.
 
 \begin{table}[t]
-\caption{Distribution of learned \texttt{speed\_scale} factors across 48 cameras
-(\texttt{speed\_scale.json}). Values below~1.0 indicate geometric underestimation
-of displacement (common when the camera axis is oblique to the road); values
-above~1.0 indicate overestimation. Factors are still accumulating toward
-convergence at this snapshot (single-pass monitoring; see Section~\ref{sec:discuss}).}
+\caption{Distribution of \texttt{speed\_scale} factors from an \emph{archived} run with the
+optional ITS loop enabled (off by default in the current pipeline, which recovers scale
+geometrically via the focal-free solve). Values below~1.0 indicate geometric
+underestimation of displacement (camera axis oblique to the road); above~1.0,
+overestimation. Shown as a per-camera projection-bias diagnostic, not a default-mode result.}
 \label{tab:scale}
 \centering
 \small
@@ -847,13 +853,13 @@ convergence at this snapshot (single-pass monitoring; see Section~\ref{sec:discu
 \toprule
 Range & Cameras & Share \\
 \midrule
-$<0.5$          &  4 &  8.3\,\% \\
-$0.5$--$0.8$    & 10 & 20.8\,\% \\
-$0.8$--$1.2$    & 30 & 62.5\,\% \\
-$>1.2$          &  4 &  8.3\,\% \\
+$<0.5$          &  4 & 10.8\,\% \\
+$0.5$--$0.8$    & 10 & 27.0\,\% \\
+$0.8$--$1.2$    & 19 & 51.4\,\% \\
+$>1.2$          &  4 & 10.8\,\% \\
 \midrule
 \multicolumn{3}{@{}l}{Min / Max: 0.34\,/\,2.25} \\
-\multicolumn{3}{@{}l}{Mean / Median: 0.92\,/\,0.91} \\
+\multicolumn{3}{@{}l}{Mean / Median: 0.90\,/\,0.85} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -991,21 +997,21 @@ accuracy gain.
 The centreline transform addresses only the \emph{lateral} component: it constrains
 vehicle markers and the FOV polygon to the road's true shape on bends, but it cannot
 recover absolute longitudinal scale, since the along-road distance inherits whatever
-scale error the homography carries. Longitudinal scale is instead recovered along two
-paths. When dashed lane markings are observable on the clean plate, the focal-free pose
-solve fixes it \emph{geometrically} by recovering the focal length. Whatever residual
-remains---and the entire error in the fixed-focal fallback regime---is absorbed by the
-ITS-referenced \texttt{speed\_scale} loop, which converges a per-camera multiplicative
-factor against the official segment speed.
+scale error the homography carries. Longitudinal scale is recovered \emph{geometrically} by
+the focal-free pose solve, which reads the focal length from the dashed-marking period when
+those markings are observable on the clean plate. For cameras where they are not, the
+residual scale error can \emph{optionally} be absorbed by the ITS-referenced
+\texttt{speed\_scale} loop (disabled by default), which nudges a per-camera multiplicative
+factor toward the official segment speed.
 The mechanisms are therefore complementary rather than redundant: the centreline geometry
-fixes \emph{where on the road} a vehicle is placed, while the focal-free solve and the ITS
-loop together fix \emph{how far} the geometry believes it has travelled.
+fixes \emph{where on the road} a vehicle is placed, and the focal-free solve fixes
+\emph{how far} the geometry believes it has travelled, with the optional ITS loop available
+only as a fallback cross-check.
 This separation also disciplines evaluation: lateral road-alignment can be judged
 geometrically (markers either lie on the carriageway or they do not), whereas
 longitudinal accuracy is only meaningful against a speed or distance reference.
 
-The ITS-based self-calibration loop uses an adaptive learning rate (0.15 on the first two updates, decaying to 0.01 in later updates, every 5\,min) to treat the ITS segment speed as an imprecise soft reference, since ITS figures reflect 1-km road-segment averages that may not align with the camera's exact observation zone or direction.
-The adaptive schedule accelerates initial convergence for new cameras while preserving accumulated corrections for returning ones, but multi-session operation is still required for the factor to fully stabilize; none of the 48 accumulated cameras had converged at time of evaluation. The scale factors therefore capture the geometric projection bias present at each camera and should be interpreted as a running estimate rather than a definitive calibration.
+When enabled, the optional ITS loop uses an adaptive learning rate (0.15 on the first two updates, decaying to 0.01 thereafter, polled every 5\,min) and treats the ITS segment speed as an imprecise soft reference, since ITS figures reflect 1-km road-segment averages that may not align with the camera's exact observation zone or direction. It is \emph{off by default}: the focal-free geometric solve is the primary scale mechanism, so the pipeline does not depend on ITS convergence. When the loop is used, the accumulated factors should be read as a per-camera projection-bias diagnostic rather than a definitive calibration.
 
 Because the system derives all geographic positions from map geometry rather than
 on-vehicle GPS receivers, localization accuracy is bounded by the quality of the
@@ -1049,12 +1055,12 @@ infrastructure without modification.
 We built a real-time traffic digital twin that localizes vehicles on a map from
 uncalibrated public CCTV and estimates their speed without ground truth. The key
 ideas are a road-centreline-following two-stage transform, a robust five-stage speed
-estimator, and a per-camera scale-correction framework with an ITS-referenced online
-update loop, wrapped in a resilient dual-path pipeline with congestion analytics and
-a historical store. The automatic calibration pipeline---geometric pose solver plus
-the accumulating scale factor---substantially reduces the per-camera manual setup
-required to deploy across many cameras, while the system remains operational even
-before the ITS loop converges.
+estimator, and geometric speed-scale recovery via a focal-free pose solve (with an
+optional, off-by-default ITS segment-speed cross-check), wrapped in a resilient dual-path
+pipeline with congestion analytics and a historical store. The automatic calibration
+pipeline---a warm-up clean-plate pose solver that recovers focal length and scale
+geometrically---substantially reduces the per-camera manual setup required to deploy across
+many cameras, and the system needs no external speed reference to operate.
 
 A distinguishing property is that the system requires \emph{no GPS instrumentation
 on vehicles}: conventional traffic monitoring relies on embedded GPS loggers or

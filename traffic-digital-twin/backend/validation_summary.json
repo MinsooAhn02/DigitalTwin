@@ -1,0 +1,26 @@
+[
+  {
+    "cam_id": "National Route 3 (33)",
+    "method": "flat_gps",
+    "n": 4,
+    "mae": 116.47957993675719,
+    "rmse": 129.9861761827676,
+    "p95": 196.26987188600225,
+    "mae_lat": 13.451313828182709,
+    "mae_along": 114.81343754853606,
+    "near_mae": NaN,
+    "far_mae": NaN
+  },
+  {
+    "cam_id": "National Route 3 (33)",
+    "method": "curved_gps",
+    "n": 4,
+    "mae": 116.47957993675719,
+    "rmse": 129.9861761827676,
+    "p95": 196.26987188600225,
+    "mae_lat": 13.451313828182709,
+    "mae_along": 114.81343754853606,
+    "near_mae": NaN,
+    "far_mae": NaN
+  }
+]

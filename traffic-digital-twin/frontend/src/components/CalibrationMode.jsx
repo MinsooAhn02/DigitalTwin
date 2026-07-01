@@ -105,6 +105,20 @@ export default function CalibrationMode({
     setPairs((prev) => {
       const next = [...prev];
       next[idx] = { ...next[idx], gps: [pendingGps.lat, pendingGps.lon] };
+      
+      // ── 검증 로그 ──────────────────────────────────────────────
+      const pixel = next[idx].pixel;
+      fetch(`${API_BASE}/calibration/check-point`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pixel,
+          gps: [pendingGps.lat, pendingGps.lon],
+        }),
+      }).catch(() => {});  // 로그용이라 에러 무시
+      // ────────────────────────────────────────────────────────────
+
+    
       return next;
     });
     onCancelGps();

@@ -1228,6 +1228,8 @@ async def switch_camera(body: CameraSwitch):
     logger.info("카메라 전환: %s (%.4f, %.4f) snap=(%.4f, %.4f) bearing=%.1f°",
                 body.name, body.lat, body.lon,
                 _current_cam["snap_lat"], _current_cam["snap_lon"], effective_bearing or 0.0)
+    if _current_cam.get("road_pts"):
+        logger.info("road_pts: %s", json.dumps(_current_cam["road_pts"]))
     return {"ok": True, "road": road}
 
 
@@ -1525,19 +1527,56 @@ async def save_calibration(body: CalibBody):
             logger.info("Transformer 캘리브레이션 적용: %s", cam_key)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-
+    # ── flat vs curved 검증 로그 ──────────────────────────────────────
+    if _current_cam and roi_manager.camera_key(_current_cam.get("cctvurl", "")) == cam_key:
+        saved_road_pts = _transformer._road_pts  # 현재 road_pts 보존
+        for i, (px, gt) in enumerate(zip(body.pixel_pts, body.gps_pts)):
+            # flat: road_pts 끄고
+            _transformer._road_pts = None
+            flat_lat, flat_lon = _transformer.pixel_to_gps(px[0], px[1])
+            # curved: road_pts 복원
+            _transformer._road_pts = saved_road_pts
+            curved_lat, curved_lon = _transformer.pixel_to_gps(px[0], px[1])
+            logger.info(
+                "검증점%d: pixel=(%.0f,%.0f) gt=(%.6f,%.6f) flat=(%.6f,%.6f) curved=(%.6f,%.6f)",
+                i, px[0], px[1],
+                gt[0], gt[1],
+                flat_lat, flat_lon,
+                curved_lat, curved_lon,
+            )
     return {"ok": True, "camera_key": cam_key, "corner_gps_pts": corner_gps_pts}
 
 
 @app.delete("/calibration/{camera_key}")
 async def delete_calibration(camera_key: str):
-    """캘리브레이션 삭제 (기본 근사값으로 롤백)."""
+    """캘리브레이션 삭제 후 자동 캘리브레이션 재개."""
     _atomic_delete_json(CALIBRATION_PATH, camera_key)
-    # 현재 카메라면 GPS center 근사값으로 롤백
     if _current_cam and roi_manager.camera_key(_current_cam.get("cctvurl", "")) == camera_key:
         _transformer.update_gps_center(_current_cam["lat"], _current_cam["lon"], bearing_deg=analytics.road_bearing_deg or 0.0)
+        # 수동 캘리브 해제 → 자동 캘리브 다시 시도
+        global _auto_calib_attempts
+        _auto_calib_attempts = 5
+        logger.info("수동 캘리브 삭제 → 자동 캘리브레이션 재개 (%s)", camera_key)
     return {"ok": True}
 
+class PointCheckBody(BaseModel):
+    pixel: list[float]
+    gps:   list[float]
+
+@app.post("/calibration/check-point")
+async def check_point(body: PointCheckBody):
+    u, v = body.pixel
+    saved = _transformer._road_pts
+    _transformer._road_pts = None
+    flat_lat, flat_lon = _transformer.pixel_to_gps(u, v)
+    _transformer._road_pts = saved
+    curved_lat, curved_lon = _transformer.pixel_to_gps(u, v)
+    logger.info(
+        "검증점: pixel=(%.0f,%.0f) gt=(%.6f,%.6f) flat=(%.6f,%.6f) curved=(%.6f,%.6f)",
+        u, v, body.gps[0], body.gps[1],
+        flat_lat, flat_lon, curved_lat, curved_lon,
+    )
+    return {"flat": [flat_lat, flat_lon], "curved": [curved_lat, curved_lon]}
 
 @app.delete("/roi/{camera_key}")
 async def delete_roi(camera_key: str):

@@ -27,6 +27,102 @@ logger = logging.getLogger(__name__)
 # 차종별 알려진 폭 (m) — vehicle apparent size calibration에 사용
 VEHICLE_WIDTHS_M: dict[str, float] = {"car": 1.8, "truck": 2.5, "bus": 2.5}
 
+# 한국 도로 차선 점선 규격 (도로교통법 시행규칙)
+_DASH_LEN_M    = 3.0   # 점선 길이
+_DASH_GAP_M    = 5.0   # 점선 간격
+_DASH_PERIOD_M = 8.0   # 한 주기 (선+간격)
+
+
+def _extract_dash_pairs(
+    edges: np.ndarray,
+    left_pts: list[tuple[float, float]],
+    right_pts: list[tuple[float, float]],
+    frame_wh: tuple[int, int],
+    vp_y: float,
+) -> list[tuple[float, float, float]]:
+    """이미지에서 차선 점선 경계 쌍 추출 → [(v_near, v_far, dist_m), ...].
+
+    차선 중심부를 따라 수직 edge 밀도 프로파일을 샘플링해
+    '밝음→어둠→밝음' 전환점(점선 경계)을 찾는다.
+    반환값의 dist_m은 한 주기(_DASH_PERIOD_M)로 고정
+    (솔버가 근사값 기준으로 focal을 보정하므로 엄밀한 분류 불필요).
+    """
+    w, h = frame_wh
+    if len(left_pts) < 2 or len(right_pts) < 2:
+        return []
+
+    rows_l = np.array([p[0] for p in left_pts])
+    xs_l   = np.array([p[1] for p in left_pts])
+    rows_r = np.array([p[0] for p in right_pts])
+    xs_r   = np.array([p[1] for p in right_pts])
+
+    row_lo = max(int(vp_y + (h - vp_y) * 0.15), int(h * 0.3))
+    row_hi = h - 1
+
+    # 차선 중심 근방 edge 밀도 프로파일
+    profile_rows: list[int] = []
+    densities: list[float] = []
+    for row in range(row_lo, row_hi, 3):
+        xl = float(np.interp(row, rows_l[::-1], xs_l[::-1])) if row >= rows_l.min() else w * 0.3
+        xr = float(np.interp(row, rows_r[::-1], xs_r[::-1])) if row >= rows_r.min() else w * 0.7
+        cx = (xl + xr) / 2.0
+        x0 = max(0, int(cx) - 30)
+        x1 = min(w, int(cx) + 30)
+        density = float(edges[row, x0:x1].mean()) if x1 > x0 else 0.0
+        profile_rows.append(row)
+        densities.append(density)
+
+    if len(densities) < 10:
+        return []
+
+    dens_arr = np.array(densities)
+    rows_arr = np.array(profile_rows)
+    thresh = max(dens_arr.mean() + dens_arr.std() * 0.5, 15.0)
+    high = dens_arr > thresh
+
+    # 연속 high 구간의 시작/끝 = 점선 경계
+    transitions: list[float] = []
+    in_high = False
+    for i, is_h in enumerate(high):
+        if is_h and not in_high:
+            transitions.append(float(rows_arr[i]))
+            in_high = True
+        elif not is_h and in_high:
+            transitions.append(float(rows_arr[i - 1]))
+            in_high = False
+    if in_high:
+        transitions.append(float(rows_arr[-1]))
+
+    # transitions는 단조증가(위→아래 스캔). 짝수 인덱스=start, 홀수=end.
+    # ① 주기 쌍 (2칸 간격, 같은 타입): start→start 또는 end→end = 8m
+    # ② 인접 쌍: start→end = 점선(3m), end→start = 간격(5m)
+    # ②를 포함하면 전환점 2개(점선 1개)에서도 1쌍을 추출할 수 있다.
+    pairs: list[tuple[float, float, float]] = []
+    # 점선 1개에 해당하는 픽셀 gap 범위 (너무 작으면 노이즈, 너무 크면 비인접 쌍)
+    _DASH_MIN_PX = 15   # 최소 15px
+    _DASH_MAX_PX = 120  # 최대 120px (더 멀면 비인접 쌍)
+
+    for i in range(len(transitions) - 2):
+        v_far  = transitions[i]
+        v_near = transitions[i + 2]
+        gap = abs(v_near - v_far)
+        if _DASH_MIN_PX <= gap <= _DASH_MAX_PX:          # ← 필터 추가
+            pairs.append((v_near, v_far, _DASH_PERIOD_M))
+
+    for i in range(len(transitions) - 1):
+        v_far  = transitions[i]
+        v_near = transitions[i + 1]
+        gap = abs(v_near - v_far)
+        dist = _DASH_LEN_M if (i % 2 == 0) else _DASH_GAP_M
+        if _DASH_MIN_PX <= gap <= _DASH_MAX_PX:          # ← 필터 추가
+            pairs.append((v_near, v_far, dist))
+
+    logger.info("점선 경계 %d개 → 쌍 %d개 추출 (임계값=%.1f)", len(transitions), len(pairs), thresh)
+    for v_near, v_far, dist in pairs[:5]:
+        logger.info("dash pair: v_near=%.0f v_far=%.0f dist=%.1fm px_gap=%.0f",
+                v_near, v_far, dist, abs(v_near - v_far))
+    return pairs[:20]
+
 
 def _line_intersection(l1: tuple, l2: tuple) -> tuple[float, float] | None:
     """두 직선(x1,y1,x2,y2)의 교점. 평행하면 None."""
@@ -692,6 +788,19 @@ class PerspectiveTransformer:
             "캘리브레이션 적용 완료: pixel=%s gps=%s",
             pixel_pts, gps_pts,
         )
+        
+            # ── 검증용 로그 ──
+        logger.info("=== 캘리브 검증 로그 ===")
+        for i, (px, gt) in enumerate(zip(pixel_pts, gps_pts)):
+            flat_lat, flat_lon = self._transform_point(self._H_gps, px[0], px[1])
+            curved = self.pixel_to_gps(px[0], px[1])
+            logger.info(
+                "점%d: pixel=(%d,%d) | gt=(%.6f,%.6f) | flat=(%.6f,%.6f) | curved=(%.6f,%.6f)",
+                i, px[0], px[1],
+                gt[0], gt[1],
+                flat_lat, flat_lon,
+                curved[0], curved[1],
+            )
 
     def _apply_homography_corners(
         self,
@@ -916,6 +1025,12 @@ class PerspectiveTransformer:
         # 차선 엣지 + VP + 도로폭으로 카메라 물리 포즈를 역산(camera_pose.solve_pose).
         # 성공·품질충족 시 휴리스틱(섹션 6~10)을 건너뛰고 포즈→호모그래피로 즉시 반환.
         # 실패 시 아래 기존 휴리스틱으로 폴백(behavior 비퇴행).
+
+        # 점선 경계 추출 → dash_pairs가 충분하면 focal도 최적화 변수로 추가
+        dash_pairs = _extract_dash_pairs(edges, left_pts, right_pts, (w, h), vp_y)
+        logger.info("점선 감지 결과: %d쌍 (focal 동적 최적화 %s)",
+                    len(dash_pairs), "활성" if len(dash_pairs) >= 1 else "미활성")
+
         road_model = camera_pose.RoadModel(
             road_width_m=road_width_m,
             bearing_deg=bearing_deg,
@@ -925,6 +1040,7 @@ class PerspectiveTransformer:
         pose, residual = camera_pose.solve_pose(
             left_pts, right_pts, (vp_x, vp_y), road_model, (w, h),
             prior=self._pose_prior,
+            dash_pairs=None,
         )
         if pose is not None and residual < POSE_RESIDUAL_MAX_PX:
             corners = camera_pose.pose_to_corners(pose, road_model, (w, h))

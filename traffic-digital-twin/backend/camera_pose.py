@@ -211,11 +211,13 @@ def _residuals(
     vp: tuple[float, float] | None,
     half_w: float,
     frame_wh: tuple[int, int],
+    dash_pairs: list | None = None,  # [(v_near_px, v_far_px, real_dist_m), ...]
 ) -> np.ndarray:
     w, h = frame_wh
     s_grid = np.linspace(1.0, 400.0, 220)
     res: list[float] = []
     miss_pen = 40.0   # 투영 범위 밖 관측 패널티(px)
+    DASH_WEIGHT = 5.0  # 미터↔픽셀 균형 (점선 1m 오차 ≈ 5px 주치 오차)
 
     for obs, t_lat in ((left_obs, -half_w), (right_obs, +half_w)):
         if len(obs) == 0:
@@ -240,6 +242,28 @@ def _residuals(
             wv = 0.5  # VP 가중치(단일 잡음 추정이라 낮춤)
             res.append(wv * (vp_pred[0] - vp[0]))
             res.append(wv * (vp_pred[1] - vp[1]))
+
+    # ── 점선 거리 잔차 ─────────────────────────────────────────────
+    if dash_pairs:
+        H, pitch, f = theta[0], theta[1], theta[3]
+        R = _rotation(pitch)
+        cy = h / 2.0
+        for v_near, v_far, real_dist_m in dash_pairs:
+            depths: list[float | None] = []
+            for v_px in (v_near, v_far):
+                ray_cam = np.array([0.0, (v_px - cy) / f, 1.0])
+                ray_world = ray_cam @ R   # cam→world
+                rz = ray_world[2]
+                if rz >= -1e-6:
+                    depths.append(None)
+                else:
+                    lam = -H / rz
+                    depths.append(float(lam * ray_world[1]))  # Y=전방거리
+            if None in depths or any(d <= 0 for d in depths if d is not None):
+                res.append(DASH_WEIGHT * real_dist_m)
+                continue
+            est_dist = abs(depths[0] - depths[1])  # type: ignore[operator]
+            res.append(DASH_WEIGHT * (est_dist - real_dist_m))
 
     return np.asarray(res, dtype=np.float64)
 
@@ -274,11 +298,13 @@ def solve_pose(
     road_model: RoadModel,
     frame_wh: tuple[int, int],
     prior: Pose | None = None,
+    dash_pairs: list | None = None,  # [(v_near_px, v_far_px, real_dist_m), ...]
 ) -> tuple[Pose | None, float]:
     """엣지 관측 + VP + 도로폭으로 카메라 포즈를 최소제곱 추정.
 
-    초점거리는 단안 focal/pitch 모호성을 피하려 고정(FOCAL_RATIO·h, prior 있으면 그 값).
-    최적화 변수는 [H, pitch, yaw, x0] 4개.
+    dash_pairs가 MIN_DASH_PAIRS 이상일 때 focal을 5번째 최적화 변수로 추가.
+    점선의 실제 간격(3m/5m/8m)이 깊이 스케일 기준점 역할을 해서 focal/pitch 모호성 해소.
+    없으면 기존 경로(focal 고정, 4변수)로 폴백.
 
     left_pts / right_pts: [(y_row, x), ...] (auto_calibrate_from_frame 형식)
     반환: (Pose 또는 None, residual_px RMS). 실패 시 (None, inf).
@@ -294,25 +320,41 @@ def solve_pose(
 
     half_w = max(road_model.road_width_m, 2.0) / 2.0
     w, h = frame_wh
-    # 초점거리는 고정(prior 또는 명목 FoV). 단안 도로에서 횡방향 도로폭은
-    # 종방향(깊이) 스케일을 결정하지 못하므로(엣지가 단일 소실점만 제공) focal을
-    # 풀면 불안정. focal 고정 → 횡방향 정확, 종방향 잔여 스케일은 speed_scale(ITS)이 흡수.
     f_fixed = prior.focal_px if prior is not None else FOCAL_RATIO * h
 
-    x0 = _initial_opt(vp, f_fixed, frame_wh, left_obs, right_obs, prior)
-    lb = np.array([3.0,  math.radians(2.0),  math.radians(-45.0), -4.0 * half_w])
-    ub = np.array([40.0, math.radians(60.0), math.radians(45.0),  4.0 * half_w])
-    x0 = np.minimum(np.maximum(x0, lb + 1e-6), ub - 1e-6)
+    x0_4 = _initial_opt(vp, f_fixed, frame_wh, left_obs, right_obs, prior)
+    lb_4 = np.array([3.0,  math.radians(2.0),  math.radians(-45.0), -4.0 * half_w])
+    ub_4 = np.array([40.0, math.radians(60.0), math.radians(45.0),  4.0 * half_w])
 
-    def _resid_opt(x: np.ndarray) -> np.ndarray:
-        theta = np.array([x[0], x[1], x[2], f_fixed, x[3]])
-        return _residuals(theta, left_obs, right_obs, vp, half_w, frame_wh)
+    use_dash = bool(dash_pairs and len(dash_pairs) >= 1)
+
+    if use_dash:
+        # focal을 5번째 변수로 추가 — 점선 간격이 깊이 스케일 앵커
+        x0 = np.append(x0_4, f_fixed)
+        lb = np.append(lb_4, 0.5 * h)
+        ub = np.append(ub_4, 2.5 * h)
+        x_scale = [5.0, 0.3, 0.3, float(half_w), h * 0.5]
+        logger.info("점선 %d개 검출 → focal 동적 최적화 활성", len(dash_pairs))
+
+        def _resid_opt(x: np.ndarray) -> np.ndarray:
+            theta = np.array([x[0], x[1], x[2], x[4], x[3]])  # [H,p,y,f,x0]
+            return _residuals(theta, left_obs, right_obs, vp, half_w,
+                              frame_wh, dash_pairs)
+    else:
+        x0, lb, ub = x0_4, lb_4, ub_4
+        x_scale = [5.0, 0.3, 0.3, float(half_w)]
+
+        def _resid_opt(x: np.ndarray) -> np.ndarray:
+            theta = np.array([x[0], x[1], x[2], f_fixed, x[3]])
+            return _residuals(theta, left_obs, right_obs, vp, half_w, frame_wh)
+
+    x0 = np.minimum(np.maximum(x0, lb + 1e-6), ub - 1e-6)
 
     try:
         result = least_squares(
             _resid_opt, x0,
             bounds=(lb, ub), method="trf", loss="soft_l1", f_scale=8.0,
-            max_nfev=200, x_scale=[5.0, 0.3, 0.3, float(half_w)],
+            max_nfev=300, x_scale=x_scale,
         )
     except Exception as exc:
         logger.warning("least_squares 실패: %s", exc)
@@ -321,11 +363,21 @@ def solve_pose(
     resid = result.fun
     rms = float(np.sqrt(np.mean(resid ** 2))) if len(resid) else float("inf")
     x = result.x
-    pose = Pose.from_theta(np.array([x[0], x[1], x[2], f_fixed, x[3]]))
-    logger.info(
-        "solve_pose: H=%.1fm pitch=%.1f° yaw=%.1f° f=%.0fpx x0=%.1fm  residual=%.1fpx",
-        pose.H_m, pose.pitch_deg, pose.yaw_deg, pose.focal_px, pose.x0_m, rms,
-    )
+
+    if use_dash:
+        f_solved = float(x[4])
+        pose = Pose.from_theta(np.array([x[0], x[1], x[2], f_solved, x[3]]))
+        logger.info(
+            "solve_pose(+dash): H=%.1fm pitch=%.1f° yaw=%.1f° "
+            "focal=%.0fpx(기존 %.0f) x0=%.1fm  residual=%.1fpx",
+            pose.H_m, pose.pitch_deg, pose.yaw_deg, f_solved, f_fixed, pose.x0_m, rms,
+        )
+    else:
+        pose = Pose.from_theta(np.array([x[0], x[1], x[2], f_fixed, x[3]]))
+        logger.info(
+            "solve_pose: H=%.1fm pitch=%.1f° yaw=%.1f° f=%.0fpx x0=%.1fm  residual=%.1fpx",
+            pose.H_m, pose.pitch_deg, pose.yaw_deg, pose.focal_px, pose.x0_m, rms,
+        )
     return pose, rms
 
 
@@ -347,6 +399,43 @@ def _visible_s_range(
     return float(s_ok.min()), float(s_ok.max())
 
 
+def _visible_s_range_with_vehicle_fallback(
+    theta: np.ndarray,
+    half_w: float,
+    frame_wh: tuple[int, int],
+    vehicle_depths: list[float] | None = None,
+) -> tuple[float, float] | None:
+    """기하 기반 FOV 범위 추정 + 실측 차량 깊이로 far 보정.
+
+    vehicle_depths: 현재 추적 중인 차량들의 종방향 깊이(m). 기하 추정이
+    실제 가시 범위와 다를 때 차량 위치를 기준점으로 삼아 보정한다.
+    None이면 _visible_s_range와 동일하게 동작.
+    """
+    geo = _visible_s_range(theta, half_w, frame_wh)
+
+    if not vehicle_depths:
+        return geo
+
+    valid = [d for d in vehicle_depths if 5.0 < d < 400.0]
+    if not valid:
+        return geo
+
+    veh_max = float(np.percentile(valid, 90))  # 상위 10% 이상치 제거
+    s_near = geo[0] if geo else 3.0
+    s_far  = geo[1] if geo else 30.0
+
+    if veh_max > s_far:
+        # 차량이 기하 추정보다 더 멀리 보임 → far 확장
+        logger.debug("FOV far 보정: 기하=%.1fm → 차량실측=%.1fm", s_far, veh_max)
+        s_far = veh_max * 0.95
+    elif veh_max < s_far * 0.7:
+        # 기하 far가 실제보다 30%+ 과대 → 축소
+        s_far = veh_max * 1.1
+        logger.debug("FOV far 축소: 기하 과대추정 → %.1fm", s_far)
+
+    return s_near, max(s_far, s_near + 5.0)
+
+
 def pose_to_corners(
     pose: Pose, road_model: RoadModel, frame_wh: tuple[int, int],
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -357,7 +446,7 @@ def pose_to_corners(
     """
     theta = pose.to_theta()
     half_w = max(road_model.road_width_m, 2.0) / 2.0
-    rng = _visible_s_range(theta, half_w, frame_wh)
+    rng = _visible_s_range_with_vehicle_fallback(theta, half_w, frame_wh)
     if rng is None:
         return None
     s_near, s_far = rng

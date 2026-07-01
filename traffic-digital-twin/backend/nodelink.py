@@ -360,7 +360,7 @@ def _road_corridor_pts(
     # doesn't self-intersect at curves. 10 points ≈ one per 30 m on a ±150 m corridor —
     # enough to show the road curve without adjacent offsets crossing each other.
     if len(corridor) > 20:
-        corridor = _subsample_pts(corridor, max_pts=10)
+        corridor = _subsample_pts(corridor, max_pts=30)
 
     return corridor, round(bwd_acc, 1)
 

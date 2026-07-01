@@ -1,0 +1,24 @@
+{
+  "cameras": [
+    {
+      "cam_id": "국도3호선_의정부_장암IC",
+      "camera_gps": [37.7271, 127.0750],
+      "centreline": [
+        [37.7266487, 127.072261],
+        [37.7266603, 127.0725241],
+        [37.7267199, 127.0732687],
+        [37.7268425, 127.0739593],
+        [37.727074, 127.0749726],
+        [37.7270917, 127.0750345],
+        [37.7278567, 127.0777064]
+      ],
+      "_comment": "Fill 'correspondences' with independent landmarks (NOT the 4 calibration points). For each landmark: 'pixel' is (u,v) clicked in the CCTV frame; 'gps' is (lat,lon) read from the satellite image. Provide EITHER 'system_gps' (single method) OR both 'flat_gps' and 'curved_gps' for the ablation. To get those, feed the pixel to your PerspectiveTransformer: flat = the H_gps path, curved = pixel_to_gps with road_pts set.",
+      "correspondences": [
+        {"pixel": [349, 246], "gps": [37.726981, 127.074611]},
+        {"pixel": [497, 217], "gps": [37.727128, 127.074564]},
+        {"pixel": [226,  83], "gps": [37.726869, 127.073253]},
+        {"pixel": [243, 154], "gps": [37.726900, 127.074172]}
+      ]
+    }
+  ]
+}
